@@ -566,6 +566,40 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		active = {{0, bind.total_rows}};
 	}
 	result->active_intervals = std::move(active);
+	if (getenv("ALIGNED_TRACE_INIT")) {
+		FILE *f = fopen("D:/proj/factorlake/init_trace.txt", "w");
+		if (f) {
+			fprintf(f, "aligned=%d active_intervals=[", bind.plan.table.aligned ? 1 : 0);
+			for (auto &iv : result->active_intervals) {
+				fprintf(f, "(%llu,%llu)", (unsigned long long)iv.first, (unsigned long long)iv.second);
+			}
+			fprintf(f, "] ncol=%llu nprojected=%llu\n", (unsigned long long)input.column_ids.size(),
+			        (unsigned long long)result->projected_pos.size());
+			for (idx_t cid = 0; cid < input.column_ids.size(); cid++) {
+				fprintf(f, "  column_id[%llu]=%lld proj=%lld\n", (unsigned long long)cid,
+				        (long long)input.column_ids[cid],
+				        (long long)result->projected_pos[(idx_t)input.column_ids[cid]]);
+			}
+			if (input.filters) {
+				fprintf(f, "  nfilters=%llu\n", (unsigned long long)input.filters->filters.size());
+				for (auto &e : input.filters->filters) {
+					fprintf(f, "    filter_key=%llu\n", (unsigned long long)e.first);
+				}
+			} else {
+				fprintf(f, "  nfilters=0 (null)\n");
+			}
+			fprintf(f, "  nrow_filters=%llu\n", (unsigned long long)result->row_filters.size());
+			for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
+				if (!result->group_active[gi]) {
+					continue;
+				}
+				fprintf(f, "  group[%llu] kept=%llu/%llu\n", (unsigned long long)gi,
+				        (unsigned long long)result->kept_parts[gi].size(),
+				        (unsigned long long)bind.plan.groups[gi].parts.size());
+			}
+			fclose(f);
+		}
+	}
 	return std::move(result);
 }
 
@@ -1022,8 +1056,30 @@ static void ApplyRowFilters(ClientContext &context, DataChunk &chunk, vector<Ali
 	for (auto &rf : filters) {
 		UnifiedVectorFormat vdata;
 		chunk.data[rf.projected_pos].ToUnifiedFormat(count, vdata);
+		if (getenv("ALIGNED_TRACE_INIT")) {
+			FILE *f = fopen("D:/proj/factorlake/filter_trace.txt", "a");
+			if (f) {
+				fprintf(f, "BEFORE pos=%llu ftype=%d count=%llu", (unsigned long long)rf.projected_pos,
+				        (int)rf.filter->filter_type, (unsigned long long)count);
+				if (vdata.sel) {
+					auto *d = UnifiedVectorFormat::GetData<int64_t>(vdata);
+					fprintf(f, " v0=%lld v1=%lld v2=%lld",
+					        (long long)d[vdata.sel->get_index(0)], (long long)d[vdata.sel->get_index(1)],
+					        (long long)d[vdata.sel->get_index(2)]);
+				}
+				fprintf(f, "\n");
+				fclose(f);
+			}
+		}
 		ColumnSegment::FilterSelection(sel, chunk.data[rf.projected_pos], vdata, *rf.filter, *rf.state, count,
 		                               approved);
+		if (getenv("ALIGNED_TRACE_INIT")) {
+			FILE *f = fopen("D:/proj/factorlake/filter_trace.txt", "a");
+			if (f) {
+				fprintf(f, "AFTER  approved=%llu\n", (unsigned long long)approved);
+				fclose(f);
+			}
+		}
 		if (approved == 0) {
 			break;
 		}

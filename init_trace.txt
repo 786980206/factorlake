@@ -1,0 +1,6 @@
+aligned=1 active_intervals=[(0,6000)] ncol=1 nprojected=23
+  column_id[0]=4 proj=0
+  nfilters=1
+    filter_key=0
+  nrow_filters=1
+  group[0] kept=0/4
