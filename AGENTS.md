@@ -301,11 +301,44 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
 ## 17. 当前进度
 
 - [x] 完整 Plan 定稿（本文件）
-- [ ] scoop 安装 ninja
-- [ ] duckdb v1.5.4 源码 clone 到 `duckdb/`
-- [ ] Phase 0：`docs/STORAGE_CONTRACT.md` 定稿
-- [ ] `extension/aligned/` 骨架（CMakeLists + manifest/row_space 解析）
-- [ ] 首次 MSVC 构建 + `LOAD aligned` 验证
+- [x] scoop 安装 ninja（1.13.2）
+- [x] duckdb v1.5.4 源码 clone 到 `duckdb/`（vendored，gitignored；重新拉取命令见 §16）
+- [x] Phase 0：`docs/STORAGE_CONTRACT.md` 定稿（v1.1：commit marker 含 part 名单，见 §9）
+- [x] **Phase 1 Read MVP 完成（2026-08）**：`aligned_table()` / `aligned_scan()` 跑通
+  - 多 Group 并行读取、RG 窗口调度、跨 part/RG 行窗口、Schema Evolution（缺失列补 NULL）、
+    跨 Group 重复列遮蔽、Row Space 校验、commit marker 过滤
+  - 验收：`scripts/test_aligned.ps1` **11/11 PASS**（6000 行 × 3 组、对齐断言 misaligned=0、
+    边界行、错误场景）
+  - 构建产物：`duckdb/build/duckdb_aligned.exe`（shell 输出名已改为可配置 `DUCKDB_SHELL_OUTPUT_NAME`，
+    原因见下）
+- [x] `scripts/gen_testdata.ps1` 测试数据生成器
+- [x] git 仓库（提交历史见 git log）
+- [ ] Phase 2 Projection pushdown（`projection_pushdown=true` + column_ids）
+- [ ] Phase 3 Partition / predicate pushdown（Hive pruning + RG stats）
+- [ ] Phase 4 Parallel scan（atomic task cursor）
+
+### Phase 1 关键经验（必须记住，避免重踩）
+
+1. **`VectorOperations::Copy` 的 5 参语义**：`Copy(source, target, source_count, source_offset, target_offset)`
+   中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。
+   传"行数"会在 `source_offset > count` 时下溢 → 字典向量 selection 越界读 → 崩溃。
+   正确调用：`Copy(src, dst, src_offset + copy_count, src_offset, dst_offset)`。
+2. **Parquet 字符串/字典是零拷贝**：`DictionaryDecoder::Read` 在 `result_offset==0` 时把结果向量
+   做成 DICTIONARY_VECTOR（`Vector::Dictionary`），引用解码器内部的可复用字典。**每个 RG 窗口必须用
+   全新的 `ParquetReaderScanState` 和 `DataChunk`**（勿跨窗口复用；复用会在第二次数据读取时 UAF）。
+3. **1.5 的 `table_function_t` 返回 void**，用 `output.SetCardinality(0)` 表示结束。
+4. **`ParquetReader::Scan` 每次切换 Row Group 会先返回一个空 chunk（setup call）**，不算结束；
+   只有 `AsyncResultType::FINISHED/BLOCKED` 才是结束。
+5. **`TableFunctionInput::bind_data` 是 `optional_ptr<const FunctionData>`**——扫描回调里对 bind data
+   的引用是 const 的。
+6. **C++11 标准**：`string::data()` 返回 `const char*`，写缓冲用 `&s[0]`。
+7. **扩展的 include 路径要自己加**：`DUCKDB_EXTENSION_*_INCLUDE_PATH` 只是元数据，
+   必须在扩展 CMakeLists 里 `include_directories` 自己的 `src/include` + parquet 头文件目录。
+8. **调试经历**（2026-08）：UAF 崩溃排查用 SetUnhandledExceptionFilter + 寄存器转储 +
+   `dumpbin /disasm` 定位（RVA 0x17236B = ValidityMask 位测试）。崩溃进程会锁住 duckdb.exe
+   （taskkill 拒绝）→ shell 输出名改为 `duckdb_aligned`。
+9. **测试数据里的 `rowid`/`rowid_alpha`/`rowid_ma` 是对齐断言列**（每 Group 独立命名，
+   值 = 全局行号），`misaligned = 0` 即证明跨 Group 对齐。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。

@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.5)
 project(AlignedExtension)
 
-# Reuse the DuckDB Parquet extension headers (ParquetReader) directly.
+# The extension's own headers (src/include) + the DuckDB Parquet extension
+# headers (ParquetReader reuse). Note: DUCKDB_EXTENSION_*_INCLUDE_PATH is only
+# registered metadata — the extension CMakeLists must add include dirs itself.
 include_directories(
+  "${CMAKE_CURRENT_LIST_DIR}/src/include"
   "${CMAKE_SOURCE_DIR}/extension/parquet/include"
+  "${CMAKE_SOURCE_DIR}/third_party/parquet"
+  "${CMAKE_SOURCE_DIR}/third_party/thrift"
 )
 
 set(ALIGNED_EXTENSION_FILES

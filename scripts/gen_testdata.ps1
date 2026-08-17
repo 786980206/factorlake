@@ -94,6 +94,7 @@ foreach ($p in $Partitions) {
 
     # ---- index group: day-level partition, 2 parts per day (RGS 2048) -------
     $indexDir = Join-Path $tableDir "index\date=$date"
+    New-Item -ItemType Directory -Force -Path $indexDir | Out-Null
     $partStarts = @(0, 2048)
     for ($i = 0; $i -lt $partStarts.Count; $i++) {
         $ps = $partStarts[$i]
@@ -128,6 +129,7 @@ foreach ($p in $Partitions) {
 
     # ---- alpha101 group: year/month/day partition, 1 part (RGS 1000) --------
     $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=08\day=$date"
+    New-Item -ItemType Directory -Force -Path $alphaDir | Out-Null
     $alphaCols = 1..10 | ForEach-Object {
         "CASE WHEN r % 5 = 0 THEN CAST((r + $_ + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha$('{0:D3}' -f $_)"
     }
@@ -136,14 +138,14 @@ foreach ($p in $Partitions) {
         # schema evolution: this partition introduces a new column
         $extra = ", CASE WHEN r % 3 = 0 THEN CAST((r + 1) * 0.001 AS DOUBLE) ELSE NULL END AS alpha099"
     }
-    $alphaColList = @('CAST(r AS BIGINT) AS rowid') + $alphaCols
+    $alphaColList = @('CAST(r AS BIGINT) AS rowid_alpha') + $alphaCols
     $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT $(($alphaColList -join ', '))$extra
   FROM r
 ) TO '$($alphaDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 1000, COMPRESSION ZSTD);"
     Run-DuckDB $sql
-    $alphaColumns = @('rowid') + (1..10 | ForEach-Object { "alpha$('{0:D3}' -f $_)" })
+    $alphaColumns = @('rowid_alpha') + (1..10 | ForEach-Object { "alpha$('{0:D3}' -f $_)" })
     if ($extra) { $alphaColumns += 'alpha099' }
     Write-JsonFile (Join-Path $alphaDir 'part-000000.aligned.json') @{
         table          = $table
@@ -161,11 +163,12 @@ foreach ($p in $Partitions) {
 
     # ---- ma group: COARSE year/month partition (both days share one dir) ----
     $maDir = Join-Path $tableDir 'fieldset\ma\year=2026\month=08'
+    New-Item -ItemType Directory -Force -Path $maDir | Out-Null
     $partIdx = $p.txid - 1
     $partName = Part-Name $partIdx
     $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($start, $end))
-  SELECT CAST(r AS BIGINT) AS rowid,
+  SELECT CAST(r AS BIGINT) AS rowid_ma,
          CAST((r % 20) * 0.1 AS DOUBLE) AS ma5,
          CAST((r % 30) * 0.05 AS DOUBLE) AS ma10,
          CAST((r % 60) * 0.025 AS DOUBLE) AS ma20
@@ -179,7 +182,7 @@ foreach ($p in $Partitions) {
         start_row      = $start
         row_count      = $rows
         row_group_size = 2048
-        columns        = @('rowid', 'ma5', 'ma10', 'ma20')
+        columns        = @('rowid_ma', 'ma5', 'ma10', 'ma20')
     }
     # second transaction appends its part to the shared marker (contract v1.1)
     $markerParts = @()

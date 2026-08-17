@@ -15,7 +15,9 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 unique_ptr<LocalTableFunctionState> AlignedInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
                                                      GlobalTableFunctionState *gstate);
 
-OperatorResultType AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
+// Note: DuckDB 1.5's table_function_t returns void; the end of the scan is
+// signaled by setting output.SetCardinality(0).
+void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
 
 unique_ptr<NodeStatistics> AlignedCardinality(ClientContext &context, const FunctionData *bind_data);
 

@@ -4,6 +4,7 @@
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/parallel/async_result.hpp"
 #include "parquet_reader.hpp"
 
 namespace duckdb {
@@ -26,7 +27,11 @@ struct AlignedGroupScanState {
 	idx_t part_idx = 0;
 	bool part_ready = false;
 	unique_ptr<ParquetReader> reader;
-	ParquetReaderScanState scan_state;
+	// Fresh scan state per row-group window: duckdb's parquet scan state is
+	// designed for a single InitializeScan + repeated Scan lifecycle; reusing
+	// one state across windows re-initializes it, which is not a supported
+	// pattern and crashes on the second data read.
+	unique_ptr<ParquetReaderScanState> scan_state;
 	vector<PartitionStatistics> rg_stats; // cached per part
 	// Current row-group window (part-local row coordinates)
 	vector<idx_t> rg_window; // row group indices
@@ -38,7 +43,10 @@ struct AlignedGroupScanState {
 	vector<idx_t> out_positions; // table output position per read column
 	vector<LogicalType> read_types;
 	vector<idx_t> missing_positions; // table output positions absent from this part (NULL fill)
-	DataChunk chunk;                 // parquet output chunk (read columns only)
+	// Parquet output chunk (read columns only). Held by unique_ptr because
+	// DataChunk is neither copyable nor movable (which would make this state
+	// immovable and break vector<AlignedGroupScanState> reallocation).
+	unique_ptr<DataChunk> chunk;
 };
 
 struct AlignedScanGlobalState : public GlobalTableFunctionState {
@@ -80,8 +88,12 @@ unique_ptr<ParquetReader> OpenPartReader(ClientContext &context, const PartInfo 
 
 //! Builds the table schema (names/types in table order) and fills each group's
 //! output_positions. Types are resolved from the first part containing a column.
+//! A column name appearing in multiple groups is shadowed: only the first
+//! occurrence contributes to the table schema (output_positions entry of the
+//! later groups is set to DConstants::INVALID_INDEX and the column is skipped).
 static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<string> &names,
                                vector<LogicalType> &types) {
+	case_insensitive_set_t seen_columns;
 	for (auto &group : plan.groups) {
 		// Open the first part once (if any) as the type source for most columns
 		unique_ptr<ParquetReader> first_reader;
@@ -89,6 +101,11 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 			first_reader = OpenPartReader(context, group.parts[0], plan.table.name, group.manifest.group);
 		}
 		for (auto &col : group.column_order) {
+			if (seen_columns.find(col) != seen_columns.end()) {
+				// Duplicate column across groups: shadowed, contributes nothing
+				group.output_positions.push_back(DConstants::INVALID_INDEX);
+				continue;
+			}
 			LogicalType col_type;
 			bool found = false;
 			if (first_reader) {
@@ -115,6 +132,7 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 				throw IOException("Aligned table '%s' group '%s': column '%s' is declared but not found in any part",
 				                  plan.table.name, group.manifest.group, col);
 			}
+			seen_columns.insert(col);
 			group.output_positions.push_back(names.size());
 			names.push_back(col);
 			types.push_back(col_type);
@@ -188,7 +206,7 @@ unique_ptr<LocalTableFunctionState> AlignedInitLocal(ExecutionContext &context, 
 // Per-part setup
 //===----------------------------------------------------------------------===//
 
-static void OpenPart(ClientContext &context, AlignedTableBindData &bind, idx_t group_idx, idx_t part_idx,
+static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, idx_t group_idx, idx_t part_idx,
                      AlignedGroupScanState &g) {
 	auto &group = bind.plan.groups[group_idx];
 	auto &part = group.parts[part_idx];
@@ -202,6 +220,10 @@ static void OpenPart(ClientContext &context, AlignedTableBindData &bind, idx_t g
 	g.read_types.clear();
 	g.missing_positions.clear();
 	for (idx_t i = 0; i < group.column_order.size(); i++) {
+		if (group.output_positions[i] == DConstants::INVALID_INDEX) {
+			// Shadowed duplicate column (see ResolveColumnTypes): skip entirely
+			continue;
+		}
 		auto &col = group.column_order[i];
 		auto it = std::find(part.columns.begin(), part.columns.end(), col);
 		if (it == part.columns.end()) {
@@ -218,8 +240,6 @@ static void OpenPart(ClientContext &context, AlignedTableBindData &bind, idx_t g
 	for (auto file_idx : g.read_cols) {
 		g.reader->column_ids.push_back(MultiFileLocalColumnId(file_idx));
 	}
-
-	g.chunk.Initialize(context, g.read_types);
 
 	// Row group statistics (exact per-RG row counts)
 	g.rg_stats.clear();
@@ -262,12 +282,18 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 	}
 	g.rg_window_start = window_start;
 	g.rg_window_pos = 0;
-	g.reader->InitializeScan(context, g.scan_state, g.rg_window);
+	g.scan_state = make_uniq<ParquetReaderScanState>();
+	g.reader->InitializeScan(context, *g.scan_state, g.rg_window);
+	// Fresh chunk per window: parquet strings are zero-copy references into the
+	// window's page buffers. Reusing a chunk across windows (with its VectorCache
+	// Reset cycle) leaves stale string_t pointers that crash on refill.
+	g.chunk = make_uniq<DataChunk>();
+	g.chunk->Initialize(context, g.read_types);
 }
 
 //! Fills rows [window_start, window_start + count) of one group directly into
 //! the output DataChunk at [output_offset, output_offset + count).
-static void ScanGroupWindow(ClientContext &context, AlignedTableBindData &bind, idx_t group_idx,
+static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &bind, idx_t group_idx,
                             AlignedScanLocalState &lstate, idx_t window_start, idx_t count, DataChunk &output,
                             idx_t output_offset) {
 	auto &group = bind.plan.groups[group_idx];
@@ -307,13 +333,19 @@ static void ScanGroupWindow(ClientContext &context, AlignedTableBindData &bind, 
 		// Chunks from the parquet reader cover consecutive window-local rows [pos, pos + c).
 		idx_t segment_pos = 0;
 		while (segment_pos < need) {
-			auto res = g.reader->Scan(context, g.scan_state, g.chunk);
-			if (res != SourceResultType::HAVE_MORE_OUTPUT) {
+			auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
+			auto async_type = res.GetResultType();
+			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
 				throw IOException("Aligned table '%s' group '%s': parquet scan ended early at row %llu (alignment "
 				                  "violation)",
 				                  bind.plan.table.name, group.manifest.group, cursor + segment_pos);
 			}
-			idx_t chunk_rows = g.chunk.size();
+			idx_t chunk_rows = g.chunk->size();
+			if (chunk_rows == 0) {
+				// Parquet Scan returns an empty HAVE_MORE_OUTPUT chunk once per
+				// row-group switch (setup call) — skip it, not an error
+				continue;
+			}
 			idx_t w_start = local_start - g.rg_window_start;
 			idx_t w_end = local_end - g.rg_window_start;
 			idx_t copy_from = MaxValue<idx_t>(w_start, g.rg_window_pos);
@@ -331,8 +363,14 @@ static void ScanGroupWindow(ClientContext &context, AlignedTableBindData &bind, 
 			idx_t src_offset = copy_from - g.rg_window_pos;
 			idx_t dst_offset = output_offset + placed + segment_pos;
 			for (idx_t i = 0; i < g.read_cols.size(); i++) {
-				VectorOperations::Copy(g.chunk.data[i], output.data[g.out_positions[i]], copy_count, src_offset,
-				                       dst_offset);
+				// NOTE: the 5-arg VectorOperations::Copy signature is
+				// (source, target, source_count, source_offset, target_offset)
+				// where source_count is the EXCLUSIVE end index and the number
+				// of copied rows is source_count - source_offset. Passing a
+				// plain count here underflows when source_offset > count
+				// (garbage selection reads for dictionary sources).
+				VectorOperations::Copy(g.chunk->data[i], output.data[g.out_positions[i]], src_offset + copy_count,
+				                       src_offset, dst_offset);
 			}
 			segment_pos += copy_count;
 			g.rg_window_pos += chunk_rows;
@@ -357,13 +395,14 @@ static void ScanGroupWindow(ClientContext &context, AlignedTableBindData &bind, 
 // Scan
 //===----------------------------------------------------------------------===//
 
-OperatorResultType AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind = data.bind_data->Cast<AlignedTableBindData>();
 	auto &gstate = data.global_state->Cast<AlignedScanGlobalState>();
 	auto &lstate = data.local_state->Cast<AlignedScanLocalState>();
 
 	if (gstate.next_row >= gstate.total_rows) {
-		return OperatorResultType::FINISHED;
+		output.SetCardinality(0);
+		return;
 	}
 	idx_t chunk_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, gstate.total_rows - gstate.next_row);
 	output.SetCardinality(chunk_rows);
@@ -377,7 +416,6 @@ OperatorResultType AlignedScanFunction(ClientContext &context, TableFunctionInpu
 		ScanGroupWindow(context, bind, gi, lstate, gstate.next_row, chunk_rows, output, 0);
 	}
 	gstate.next_row += chunk_rows;
-	return OperatorResultType::HAVE_MORE_OUTPUT;
 }
 
 unique_ptr<NodeStatistics> AlignedCardinality(ClientContext &context, const FunctionData *bind_data) {

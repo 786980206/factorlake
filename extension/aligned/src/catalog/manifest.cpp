@@ -1,4 +1,5 @@
 #include "catalog/manifest.hpp"
+#include "resolver/row_space.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -12,11 +13,12 @@ namespace {
 
 string ReadTextFile(FileSystem &fs, const string &path) {
 	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	idx_t size = fs.GetFileSize(*handle);
+	idx_t size = handle->GetFileSize();
 	string result;
 	result.resize(size);
 	if (size > 0) {
-		handle->Read(result.data(), size, 0);
+		// NOTE: C++11 standard is enforced (string::data() returns const char*)
+		handle->Read(&result[0], size, 0);
 	}
 	return result;
 }
@@ -258,6 +260,10 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			}
 			auto base_slash = path.find_last_of("/\\");
 			string base_name = base_slash == string::npos ? path : path.substr(base_slash + 1);
+			if (StringUtil::EndsWith(base_name, ".parquet")) {
+				// marker "parts" lists part names without the .parquet suffix (matching sidecar "part")
+				base_name = base_name.substr(0, base_name.size() - 8);
+			}
 			if (committed.find(base_name) == committed.end()) {
 				// Part exists on disk but is not listed by the commit marker (contract §9)
 				continue;
