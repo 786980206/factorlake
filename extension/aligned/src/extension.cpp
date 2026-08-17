@@ -1,5 +1,6 @@
 #include "aligned_extension.hpp"
 
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "scan/aligned_scan.hpp"
@@ -26,6 +27,20 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	db.config.AddExtensionOption("aligned_data_root", "Root directory for AlignedTable logical tables",
 	                             LogicalType::VARCHAR);
+
+	// Phase 4: Parquet metadata cache (footer / schema / row-group stats, LRU
+	// via DuckDB's ObjectCache, 8 GiB, validity-checked on access). The parquet
+	// extension registers the option; make it default ON so repeated aligned
+	// scans of the same parts skip footer parsing. Reuse DuckDB's cache rather
+	// than building our own (contract §8).
+	auto &config = DBConfig::GetConfig(db);
+	if (!config.HasExtensionOption("parquet_metadata_cache")) {
+		config.AddExtensionOption("parquet_metadata_cache",
+		                          "Cache Parquet metadata - useful when reading the same files multiple times",
+		                          LogicalType::BOOLEAN, Value(true));
+	} else {
+		config.SetOptionByName("parquet_metadata_cache", Value::BOOLEAN(true));
+	}
 }
 
 std::string AlignedExtension::Name() {

@@ -80,6 +80,22 @@ if ($out -match '(?m)^6000\r?$') { Write-Host 'PASS: single-group projection' } 
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT alpha099 FROM aligned_table('cnstk_ixday') WHERE rowid = 3000;"
 if ($out -match '(?m)^3\.001\r?$') { Write-Host 'PASS: projection + schema evolution' } else { Write-Host "FAIL: projection + evolution ($out)"; $script:failures++ }
 
+# --- parallel scan (Phase 4) -------------------------------------------------
+# Results must be identical regardless of thread count (shared cursor +
+# per-thread filter states); count(*) / projection / filters / aggregates.
+$out1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(*), count(alpha001), count(alpha099), sum(rowid) FROM aligned_table('cnstk_ixday');"
+$out8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(*), count(alpha001), count(alpha099), sum(rowid) FROM aligned_table('cnstk_ixday');"
+if ($out1 -eq $out8 -and $out1 -match '(?m)^6000,1200,1000,17997000\r?$') { Write-Host 'PASS: parallel scan aggregates (threads 1 == 8)' } else { Write-Host "FAIL: parallel aggregates ($out1 / $out8)"; $script:failures++ }
+$out1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(*) FROM aligned_table('cnstk_ixday') WHERE rowid BETWEEN 3000 AND 3010;"
+$out8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(*) FROM aligned_table('cnstk_ixday') WHERE rowid BETWEEN 3000 AND 3010;"
+if ($out1 -eq $out8 -and $out1 -match '(?m)^11\r?$') { Write-Host 'PASS: parallel scan filters (threads 1 == 8)' } else { Write-Host "FAIL: parallel filters ($out1 / $out8)"; $script:failures++ }
+$out8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(rowid_ma), count(alpha099) FROM aligned_table('cnstk_ixday');"
+if ($out8 -match '(?m)^6000,1000\r?$') { Write-Host 'PASS: parallel projection + schema evolution' } else { Write-Host "FAIL: parallel projection ($out8)"; $script:failures++ }
+
+# --- metadata cache (Phase 4) -------------------------------------------------
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT current_setting('parquet_metadata_cache');"
+if ($out -match '(?m)^true\r?$') { Write-Host 'PASS: parquet metadata cache default on' } else { Write-Host "FAIL: metadata cache default ($out)"; $script:failures++ }
+
 # --- column-name rules (contract §2.2e) --------------------------------------
 # e1: columns duplicated with index resolve to the index copy (authoritative)
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT close FROM aligned_table('cnstk_ixday') WHERE rowid = 100;"

@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/parallel/async_result.hpp"
@@ -74,7 +75,9 @@ struct AlignedGroupScanState {
 	bool rg_window_valid = false;           // the current window still covers the wanted range
 };
 
-//! A pushed-down filter applied to one of this table's columns.
+//! A pushed-down filter applied to one of this table's columns. The filter
+//! definition (const TableFilter *) is shared; the filter STATE is per-thread
+//! (FilterSelection may mutate state, so concurrent scans need their own).
 struct AlignedRowFilter {
 	idx_t projected_pos; // position in the assembled (scanned) chunk
 	const TableFilter *filter;
@@ -89,12 +92,29 @@ struct AlignedGroupFilter {
 
 struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	idx_t total_rows = 0;
+	// Enable parallel scans (Phase 4): the default MaxThreads() is 1, which
+	// would schedule the whole scan as a single pipeline task. Overriding it
+	// lets the scheduler run one task per thread; the shared cursor hands each
+	// task contiguous row ranges.
+	idx_t MaxThreads() const override {
+		return GlobalTableFunctionState::MAX_THREADS;
+	}
+	// Parallel scan (Phase 4): the shared cursor {interval_idx, next_row} is
+	// protected by cursor_lock. Pipeline threads claim CONTIGUOUS RANGES of
+	// CLAIM_RANGE rows (not single chunks): within a claimed range the group
+	// scans are sequential, so row-group windows are reused without
+	// re-initialization; re-positioning (InitializeScan + discard to the
+	// wanted start) only happens at range boundaries.
+	static constexpr idx_t CLAIM_RANGE = 16 * STANDARD_VECTOR_SIZE;
+	mutex cursor_lock;
+	idx_t interval_idx = 0;
 	idx_t next_row = 0; // cursor within the current active interval
 	// Projection pushdown (Phase 2): full schema position -> output chunk position
 	vector<idx_t> projected_pos;
 	// Per-group flag: does this group contribute any requested column?
 	vector<bool> group_active;
-	// Filters (Phase 3)
+	// Filters (Phase 3): shared filter definitions (states are per-thread, see
+	// AlignedScanLocalState::row_filters)
 	vector<AlignedRowFilter> row_filters;
 	vector<vector<AlignedGroupFilter>> group_filters; // per group
 	// Partition pruning (Phase 3): kept parts per group; empty = keep all from bind
@@ -103,7 +123,6 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	// groups. The scan cursor only walks these intervals (pruned partitions
 	// are skipped entirely — all groups agree on the inactive ranges).
 	vector<pair<idx_t, idx_t>> active_intervals;
-	idx_t interval_idx = 0;
 	// Filter-column removal (projection_ids): which scanned columns the final
 	// output keeps (indexes into the scanned column list)
 	vector<idx_t> projection_ids;
@@ -111,6 +130,13 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 
 struct AlignedScanLocalState : public LocalTableFunctionState {
 	vector<AlignedGroupScanState> groups;
+	// Per-thread filter states (Phase 4: parallel scans share the global
+	// filter definitions but need their own mutable state)
+	vector<AlignedRowFilter> row_filters;
+	// The thread's currently claimed contiguous range [range_next, range_end)
+	// (Phase 4, range claiming)
+	idx_t range_next = 0;
+	idx_t range_end = 0;
 	// Scratch chunk for the filter/projection path (assemble -> filter -> reference)
 	unique_ptr<DataChunk> scratch;
 };
@@ -445,8 +471,9 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 				throw InternalException("aligned_table: filter column id %llu out of range", key);
 			}
 			auto full_col = input.column_ids[key];
-			auto state = TableFilterState::Initialize(context, filter);
-			result->row_filters.push_back({key, &filter, std::move(state)});
+			// The filter definition is shared by all threads; each thread
+			// initializes its own TableFilterState (see AlignedInitLocal).
+			result->row_filters.push_back({key, &filter, nullptr});
 
 			// Find the group owning this column (for RG pruning + partition pruning)
 			for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
@@ -496,6 +523,17 @@ unique_ptr<LocalTableFunctionState> AlignedInitLocal(ExecutionContext &context, 
 	auto &bind = input.bind_data->Cast<AlignedTableBindData>();
 	auto result = make_uniq<AlignedScanLocalState>();
 	result->groups.resize(bind.plan.groups.size());
+	// Per-thread filter states (Phase 4: the global state only carries the
+	// filter definitions; FilterSelection may mutate state, so each pipeline
+	// thread initializes its own copy here)
+	if (input.filters) {
+		for (auto &entry : input.filters->filters) {
+			auto key = entry.first;
+			auto &filter = *entry.second;
+			auto state = TableFilterState::Initialize(context.client, filter);
+			result->row_filters.push_back({key, &filter, std::move(state)});
+		}
+	}
 	// Scratch chunk for the filter/projection path: one vector per scanned column
 	if (!input.projection_ids.empty() || input.filters) {
 		vector<LogicalType> scanned_types;
@@ -620,12 +658,18 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 				}
 			}
 			if (skip) {
+				// Clamped segment: only the wanted portion is NULL-filled
 				g.rg_skip.emplace_back(seg_start, seg_end - seg_start);
 			} else {
 				g.rg_window.push_back(i);
-				// flow_off = offset within the RG where the wanted segment starts
-				idx_t flow_off = MaxValue<idx_t>(rg_start, local_start) - rg_start;
-				g.rg_plan.push_back({pq, rg.count, flow_off, seg_start, seg_end - seg_start});
+				// The plan segment covers the ENTIRE row group (flow_off = 0,
+				// win range = the full RG). The copy loop clamps to the wanted
+				// [w_start, w_end) itself, so a window can be reused for any
+				// later range inside the same RG(s) — clamping the segment to
+				// the originally-wanted range instead would discard every
+				// vector of a later chunk (rows outside the segment) until the
+				// stream ends, failing with "scan ended early".
+				g.rg_plan.push_back({pq, rg.count, 0, rg_start - window_start, rg.count});
 				pq += rg.count;
 			}
 		}
@@ -675,6 +719,16 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			                  "rows (alignment violation)",
 			                  bind.plan.table.name, group.manifest.group, cursor, bind.total_rows);
 		}
+		// Phase 4: with the shared cursor a thread's claims are not monotonic —
+		// a new window may start BEFORE the part the local state currently sits
+		// in. Rewind to the first part in that case (the advance loop below
+		// re-positions correctly); the row-group window is part-scoped and must
+		// be invalidated too.
+		if (cursor < parts[g.part_idx].start_row) {
+			g.part_idx = 0;
+			g.part_ready = false;
+			g.rg_window_valid = false;
+		}
 		auto &part = parts[g.part_idx];
 		idx_t part_end = part.start_row + part.row_count;
 		if (cursor >= part_end) {
@@ -698,6 +752,28 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 		if (!g.rg_window_valid || (g.rg_plan_rows > 0 && g.parquet_pos >= g.rg_plan_rows) ||
 		    local_start < g.rg_window_start || local_end > g.rg_window_start + g.rg_window_rows) {
 			ComputeRowGroupWindow(context, g, local_start, local_end, part, group_filters);
+		} else {
+			// The window still covers the wanted range. Reuse it ONLY when the
+			// stream is positioned exactly at the wanted start. The parquet
+			// stream advances in whole vectors (2048 rows), decoupled from the
+			// rows actually placed; a wanted range starting mid-vector cannot
+			// be served from the current position — the rows between the last
+			// placed row and the vector boundary would be lost (scan ends
+			// "early"). Re-initialize and discard up to the wanted start.
+			idx_t next_win_row;
+			while (g.rg_seg_idx < g.rg_plan.size() &&
+			       g.parquet_pos >= g.rg_plan[g.rg_seg_idx].flow_start + g.rg_plan[g.rg_seg_idx].flow_len) {
+				g.rg_seg_idx++;
+			}
+			if (g.rg_seg_idx < g.rg_plan.size()) {
+				auto &seg = g.rg_plan[g.rg_seg_idx];
+				next_win_row = seg.win_start + (g.parquet_pos - seg.flow_start);
+			} else {
+				next_win_row = g.rg_window_start + g.rg_window_rows; // stream fully consumed
+			}
+			if (local_start - g.rg_window_start != next_win_row) {
+				ComputeRowGroupWindow(context, g, local_start, local_end, part, group_filters);
+			}
 		}
 
 		idx_t w_start = local_start - g.rg_window_start;
@@ -766,13 +842,19 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 				continue;
 			}
 			idx_t win_pos = seg.win_start + (valid_from - seg.flow_off);
+			// Overlap of the vector's window range [win_pos, win_pos + valid_len)
+			// with the wanted range [w_start, w_end). copy_from >= copy_to means
+			// no overlap (the vector lies entirely before OR entirely after the
+			// wanted rows) — discard. This must clamp against BOTH ends: a
+			// vector beyond w_end would otherwise underflow the subtraction
+			// below and copy out-of-bounds (heap corruption).
 			idx_t copy_from = MaxValue<idx_t>(w_start, win_pos);
-			if (copy_from >= win_pos + (valid_to - valid_from)) {
-				// Entire chunk lies before the wanted range — discard
+			idx_t copy_to = MinValue<idx_t>(w_end, win_pos + (valid_to - valid_from));
+			if (copy_from >= copy_to) {
 				g.parquet_pos += chunk_rows;
 				continue;
 			}
-			idx_t copy_count = MinValue<idx_t>(w_end, win_pos + (valid_to - valid_from)) - copy_from;
+			idx_t copy_count = copy_to - copy_from;
 			copy_count = MinValue<idx_t>(copy_count, read_need - segment_pos);
 			if (copy_count == 0) {
 				g.parquet_pos += chunk_rows;
@@ -854,27 +936,40 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 	auto &gstate = data.global_state->Cast<AlignedScanGlobalState>();
 	auto &lstate = data.local_state->Cast<AlignedScanLocalState>();
 
-	// Advance to the next active interval when the current one is exhausted
-	// (partition pruning, Phase 3: pruned partitions are skipped entirely)
-	while (gstate.interval_idx < gstate.active_intervals.size() &&
-	       gstate.next_row >= gstate.active_intervals[gstate.interval_idx].second) {
-		gstate.interval_idx++;
-		gstate.next_row = gstate.interval_idx < gstate.active_intervals.size()
-		                      ? gstate.active_intervals[gstate.interval_idx].first
-		                      : gstate.next_row;
+	// Phase 4: claim the next contiguous range from the shared cursor (or
+	// continue the thread's current range). The lock is held only for the
+	// claim; the actual scan runs outside it with this thread's own local
+	// state.
+	idx_t chunk_start;
+	idx_t chunk_rows;
+	if (lstate.range_next >= lstate.range_end) {
+		lock_guard<mutex> lock(gstate.cursor_lock);
+		while (gstate.interval_idx < gstate.active_intervals.size() &&
+		       gstate.next_row >= gstate.active_intervals[gstate.interval_idx].second) {
+			gstate.interval_idx++;
+			gstate.next_row = gstate.interval_idx < gstate.active_intervals.size()
+			                      ? gstate.active_intervals[gstate.interval_idx].first
+			                      : gstate.next_row;
+		}
+		if (gstate.interval_idx >= gstate.active_intervals.size()) {
+			output.SetCardinality(0);
+			return;
+		}
+		idx_t interval_end = gstate.active_intervals[gstate.interval_idx].second;
+		idx_t range_end = MinValue<idx_t>(gstate.next_row + AlignedScanGlobalState::CLAIM_RANGE, interval_end);
+		lstate.range_next = gstate.next_row;
+		lstate.range_end = range_end;
+		gstate.next_row = range_end;
 	}
-	if (gstate.interval_idx >= gstate.active_intervals.size()) {
-		output.SetCardinality(0);
-		return;
-	}
-	idx_t interval_end = gstate.active_intervals[gstate.interval_idx].second;
-	idx_t chunk_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, interval_end - gstate.next_row);
+	chunk_start = lstate.range_next;
+	chunk_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, lstate.range_end - chunk_start);
+	lstate.range_next += chunk_rows;
 
 	// With pushed-down filters or filter-column removal we assemble into a
 	// scratch chunk (which we own and reset), then reference it into the output.
 	// The executor reuses the output chunk across calls; slicing it in place
 	// would leave dictionary vectors behind and corrupt the next call.
-	bool use_scratch = !gstate.row_filters.empty() || !gstate.projection_ids.empty();
+	bool use_scratch = !lstate.row_filters.empty() || !gstate.projection_ids.empty();
 	auto &target = use_scratch ? *lstate.scratch : output;
 	if (use_scratch) {
 		target.Reset();
@@ -893,14 +988,13 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 			continue;
 		}
 		const auto &parts = gstate.kept_parts[gi].empty() ? bind.plan.groups[gi].parts : gstate.kept_parts[gi];
-		ScanGroupWindow(context, bind, gi, lstate, gstate.next_row, chunk_rows, target, 0, gstate.projected_pos,
-		                parts, gstate.group_filters[gi]);
+		ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, gstate.projected_pos, parts,
+		                gstate.group_filters[gi]);
 	}
-	gstate.next_row += chunk_rows;
 
-	// Apply the pushed-down filters to the assembled chunk
-	if (!gstate.row_filters.empty()) {
-		ApplyRowFilters(context, target, gstate.row_filters);
+	// Apply the pushed-down filters to the assembled chunk (per-thread states)
+	if (!lstate.row_filters.empty()) {
+		ApplyRowFilters(context, target, lstate.row_filters);
 	}
 
 	// Produce the final output chunk

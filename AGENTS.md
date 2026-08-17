@@ -331,7 +331,17 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
     路径段以 `.`/`_` 开头一律忽略（§2.1d）、重复列规则（§2.2e：与 index 重复→忽略非 index 副本；
     非 index 组间重复→仅限定名 `lv1.lv2.col`；裸名→not found）
   - 验收：`scripts/test_aligned.ps1` **21/21 PASS**（新增 §2.1b/c、§2.2e1/e2/e3 自动化测试）
-- [ ] Phase 4 Parallel scan（atomic task cursor）+ Metadata Cache
+- [x] **Phase 4 Parallel Scan + Metadata Cache 完成（2026-08）**：
+  - **并行扫描**：共享游标（mutex 保护 `{interval_idx, next_row}`）按**连续 Range**（16 chunks =
+    32768 行）发放给各 pipeline 线程；线程在自身 Range 内顺序扫描（窗口复用零重定位），
+    Range 边界才重新定位（InitializeScan + discard 到目标行）
+  - 行级 filter state 改为**每线程一份**（全局只存 filter 定义；FilterSelection 可能改 state）
+  - **元数据缓存**：复用 DuckDB ObjectCache（LRU，8GiB，带 IsValid 校验）——把
+    `parquet_metadata_cache` 默认置 ON（`DBConfig::SetOptionByName`），footer/schema/RG stats
+    跨查询跨线程共享
+  - 验收：`scripts/test_aligned.ps1` 21/21 + `scripts/test_parallel.ps1` 全 PASS；
+    bench_ixday 1M 行 × 127 列：1 线程 0.89s → 8 线程 0.21s（**≈4.2× 加速**）
+- [ ] Phase 5 Writer（RecordBatch → Column Group split → Aligned Parquet Writer → Atomic Commit）
 
 ### Phase 1 关键经验（必须记住，避免重踩）
 
@@ -389,6 +399,30 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
 4. **行级 filter 路径**：`TableFilterState::Initialize(context, filter)` 一次；
    `ColumnSegment::FilterSelection(sel, vec, vdata, filter, state, scan_count, approved)`
    尊重传入 selection 且 `scan_count` 是当前 selection 长度（链式 AND 直接传 approved）。
+
+### Phase 4 关键经验
+
+1. **表函数默认单线程**：`GlobalTableFunctionState::MaxThreads()` 默认返回 1 ——
+   不 override 的话 `Pipeline::ScheduleParallel` 永远走 `ScheduleSequentialTask`，
+   线程数再多也只跑 1 个任务。返回 `GlobalTableFunctionState::MAX_THREADS` 即放开并行。
+2. **parquet 流按整向量（2048 行）前进，与"实际放置的行数"解耦**：RG 窗口复用
+   必须满足"流位置 == 期望起点"（`local_start - rg_window_start == 流下一行 win 坐标`），
+   否则行会丢失（下一个 chunk 从向量边界开始，缺中间行 → "scan ended early"）。
+   不连续时重新 InitializeScan 并 discard 到目标行。旧代码靠 `parquet_pos >= plan_rows`
+   在窗口尾"过冲"触发重算才没炸 —— 只对 RG ≤ 2048（单向量）的数据成立。
+3. **copy 重叠必须双向 clamp**：`copy_from = max(w_start, win_pos)`、
+   `copy_to = min(w_end, win_pos + valid_len)`；`copy_from >= copy_to` 即丢弃。
+   只 clamp 一端会让 `copy_count = min(...) - copy_from` 下溢成巨大数 → 越界写 → 堆损坏
+   （症状非确定：有时 0xC0000374 有时 0xC0000005，Debug 下变死循环）。
+4. **并行 claim 粒度必须是"连续 Range"而非单 chunk**：每 chunk 一个 claim 时，线程间的
+   claim 不连续 → 每次都要重定位（InitializeScan + discard 重读 RG）→ 并行开销吃掉全部
+   收益（实测 8 线程无加速反而 user 时间翻倍）。按 16 chunks（32768 行）发 Range，
+   线程在 Range 内顺序消费 → 8 线程 4.2×。
+5. **诊断流程**：Release 堆损坏 + Debug 死循环 → 在 scan 循环里打每迭代
+   `cursor/placed/need/segpos/ppos/async/chunk_rows`，一眼定位"placed=0 但 ppos 爬升"=
+   向量被全部丢弃、范围不重叠。Windows 无调试器时这是最快路径。
+6. **性能测量用 `.timer on`（文件输入）**，`-c` 的进程启动开销 ~0.8s 会淹没扫描时间；
+   EXPLAIN ANALYZE 的算子耗时是可信的（不含进程启动）。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。

@@ -266,7 +266,7 @@ src/
 | 1 | **Read MVP**：`aligned_table()` 跑通（Logical Table + Column Group + Parquet + Row alignment + DataChunk + §3.1/§4 规则） | ✅ 验收 14/14 |
 | 2 | **Projection**：只扫描被选中的 Group（含 §4 限定名映射） | ✅ 验收 14/14 |
 | 3 | **Partition / Predicate Pushdown**：Hive pruning + Parquet stats + RG pruning + projection + row-level filter（§3.1/§4 规则自动化测试） | ✅ 验收 21/21（2026-08） |
-| 4 | **Parallel Scan**：Aligned Row Group 为任务单元 + Metadata Cache | ⬜ |
+| 4 | **Parallel Scan**：Aligned Row Group 为任务单元 + Metadata Cache（ObjectCache LRU） | ✅ 验收：`test_parallel.ps1` 全 PASS，8 线程 ≈ 4.2× 加速（2026-08） |
 | 5 | **Writer**：RecordBatch → Column Group split → Aligned Parquet Writer → Atomic Commit（append-only） | ⬜ |
 | 6 | **Benchmark**：10^8/10^9 rows × 1K/10K/50K cols；查 5/100/1K/10K 列；1%/10%/100% scan；并发 1/4/16/32/64；对比普通 Parquet / JOIN / DuckDB 宽表 | ⬜ |
 | 7 | **Compaction / Evolution**：最后再做 | ⬜ |
