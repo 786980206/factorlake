@@ -12,12 +12,14 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	                               AlignedInitGlobal, AlignedInitLocal);
 	aligned_table_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	aligned_table_fn.cardinality = AlignedCardinality;
+	aligned_table_fn.projection_pushdown = true; // Phase 2: only open requested groups/columns
 	loader.RegisterFunction(aligned_table_fn);
 
 	// aligned_scan(root, table_name)
 	TableFunction aligned_scan_fn("aligned_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AlignedScanFunction,
 	                              AlignedBind, AlignedInitGlobal, AlignedInitLocal);
 	aligned_scan_fn.cardinality = AlignedCardinality;
+	aligned_scan_fn.projection_pushdown = true; // Phase 2
 	loader.RegisterFunction(aligned_scan_fn);
 
 	// Setting that supplies the default data root for aligned_table(name)

@@ -60,6 +60,16 @@ if ($out -match '(?m)^3000\.0,6000' -and $counts -ge 1) {
     Write-Host "FAIL: aggregates/repeat ($out)"; $script:failures++
 }
 
+# --- projection pushdown (Phase 2) -------------------------------------------
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT alpha001, ma20, date FROM aligned_table('cnstk_ixday') WHERE rowid IN (0, 4095) ORDER BY rowid;"
+if ($out -match '0\.02' -and $out -match '40\.97' -and $out -match '2026-08-17' -and $out -match '2026-08-18') {
+    Write-Host 'PASS: projected multi-group query values'
+} else { Write-Host "FAIL: projected values ($out)"; $script:failures++ }
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(rowid_ma) FROM aligned_table('cnstk_ixday');"
+if ($out -match '(?m)^6000\r?$') { Write-Host 'PASS: single-group projection' } else { Write-Host "FAIL: single-group projection ($out)"; $script:failures++ }
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT alpha099 FROM aligned_table('cnstk_ixday') WHERE rowid = 3000;"
+if ($out -match '(?m)^3\.001\r?$') { Write-Host 'PASS: projection + schema evolution' } else { Write-Host "FAIL: projection + evolution ($out)"; $script:failures++ }
+
 # --- error cases (expected failures — must not terminate the script) ---------
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'

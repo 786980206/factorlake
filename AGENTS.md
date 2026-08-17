@@ -307,13 +307,19 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
 - [x] **Phase 1 Read MVP 完成（2026-08）**：`aligned_table()` / `aligned_scan()` 跑通
   - 多 Group 并行读取、RG 窗口调度、跨 part/RG 行窗口、Schema Evolution（缺失列补 NULL）、
     跨 Group 重复列遮蔽、Row Space 校验、commit marker 过滤
-  - 验收：`scripts/test_aligned.ps1` **11/11 PASS**（6000 行 × 3 组、对齐断言 misaligned=0、
+  - 验收：`scripts/test_aligned.ps1` 11/11 PASS（6000 行 × 3 组、对齐断言 misaligned=0、
     边界行、错误场景）
   - 构建产物：`duckdb/build/duckdb_aligned.exe`（shell 输出名已改为可配置 `DUCKDB_SHELL_OUTPUT_NAME`，
     原因见下）
+- [x] **Phase 2 Projection Pushdown 完成（2026-08）**：
+  - `projection_pushdown = true`；bind 仍返回全量 schema；`init_global` 消费 `input.column_ids`
+    构建 全量列→投影输出位 的映射；扫描只填被请求列、只开被请求 Group
+  - **实测验证**：`SELECT rowid_alpha` 只打开 alpha101 的 2 个 part（index/ma 零打开）；
+    `SELECT date, ma20` 只打开 index+ma（alpha101 零打开）
+  - `count(*)`（空 column_ids）走 0 向量 chunk、只报 cardinality 的路径 ✓
+  - 验收：`scripts/test_aligned.ps1` **14/14 PASS**
 - [x] `scripts/gen_testdata.ps1` 测试数据生成器
 - [x] git 仓库（提交历史见 git log）
-- [ ] Phase 2 Projection pushdown（`projection_pushdown=true` + column_ids）
 - [ ] Phase 3 Partition / predicate pushdown（Hive pruning + RG stats）
 - [ ] Phase 4 Parallel scan（atomic task cursor）
 
@@ -339,6 +345,17 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
    （taskkill 拒绝）→ shell 输出名改为 `duckdb_aligned`。
 9. **测试数据里的 `rowid`/`rowid_alpha`/`rowid_ma` 是对齐断言列**（每 Group 独立命名，
    值 = 全局行号），`misaligned = 0` 即证明跨 Group 对齐。
+
+### Phase 2 关键经验
+
+1. **1.5 投影下推模型**：bind 永远返回全量 schema（bind 输入没有 column_ids）；
+   `init_global`/`init_local` 的 `TableFunctionInitInput::column_ids` 才是被请求列
+   （全量 schema 下标子集）。输出 chunk 向量数 = `column_ids.size()`（executor 按
+   `op.types` = 投影后类型初始化）。`column_ids` 为空 = 无列请求（如 count(*)）→
+   扫描只设 cardinality 不填向量。`COLUMN_IDENTIFIER_ROW_ID`（= -1）是虚拟列，不支持。
+2. **全量列→投影位映射**放在 `AlignedScanGlobalState`（init_global 构建一次）：
+   `projected_pos[full_id] = chunk 位置`；Group 级 `group_active` 决定是否打开。
+   OpenPart 只读被请求列（`column_ids` 传给 ParquetReader 实现文件内列投影）。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。

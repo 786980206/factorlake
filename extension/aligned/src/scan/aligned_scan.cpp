@@ -52,6 +52,14 @@ struct AlignedGroupScanState {
 struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	idx_t total_rows = 0;
 	idx_t next_row = 0; // sequential cursor (Phase 4 replaces this with an atomic task cursor)
+	// Projection pushdown (Phase 2): column_ids from the executor are indexes
+	// into the full bind schema. projected_pos[full_id] = output chunk position
+	// (DConstants::INVALID_INDEX when the column is not requested).
+	vector<idx_t> projected_pos;
+	// Per-group flag: does this group contribute any requested column? Groups
+	// without requested columns are never opened (the "only open needed groups"
+	// milestone).
+	vector<bool> group_active;
 };
 
 struct AlignedScanLocalState : public LocalTableFunctionState {
@@ -191,6 +199,35 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 	auto &bind = input.bind_data->Cast<AlignedTableBindData>();
 	auto result = make_uniq<AlignedScanGlobalState>();
 	result->total_rows = bind.total_rows;
+
+	// Projection pushdown: input.column_ids are the requested columns (indexes
+	// into the full bind schema). An empty list means no columns at all are
+	// requested (e.g. count(*)) — the output chunk then has no vectors and the
+	// scan only reports cardinality.
+	result->projected_pos.assign(bind.names.size(), DConstants::INVALID_INDEX);
+	for (idx_t i = 0; i < input.column_ids.size(); i++) {
+		auto col_id = input.column_ids[i];
+		if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
+			throw NotImplementedException("aligned_table: virtual row id column is not supported");
+		}
+		if (col_id >= bind.names.size()) {
+			throw InternalException("aligned_table: column id %llu out of range (schema has %llu columns)", col_id,
+			                        bind.names.size());
+		}
+		result->projected_pos[col_id] = i;
+	}
+
+	// Determine which groups actually need to be opened
+	result->group_active.assign(bind.plan.groups.size(), false);
+	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
+		auto &group = bind.plan.groups[gi];
+		for (auto full_pos : group.output_positions) {
+			if (full_pos != DConstants::INVALID_INDEX && result->projected_pos[full_pos] != DConstants::INVALID_INDEX) {
+				result->group_active[gi] = true;
+				break;
+			}
+		}
+	}
 	return std::move(result);
 }
 
@@ -207,14 +244,15 @@ unique_ptr<LocalTableFunctionState> AlignedInitLocal(ExecutionContext &context, 
 //===----------------------------------------------------------------------===//
 
 static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, idx_t group_idx, idx_t part_idx,
-                     AlignedGroupScanState &g) {
+                     AlignedGroupScanState &g, const vector<idx_t> &projected_pos) {
 	auto &group = bind.plan.groups[group_idx];
 	auto &part = group.parts[part_idx];
 
 	g.part_idx = part_idx;
 	g.reader = OpenPartReader(context, part, bind.plan.table.name, group.manifest.group);
 
-	// Build the read mapping in group column order
+	// Build the read mapping in group column order; only requested columns
+	// are read from the parquet file (projection pushdown)
 	g.read_cols.clear();
 	g.out_positions.clear();
 	g.read_types.clear();
@@ -224,15 +262,20 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 			// Shadowed duplicate column (see ResolveColumnTypes): skip entirely
 			continue;
 		}
+		auto projected = projected_pos[group.output_positions[i]];
+		if (projected == DConstants::INVALID_INDEX) {
+			// Column not requested by this query: do not read it
+			continue;
+		}
 		auto &col = group.column_order[i];
 		auto it = std::find(part.columns.begin(), part.columns.end(), col);
 		if (it == part.columns.end()) {
-			g.missing_positions.push_back(group.output_positions[i]);
+			g.missing_positions.push_back(projected);
 			continue;
 		}
 		auto file_idx = it - part.columns.begin();
 		g.read_cols.push_back(file_idx);
-		g.out_positions.push_back(group.output_positions[i]);
+		g.out_positions.push_back(projected);
 		g.read_types.push_back(g.reader->columns[file_idx].type);
 	}
 
@@ -295,7 +338,7 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 //! the output DataChunk at [output_offset, output_offset + count).
 static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &bind, idx_t group_idx,
                             AlignedScanLocalState &lstate, idx_t window_start, idx_t count, DataChunk &output,
-                            idx_t output_offset) {
+                            idx_t output_offset, const vector<idx_t> &projected_pos) {
 	auto &group = bind.plan.groups[group_idx];
 	auto &g = lstate.groups[group_idx];
 
@@ -316,7 +359,7 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			continue;
 		}
 		if (!g.part_ready) {
-			OpenPart(context, bind, group_idx, g.part_idx, g);
+			OpenPart(context, bind, group_idx, g.part_idx, g, projected_pos);
 		}
 
 		idx_t local_start = cursor - part.start_row;
@@ -407,13 +450,18 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 	idx_t chunk_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, gstate.total_rows - gstate.next_row);
 	output.SetCardinality(chunk_rows);
 
-	// All groups fill their columns for the same logical row range (no JOIN, no concat)
+	// All active groups fill their requested columns for the same logical row
+	// range (no JOIN, no concat). Inactive groups are never opened (projection
+	// pushdown, Phase 2).
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
+		if (!gstate.group_active[gi]) {
+			continue;
+		}
 		if (bind.plan.groups[gi].parts.empty()) {
 			// Empty group: contributes no columns
 			continue;
 		}
-		ScanGroupWindow(context, bind, gi, lstate, gstate.next_row, chunk_rows, output, 0);
+		ScanGroupWindow(context, bind, gi, lstate, gstate.next_row, chunk_rows, output, 0, gstate.projected_pos);
 	}
 	gstate.next_row += chunk_rows;
 }
