@@ -4,6 +4,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "scan/aligned_scan.hpp"
+#include "writer/aligned_writer.hpp"
 
 namespace duckdb {
 
@@ -27,6 +28,14 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	db.config.AddExtensionOption("aligned_data_root", "Root directory for AlignedTable logical tables",
 	                             LogicalType::VARCHAR);
+
+	// aligned_write(table_name, source_path, mapping, root=..., start_row=...)
+	// Phase 5: append rows to an AlignedTable from a source parquet file
+	TableFunction aligned_write_fn("aligned_write", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                               AlignedWriteFunction, AlignedWriteBind, AlignedWriteInitGlobal, nullptr);
+	aligned_write_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	aligned_write_fn.named_parameters["start_row"] = LogicalType::UBIGINT;
+	loader.RegisterFunction(aligned_write_fn);
 
 	// Phase 4: Parquet metadata cache (footer / schema / row-group stats, LRU
 	// via DuckDB's ObjectCache, 8 GiB, validity-checked on access). The parquet

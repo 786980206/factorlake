@@ -267,7 +267,7 @@ src/
 | 2 | **Projection**：只扫描被选中的 Group（含 §4 限定名映射） | ✅ 验收 14/14 |
 | 3 | **Partition / Predicate Pushdown**：Hive pruning + Parquet stats + RG pruning + projection + row-level filter（§3.1/§4 规则自动化测试） | ✅ 验收 21/21（2026-08） |
 | 4 | **Parallel Scan**：Aligned Row Group 为任务单元 + Metadata Cache（ObjectCache LRU） | ✅ 验收：`test_parallel.ps1` 全 PASS，8 线程 ≈ 4.2× 加速（2026-08） |
-| 5 | **Writer**：RecordBatch → Column Group split → Aligned Parquet Writer → Atomic Commit（append-only） | ⬜ |
+| 5 | **Writer**：`aligned_write(table, source, mapping)` → 按 Column Group 拆列 → Parquet Writer（逐组同 Row Boundary）→ `_tmp` 暂存 + sidecar + commit marker 原子提交（append-only） | ✅ 验收：`test_writer.ps1` 全 PASS（空表首写 + 追加 + 进化列 + 闭环读回，2026-08） |
 | 6 | **Benchmark**：10^8/10^9 rows × 1K/10K/50K cols；查 5/100/1K/10K 列；1%/10%/100% scan；并发 1/4/16/32/64；对比普通 Parquet / JOIN / DuckDB 宽表 | ⬜ |
 | 7 | **Compaction / Evolution**：最后再做 | ⬜ |
 

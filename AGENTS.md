@@ -341,7 +341,21 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
     跨查询跨线程共享
   - 验收：`scripts/test_aligned.ps1` 21/21 + `scripts/test_parallel.ps1` 全 PASS；
     bench_ixday 1M 行 × 127 列：1 线程 0.89s → 8 线程 0.21s（**≈4.2× 加速**）
-- [ ] Phase 5 Writer（RecordBatch → Column Group split → Aligned Parquet Writer → Atomic Commit）
+- [x] **Phase 5 Writer 完成（2026-08）**：
+  - `aligned_write(table, source_path, mapping, root=..., start_row=...)` 表函数：
+    mapping `"group:col1,col2;group2:col3"` 指定每个 group 的写入列（文件列序）
+  - 逐 chunk 读源 parquet；每 group 按**分区值变化**切行段（字典编码列必须走
+    ToUnifiedFormat！），组装切片 DataChunk → `ColumnDataCollection` 缓冲 →
+    `ParquetWriter`（ZSTD，按 group manifest RGS flush）
+  - 分区目录由 manifest templates 对源 DATE 列求值（组间分区粒度可不同）；
+    part 名 = 目标目录下一个空闲 `part-%06llu`
+  - **原子提交**：全部写入 `<table>/_tmp/transaction-<txid>/`，成功后逐 part
+    move 到目标目录 + 写 sidecar + 更新 `.aligned-commit.json`（临时名+rename），
+    最后 bump `_table.json`/`_group.json` row_count；失败删除暂存树
+  - 写前模拟 ValidateRowSpace（所有 group 必须覆盖追加区间——对齐契约强制全组写入）
+  - 验收：`scripts/test_writer.ps1` 全 PASS（空表首写 → 追加 → alpha999 进化列 →
+    粗分区共享目录追加 part → 读回 6000 行全对 + 错误路径）
+- [ ] Phase 6 Benchmark（数据集 × 列数 × 投影/扫描比例 × 并发度，对比普通 Parquet/JOIN/宽表，报告）
 
 ### Phase 1 关键经验（必须记住，避免重踩）
 
@@ -423,6 +437,27 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
    向量被全部丢弃、范围不重叠。Windows 无调试器时这是最快路径。
 6. **性能测量用 `.timer on`（文件输入）**，`-c` 的进程启动开销 ~0.8s 会淹没扫描时间；
    EXPLAIN ANALYZE 的算子耗时是可信的（不含进程启动）。
+
+### Phase 5 关键经验（Writer）
+
+1. **parquet 读取的分区列可能是 DICTIONARY_VECTOR**（常量/低基数列必然字典化）：
+   `FlatVector::GetData` 直接读字典数据数组 → 行 1 起全是越界垃圾（实测读到
+   1970-01-01）。必须 `vec.ToUnifiedFormat(rows, vdata)` +
+   `vdata.sel->get_index(r)` 取值。
+2. **`FileFlags::FILE_FLAGS_FILE_CREATE` 不截断已有文件**：重写 `_table.json`/
+   `_group.json`/commit marker 时旧内容尾部残留 → JSON 损坏。打开后先
+   `handle->Truncate(0)`。注意 flag 名是 `FILE_FLAGS_FILE_CREATE`（不是 CREATE）。
+3. **`ParquetWriter` 无 WriteChunk**：缓冲用 `ColumnDataCollection` +
+   `InitializeAppend/Append`，满 `row_group_size` 时 `writer->Flush(buffer,
+   transform)` + `buffer.Reset()` + `InitializeAppend`，结束 `Finalize()`；
+   `ColumnDataAppendState`（不是 CollectionAppendState）；构造参数抄
+   parquet_extension.cpp 的默认值（ZSTD、ChildFieldIDs()、ShreddingType()、
+   dict limit 1GiB、bloom on）。
+4. **原子提交**：先全部写 `<table>/_tmp/transaction-<txid>/`，commit 时
+   `fs.MoveFile`（同卷原子）+ sidecar + marker（临时名写 + rename）；
+   `fs.RemoveDirectory` 递归删除但留下空的父 `_tmp`，需再删一次（best-effort）。
+5. **写前模拟校验**：用占位 PartInfo 扩展 parts 列表后调 `ValidateRowSpace`，
+   自动强制"每个 group 都必须覆盖追加区间"（对齐契约），漏写 group 直接报错。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。
