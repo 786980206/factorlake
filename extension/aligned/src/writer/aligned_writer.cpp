@@ -646,8 +646,9 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 			    "{\"name\":\"" + JsonEscape(plan.table.name) + "\",\"version\":" + to_string(plan.table.version) +
 			    ",\"schema_version\":" + to_string(plan.table.schema_version) + ",\"key\":" +
 			    JsonStringArray(plan.table.key) + ",\"canonical_order\":\"" + JsonEscape(plan.table.canonical_order) +
-			    "\",\"row_count\":" + to_string(new_total) + ",\"row_group_size\":" +
-			    to_string(plan.table.row_group_size) + ",\"groups\":" + JsonStringArray(plan.table.groups) + "}";
+			    "\",\"aligned\":" + (plan.table.aligned ? "true" : "false") + ",\"row_count\":" + to_string(new_total) +
+			    ",\"row_group_size\":" + to_string(plan.table.row_group_size) + ",\"groups\":" +
+			    JsonStringArray(plan.table.groups) + "}";
 			WriteTextFile(fs, plan.table_path + "/_table.json", table_manifest);
 			for (auto &group : plan.groups) {
 				string group_manifest = "{\"group\":\"" + JsonEscape(group.manifest.group) + "\",\"row_count\":" +

@@ -1,5 +1,6 @@
 #include "aligned_extension.hpp"
 
+#include "compaction/aligned_compactor.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -36,6 +37,13 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	aligned_write_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	aligned_write_fn.named_parameters["start_row"] = LogicalType::UBIGINT;
 	loader.RegisterFunction(aligned_write_fn);
+
+	// aligned_compact(table_name, group_name, root=...)
+	// Phase 7: merge a group's parts per partition directory (atomic switch)
+	TableFunction aligned_compact_fn("aligned_compact", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                 AlignedCompactFunction, AlignedCompactBind, AlignedCompactInitGlobal, nullptr);
+	aligned_compact_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(aligned_compact_fn);
 
 	// Phase 4: Parquet metadata cache (footer / schema / row-group stats, LRU
 	// via DuckDB's ObjectCache, 8 GiB, validity-checked on access). The parquet

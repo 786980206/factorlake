@@ -1,4 +1,4 @@
-# test_writer.ps1
+﻿# test_writer.ps1
 # Phase 5 acceptance: aligned_write round trip (write -> append -> read back).
 # Creates a fresh table 'writetest' with row_count=0, writes two batches from
 # staging parquet files via aligned_write, then verifies the reader.
@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$db = Join-Path $root 'duckdb\build\duckdb_aligned.exe'
+$db = Join-Path $root 'duckdb\build3\duckdb_al3.exe'
 if (-not (Test-Path $db)) { throw "build missing: $db" }
 $dataRoot = 'D:/proj/factorlake/testdata'
 $table = 'writetest'
@@ -165,3 +165,5 @@ Remove-Item $staging1, $staging2 -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
 if ($failures -eq 0) { Write-Host 'ALL TESTS PASSED' } else { Write-Host "$failures TEST(S) FAILED"; exit 1 }
+
+

@@ -1,4 +1,4 @@
-# test_aligned.ps1
+﻿# test_aligned.ps1
 # Acceptance tests for the aligned extension (Phase 1 MVP).
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\test_aligned.ps1
 # Requires: scripts\gen_testdata.ps1 has been run, duckdb_aligned.exe built.
@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
-$db = Join-Path $root 'duckdb\build\duckdb_aligned.exe'
+$db = Join-Path $root 'duckdb\build3\duckdb_al3.exe'
 if (-not (Test-Path $db)) { throw "build missing: $db (run the duckdb build first)" }
 $dataRoot = 'D:/proj/factorlake/testdata'
 
@@ -27,7 +27,7 @@ function Run-DuckDB([string]$sql) {
 }
 
 # SQL containing backtick/double-quoted identifiers cannot survive PS 5.1
-# native-arg passing (-c mangles embedded quotes) — pipe via a temp file.
+# native-arg passing (-c mangles embedded quotes) 鈥?pipe via a temp file.
 function Run-DuckDB-File([string]$sql) {
     $tmp = Join-Path $env:TEMP 'aligned_test_query.sql'
     Set-Content -Path $tmp -Encoding UTF8 -Value $sql
@@ -96,7 +96,7 @@ if ($out8 -match '(?m)^6000,1000\r?$') { Write-Host 'PASS: parallel projection +
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT current_setting('parquet_metadata_cache');"
 if ($out -match '(?m)^true\r?$') { Write-Host 'PASS: parquet metadata cache default on' } else { Write-Host "FAIL: metadata cache default ($out)"; $script:failures++ }
 
-# --- column-name rules (contract §2.2e) --------------------------------------
+# --- column-name rules (contract 搂2.2e) --------------------------------------
 # e1: columns duplicated with index resolve to the index copy (authoritative)
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT close FROM aligned_table('cnstk_ixday') WHERE rowid = 100;"
 if ($out -match '(?m)^50\.5\r?$') { Write-Host 'PASS: e1 bare close = index (authoritative)' } else { Write-Host "FAIL: e1 bare close ($out)"; $script:failures++ }
@@ -119,10 +119,10 @@ if ($out -match '(?m)^12\.625,3\.15625\r?$') { Write-Host 'PASS: e2 qualified vw
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rowid_alpha, ma5 FROM aligned_table('cnstk_ixday') WHERE rowid = 100;"
 if ($out -match '(?m)^100,0\.0\r?$') { Write-Host 'PASS: e3 bare non-duplicated columns' } else { Write-Host "FAIL: e3 bare columns ($out)"; $script:failures++ }
 
-# --- directory rules (contract §2.1b/c) --------------------------------------
-# §2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above;
+# --- directory rules (contract 搂2.1b/c) --------------------------------------
+# 搂2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above;
 # without the rule the stray 100-row part would break discovery/counts)
-# §2.1b: a table without the mandatory index group must fail
+# 搂2.1b: a table without the mandatory index group must fail
 $badIdx = Join-Path $dataRoot 'badidx\_table.json'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badIdx) | Out-Null
 '{"name":"badidx","version":1,"key":["date","symbol"],"canonical_order":"fixed","row_count":10,"groups":["factor/alpha101"]}' | Set-Content -Path $badIdx -Encoding Ascii
@@ -130,9 +130,9 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badidx');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match "mandatory group 'index'") { Write-Host 'PASS: §2.1b missing index group rejected' } else { Write-Host "FAIL: §2.1b missing index ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match "mandatory group 'index'") { Write-Host 'PASS: 搂2.1b missing index group rejected' } else { Write-Host "FAIL: 搂2.1b missing index ($out)"; $script:failures++ }
 Remove-Item (Join-Path $dataRoot 'badidx') -Recurse -Force
-# §2.1c: a one-level non-index group must fail (malformed group first in the
+# 搂2.1c: a one-level non-index group must fail (malformed group first in the
 # list so the check fires before any group dir is accessed)
 $badLvl = Join-Path $dataRoot 'badlvl\_table.json'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badLvl) | Out-Null
@@ -141,10 +141,10 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badlvl');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match "two-level path") { Write-Host 'PASS: §2.1c one-level group rejected' } else { Write-Host "FAIL: §2.1c one-level group ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match "two-level path") { Write-Host 'PASS: 搂2.1c one-level group rejected' } else { Write-Host "FAIL: 搂2.1c one-level group ($out)"; $script:failures++ }
 Remove-Item (Join-Path $dataRoot 'badlvl') -Recurse -Force
 
-# --- error cases (expected failures — must not terminate the script) ---------
+# --- error cases (expected failures 鈥?must not terminate the script) ---------
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SELECT * FROM aligned_table('no_such_table');" 2>&1 | Out-String
@@ -162,3 +162,5 @@ if ($failures -eq 0) {
     Write-Host "$failures TEST(S) FAILED"
     exit 1
 }
+
+

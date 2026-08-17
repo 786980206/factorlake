@@ -355,7 +355,23 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
   - 写前模拟 ValidateRowSpace（所有 group 必须覆盖追加区间——对齐契约强制全组写入）
   - 验收：`scripts/test_writer.ps1` 全 PASS（空表首写 → 追加 → alpha999 进化列 →
     粗分区共享目录追加 part → 读回 6000 行全对 + 错误路径）
-- [ ] Phase 6 Benchmark（数据集 × 列数 × 投影/扫描比例 × 并发度，对比普通 Parquet/JOIN/宽表，报告）
+- [x] **Phase 6 Benchmark 完成（2026-08）**：
+  - `bench_aligned.ps1`（aligned / wide / join 三种 DuckDB 引擎）+ `bench_polars.py`
+    （polars 按行位置横向 concat——传统宽表装配路径，正是本引擎要消灭的）
+  - 维度：投影 5/25/120 列 × 扫描 25%/100% × 线程 1/4/8；p5 正确性跨引擎交叉校验
+  - 数据：bench_ixday 1M 行 × 127 列；结果见 `docs/BENCHMARK.md`、`scripts/bench_output.csv`
+- [x] **Phase 7 Compaction / Evolution 完成（2026-08）**：
+  - `aligned_compact(table, group)`：按分区目录合并多 part → 单 part（同目录必须同列集，
+    拒绝 schema-evolution 合并）→ 暂存 → move+sidecar → 替换 commit marker（临时名+rename）→
+    删旧文件；失败清理 `_tmp`
+  - 验收：`test_compaction.ps1` 全 PASS（2→1 part，前后 count/sum/misalign 全对，index 未动）
+- [x] **新增需求：元数据 `aligned` 开关（2026-08）**：
+  - `_table.json` 新字段 `aligned`(bool, 默认 true)；writer 重写 manifest 时保留
+  - **aligned=true**（默认）：各 leaf 的 partition pruning 结果映射统一坐标后**相交**
+    为一个全局扫描区间（跨 leaf 传播剪枝）——`IntersectIntervals`
+  - **aligned=false**：各 leaf 独立剪枝/规划，**不做跨 leaf 交集**——全局扫描区间为各
+    active leaf kept-part 区间之**并集**（`UnionIntervals`），gap 由 leaf 自行 NULL 补
+  - 验收：`test_aligned_flag.ps1` 全 PASS（aligned=false 全扫描 + 各 leaf 独立分区剪枝）
 
 ### Phase 1 关键经验（必须记住，避免重踩）
 
@@ -458,6 +474,44 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
    `fs.RemoveDirectory` 递归删除但留下空的父 `_tmp`，需再删一次（best-effort）。
 5. **写前模拟校验**：用占位 PartInfo 扩展 parts 列表后调 `ValidateRowSpace`，
    自动强制"每个 group 都必须覆盖追加区间"（对齐契约），漏写 group 直接报错。
+
+### Phase 6 关键经验（性能 + Benchmark）
+
+1. **窗口复用必须靠 carry，不能靠精确流位置匹配**：parquet 流按整向量（2048 行）
+   前进，与"实际放置行数"解耦。窗口起始于非向量边界时，最后一个向量必然 over-read；
+   丢弃多余行会让下一个 chunk 期望起点 ≠ 流位置 → 每次都要重新 `InitializeScan`
+   （CreateReader，~1.3ms）→ 1 列全表 373 次 recompute ≈ 500ms。
+   **修正：把 over-read 的多余行深拷贝进独立 `carry_chunk`**（自己数据，不随 g.chunk
+   被覆盖），下一个 chunk 先 drain carry 再继续读流 → recompute 373→16，1 列
+   count 522→115ms。carry 必须存独立 buffer，不能指望 g.chunk 保留（read 循环会
+   再调 Scan 覆盖它）。
+2. **这次诊断流程**：先 `sum(rowid)`/`count(col)` 定位数据错误，再数 recompute
+   （373）确认热点，再修 carry；顺手发现 exe 被 zombie 进程锁住 → 用 build2/build3
+   全新输出名绕过编译锁（zombie 无法 taskkill，"Access is denied"）。
+3. **Benchmark 测量要确定性**：`.timer` 走 `cmd` 管道 + `2>&1` 时 `real` 行顺序
+   不稳定（会把 SET 的 0.001 当成冷启动）；改为 Stopwatch 包 fresh-process 单次
+   执行（跑 2 次取 warm）最稳。PS `$M` hashtable 键在脚本内丢失（scope 怪异）→
+   改为执行时就往 `$all` 列表 append，报告/CSV 全从 `$all` 生成，避免键查找。
+4. **polars 横向 concat 基线**：`pl.concat([idx, a, m], how="horizontal")` 是位置对齐
+   横向拼接（正是本引擎消灭的路径）；`hstack` 需要 Series 不是 DataFrame。
+
+### Phase 7 关键经验（Compaction）
+
+1. **同分区目录才能合并**：schema-evolution 在目录内（不同 part 列集不同）无法
+   合并（合并后的列集不统一）→ 直接报错拒绝；跨目录（la分区）各自独立合并。
+2. **原子切换**：新 part 先写暂存 → move 进目录 + sidecar → 写 `.aligned-commit.json`
+   （临时名+rename）→ 最后删旧文件。marker 切换后旧文件已不可见，删除失败只留
+   orphan（下次 compact 清理）。
+3. **TEMP/DEBUG 不要碰主路径的 assert**：`FastRerun` 外，读写用 file 重定向
+   `cmd /c "exe < in > out 2>err"`，别用 PS `& exe <`（PS 不支持 `<`）。
+
+### 新增需求（aligned 开关）关键经验
+
+1. `_table.json` 的 `aligned` 字段是**叶子间剪枝是否可统一传播**的开关：
+   true → 各 leaf kept-part 区间**相交**（`IntersectIntervals`，全局一个扫描区间）；
+   false → **并集**（`UnionIntervals`，各 leaf 独立剪枝、独立 scan planning，
+   不做 cross-leaf 交集传播）。yyjson 判布尔用 `yyjson_is_bool`/`yyjson_get_bool`。
+2. writer 重写 `_table.json` 时务必保留 `aligned` 字段，否则会退化成默认 true。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。

@@ -18,6 +18,7 @@ set(ALIGNED_EXTENSION_FILES
     src/resolver/partition_resolver.cpp
     src/scan/aligned_scan.cpp
     src/writer/aligned_writer.cpp
+    src/compaction/aligned_compactor.cpp
 )
 
 # Phase 1: statically linked into the DuckDB binary (dev loop).

@@ -28,6 +28,13 @@ struct TableManifest {
 	int64_t schema_version = 1;
 	vector<string> key;
 	string canonical_order = "fixed";
+	// Whether the column groups are guaranteed position-aligned on the same
+	// Logical Row Space (contract §3). When true (default), partition/row-group
+	// pruning results from the different leaves map to a unified physical-group
+	// coordinate and are intersected into one global scan range. When false,
+	// each leaf prunes and plans independently and pruning must NOT be
+	// propagated across leaves via intersection.
+	bool aligned = true;
 	idx_t row_count = 0;
 	idx_t row_group_size = 131072;
 	vector<string> groups;

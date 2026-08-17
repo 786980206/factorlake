@@ -73,6 +73,15 @@ struct AlignedGroupScanState {
 	idx_t parquet_pos = 0;                  // rows consumed from the parquet stream (current window)
 	idx_t rg_seg_idx = 0;                   // current read segment index
 	bool rg_window_valid = false;           // the current window still covers the wanted range
+	// Carry-over (Phase 4 perf): when a window's last read vector over-reads
+	// past the wanted range, the surplus rows are copied into `carry_chunk`
+	// (window coordinates [carry_from, carry_from+carry_count)). The next chunk
+	// drains the carry first, then reads more. This keeps the window reusable
+	// across chunks even when the wanted rows don't align to parquet vector
+	// boundaries (2048 rows), avoiding a full window re-initialization.
+	unique_ptr<DataChunk> carry_chunk;
+	idx_t carry_win_start_row = 0; // window coordinate of carry_chunk row 0
+	idx_t carry_count = 0;         // rows held in carry_chunk (contiguous from carry_win_start_row)
 };
 
 //! A pushed-down filter applied to one of this table's columns. The filter
@@ -421,9 +430,41 @@ static vector<pair<idx_t, idx_t>> IntersectIntervals(const vector<pair<idx_t, id
 	return result;
 }
 
-//===----------------------------------------------------------------------===//
-// Global / local state
-//===----------------------------------------------------------------------===//
+//! Merges two sorted, disjoint interval lists into their union (used when the
+//! table's leaves are NOT aligned: pruning must not be intersected, so the scan
+//! covers any range where any active leaf still has data).
+static vector<pair<idx_t, idx_t>> UnionIntervals(const vector<pair<idx_t, idx_t>> &a,
+                                                 const vector<pair<idx_t, idx_t>> &b) {
+	vector<pair<idx_t, idx_t>> merged;
+	merged.reserve(a.size() + b.size());
+	idx_t i = 0;
+	idx_t j = 0;
+	while (i < a.size() && j < b.size()) {
+		if (a[i].first < b[j].first) {
+			merged.push_back(a[i++]);
+		} else {
+			merged.push_back(b[j++]);
+		}
+	}
+	while (i < a.size()) {
+		merged.push_back(a[i++]);
+	}
+	while (j < b.size()) {
+		merged.push_back(b[j++]);
+	}
+	// merge overlaps/adjacents
+	vector<pair<idx_t, idx_t>> result;
+	for (auto &iv : merged) {
+		if (result.empty()) {
+			result.push_back(iv);
+		} else if (iv.first <= result.back().second) {
+			result.back().second = MaxValue<idx_t>(result.back().second, iv.second);
+		} else {
+			result.push_back(iv);
+		}
+	}
+	return result;
+}
 
 unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<AlignedTableBindData>();
@@ -489,7 +530,15 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		}
 	}
 
-	// Active row intervals = intersection of kept-part intervals over active groups
+	// Active row intervals. With alignment (manifest "aligned" = true, the
+	// default) every leaf shares the same Logical Row Space, so the per-leaf
+	// partition-pruning results map to a unified physical-group coordinate and
+	// are INTERSECTED into one global scan range: a range pruned by any active
+	// leaf is skipped for all leaves. When "aligned" = false the leaves are not
+	// guaranteed position-aligned, so pruning must NOT be propagated across
+	// leaves via intersection — instead each leaf keeps its own pruned parts and
+	// the global cursor covers the UNION, letting each leaf read only its kept
+	// parts (gaps are NULL-filled).
 	vector<pair<idx_t, idx_t>> active;
 	bool any_active = false;
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
@@ -502,8 +551,10 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		if (!any_active) {
 			active = std::move(intervals);
 			any_active = true;
-		} else {
+		} else if (bind.plan.table.aligned) {
 			active = IntersectIntervals(active, intervals);
+		} else {
+			active = UnionIntervals(active, intervals);
 		}
 		if (active.empty()) {
 			break;
@@ -692,6 +743,8 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 	g.rg_window_start = window_start;
 	g.parquet_pos = 0;
 	g.rg_seg_idx = 0;
+	g.carry_win_start_row = 0;
+	g.carry_count = 0;
 	g.scan_state = make_uniq<ParquetReaderScanState>();
 	g.reader->InitializeScan(context, *g.scan_state, g.rg_window);
 	// Fresh chunk per window: parquet strings are zero-copy references into the
@@ -699,6 +752,8 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 	// Reset cycle) leaves stale string_t pointers that crash on refill.
 	g.chunk = make_uniq<DataChunk>();
 	g.chunk->Initialize(context, g.read_types);
+	g.carry_chunk = make_uniq<DataChunk>();
+	g.carry_chunk->Initialize(context, g.read_types);
 	g.rg_window_valid = true;
 }
 
@@ -728,6 +783,7 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			g.part_idx = 0;
 			g.part_ready = false;
 			g.rg_window_valid = false;
+			g.carry_count = 0;
 		}
 		auto &part = parts[g.part_idx];
 		idx_t part_end = part.start_row + part.row_count;
@@ -737,6 +793,7 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			g.part_idx++;
 			g.part_ready = false;
 			g.rg_window_valid = false;
+			g.carry_count = 0;
 			continue;
 		}
 		if (!g.part_ready) {
@@ -748,30 +805,31 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 		idx_t local_end = local_start + need;
 
 		// Recompute the row-group window only when the current one no longer
-		// covers the range or its parquet stream is exhausted
+		// covers the range or its parquet stream is exhausted. A window can be
+		// reused for any forward range inside it: the carry buffer holds rows
+		// already read but not yet placed, so the stream never over-consumes
+		// past wanted rows (see the read loop). Only a backward re-position
+		// (parallel) or stream exhaustion forces a recompute.
 		if (!g.rg_window_valid || (g.rg_plan_rows > 0 && g.parquet_pos >= g.rg_plan_rows) ||
 		    local_start < g.rg_window_start || local_end > g.rg_window_start + g.rg_window_rows) {
 			ComputeRowGroupWindow(context, g, local_start, local_end, part, group_filters);
 		} else {
-			// The window still covers the wanted range. Reuse it ONLY when the
-			// stream is positioned exactly at the wanted start. The parquet
-			// stream advances in whole vectors (2048 rows), decoupled from the
-			// rows actually placed; a wanted range starting mid-vector cannot
-			// be served from the current position — the rows between the last
-			// placed row and the vector boundary would be lost (scan ends
-			// "early"). Re-initialize and discard up to the wanted start.
-			idx_t next_win_row;
-			while (g.rg_seg_idx < g.rg_plan.size() &&
-			       g.parquet_pos >= g.rg_plan[g.rg_seg_idx].flow_start + g.rg_plan[g.rg_seg_idx].flow_len) {
-				g.rg_seg_idx++;
-			}
-			if (g.rg_seg_idx < g.rg_plan.size()) {
-				auto &seg = g.rg_plan[g.rg_seg_idx];
-				next_win_row = seg.win_start + (g.parquet_pos - seg.flow_start);
+			// The window covers the wanted range. Reuse is safe for any forward
+			// claim: the carry buffer + the current stream position together
+			// hold every row from carry_win_start_row (or the stream position)
+			// onward. Only a backward re-position (parallel) before those rows
+			// needs a recompute. We conservatively recompute when the wanted
+			// start is before the first un-placed stream row.
+			idx_t unplaced_from;
+			if (g.carry_count > 0) {
+				unplaced_from = g.carry_win_start_row;
 			} else {
-				next_win_row = g.rg_window_start + g.rg_window_rows; // stream fully consumed
+				// no carry: the stream has read up to parquet_pos (window
+				// coordinate via the current segment)
+				const auto &seg0 = g.rg_plan[g.rg_seg_idx];
+				unplaced_from = seg0.win_start + (g.parquet_pos - seg0.flow_start);
 			}
-			if (local_start - g.rg_window_start != next_win_row) {
+			if (local_start - g.rg_window_start < unplaced_from) {
 				ComputeRowGroupWindow(context, g, local_start, local_end, part, group_filters);
 			}
 		}
@@ -800,11 +858,42 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			}
 		}
 		idx_t read_need = need - skip_rows;
+		idx_t segment_pos = 0; // rows of this chunk's wanted range already placed
+
+		// Drain any carried rows (over-read from the previous chunk) first.
+		// carry_chunk holds window rows [carry_win_start_row,
+		// carry_win_start_row + carry_count) at its own indices [0, carry_count).
+		if (g.carry_count > 0) {
+			idx_t c_from = MaxValue<idx_t>(w_start, g.carry_win_start_row);
+			idx_t c_to = MinValue<idx_t>(w_end, g.carry_win_start_row + g.carry_count);
+			if (c_from < c_to) {
+				idx_t c_src = c_from - g.carry_win_start_row; // row in carry_chunk
+				idx_t c_count = c_to - c_from;
+				idx_t c_dst = output_offset + placed + (c_from - w_start);
+				for (idx_t i = 0; i < g.read_cols.size(); i++) {
+					VectorOperations::Copy(g.carry_chunk->data[i], output.data[g.out_positions[i]], c_src + c_count, c_src,
+					                       c_dst);
+				}
+				segment_pos += c_count;
+				if (c_to > g.carry_win_start_row) {
+					// drop the drained prefix; the tail (if any) moves to the front
+					idx_t consumed = c_to - g.carry_win_start_row;
+					g.carry_win_start_row += consumed;
+					g.carry_count -= consumed;
+					if (g.carry_count > 0) {
+						for (idx_t i = 0; i < g.read_cols.size(); i++) {
+							VectorOperations::Copy(g.carry_chunk->data[i], g.carry_chunk->data[i],
+							                       consumed + g.carry_count, consumed, 0);
+						}
+					}
+					g.carry_chunk->SetCardinality(g.carry_count);
+				}
+			}
+		}
 
 		// Read rows from the parquet window and copy vectors into the output chunk.
 		// Chunks cover consecutive parquet-window rows [pos, pos + c); the plan
 		// maps them to window-local rows (skipped segments are not in the stream).
-		idx_t segment_pos = 0;
 		while (segment_pos < read_need) {
 			auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			auto async_type = res.GetResultType();
@@ -842,14 +931,15 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 				continue;
 			}
 			idx_t win_pos = seg.win_start + (valid_from - seg.flow_off);
-			// Overlap of the vector's window range [win_pos, win_pos + valid_len)
-			// with the wanted range [w_start, w_end). copy_from >= copy_to means
-			// no overlap (the vector lies entirely before OR entirely after the
-			// wanted rows) — discard. This must clamp against BOTH ends: a
-			// vector beyond w_end would otherwise underflow the subtraction
-			// below and copy out-of-bounds (heap corruption).
+			idx_t win_begin = win_pos; // window coord of vector[0]
+			idx_t win_end = seg.win_start + (valid_to - seg.flow_off); // window coord of vector end
+			// Overlap of the vector's window range [win_pos, win_end) with the
+			// wanted range [w_start, w_end). copy_from >= copy_to means no
+			// overlap (the vector lies entirely before OR entirely after the
+			// wanted rows) — discard. Clamp against BOTH ends so copy_count can
+			// never underflow.
 			idx_t copy_from = MaxValue<idx_t>(w_start, win_pos);
-			idx_t copy_to = MinValue<idx_t>(w_end, win_pos + (valid_to - valid_from));
+			idx_t copy_to = MinValue<idx_t>(w_end, win_end);
 			if (copy_from >= copy_to) {
 				g.parquet_pos += chunk_rows;
 				continue;
@@ -860,12 +950,9 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 				g.parquet_pos += chunk_rows;
 				continue;
 			}
-			// Chunk-local source offset: window row `copy_from` maps to RG row
-			// flow_off + (copy_from - win_start), and the chunk starts at RG row
-			// rg_off. (copy_from - win_pos) is only equal when the window starts
-			// at the RG start; for mid-RG windows (flow_off > 0) it copies the
-			// wrong rows — e.g. window [1096,2048) of a 2048-row RG with
-			// rg_off=0 must start at chunk row 1096, not 0.
+			// Vector-local source offset: window row `copy_from` maps to RG row
+			// flow_off + (copy_from - win_start), and the vector starts at RG
+			// row rg_off. This gives the row index within THIS vector.
 			idx_t src_offset = seg.flow_off + (copy_from - seg.win_start) - rg_off;
 			idx_t dst_offset = output_offset + placed + (copy_from - w_start);
 			for (idx_t i = 0; i < g.read_cols.size(); i++) {
@@ -878,6 +965,25 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			}
 			segment_pos += copy_count;
 			g.parquet_pos += chunk_rows;
+
+			// If this vector over-read past the wanted range, its surplus rows
+			// become the carry for the next chunk. Carry only happens on the
+			// last useful vector (the loop would otherwise still need more
+			// rows); copy the surplus into carry_chunk so the window stays
+			// reusable without re-initialization.
+			if (win_end > w_end) {
+				idx_t surplus_count = win_end - w_end;
+				// window row `w_end` maps to vector row
+				// (seg.flow_off + (w_end - seg.win_start) - rg_off)
+				idx_t v_src = seg.flow_off + (w_end - seg.win_start) - rg_off;
+				g.carry_count = surplus_count;
+				g.carry_win_start_row = w_end;
+				g.carry_chunk->Reset();
+				g.carry_chunk->SetCardinality(surplus_count);
+				for (idx_t i = 0; i < g.read_cols.size(); i++) {
+					VectorOperations::Copy(g.chunk->data[i], g.carry_chunk->data[i], v_src + surplus_count, v_src, 0);
+				}
+			}
 		}
 
 		// Columns absent from this part read as NULL (schema evolution, contract §8)

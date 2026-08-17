@@ -114,6 +114,20 @@ TableManifest ReadTableManifest(FileSystem &fs, const string &manifest_path) {
 		if (GetStringField(root, "canonical_order", canonical_order)) {
 			manifest.canonical_order = canonical_order;
 		}
+		// aligned (bool, default true): whether leaf pruning results can be
+		// unified into one alignment-group coordinate via intersection.
+		auto aligned_val = duckdb_yyjson::yyjson_obj_get(root, "aligned");
+		if (aligned_val) {
+			if (duckdb_yyjson::yyjson_is_bool(aligned_val)) {
+				manifest.aligned = duckdb_yyjson::yyjson_get_bool(aligned_val);
+			} else if (duckdb_yyjson::yyjson_is_true(aligned_val)) {
+				manifest.aligned = true;
+			} else if (duckdb_yyjson::yyjson_is_false(aligned_val)) {
+				manifest.aligned = false;
+			} else {
+				throw IOException("Aligned table: field 'aligned' in '%s' must be a boolean", manifest_path);
+			}
+		}
 		GetUIntField(root, "row_count", manifest.row_count);
 		GetUIntField(root, "row_group_size", manifest.row_group_size);
 		manifest.groups = GetStringArray(root, "groups", manifest_path, true);
