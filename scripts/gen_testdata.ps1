@@ -138,14 +138,18 @@ foreach ($p in $Partitions) {
         # schema evolution: this partition introduces a new column
         $extra = ", CASE WHEN r % 3 = 0 THEN CAST((r + 1) * 0.001 AS DOUBLE) ELSE NULL END AS alpha099"
     }
-    $alphaColList = @('CAST(r AS BIGINT) AS rowid_alpha') + $alphaCols
+    # close duplicates the index column (contract §2.2e.1: ignored by the reader);
+    # vwap duplicates across non-index groups (contract §2.2e.2: qualified names only)
+    $alphaColList = @('CAST(r AS BIGINT) AS rowid_alpha') + $alphaCols +
+        @('CAST((r + 1) * 0.25 AS DOUBLE) AS close', 'CAST((r + 1) * 0.125 AS DOUBLE) AS vwap')
     $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT $(($alphaColList -join ', '))$extra
   FROM r
 ) TO '$($alphaDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 1000, COMPRESSION ZSTD);"
     Run-DuckDB $sql
-    $alphaColumns = @('rowid_alpha') + (1..10 | ForEach-Object { "alpha$('{0:D3}' -f $_)" })
+    $alphaColumns = @('rowid_alpha') + (1..10 | ForEach-Object { "alpha$('{0:D3}' -f $_)" }) +
+        @('close', 'vwap')
     if ($extra) { $alphaColumns += 'alpha099' }
     Write-JsonFile (Join-Path $alphaDir 'part-000000.aligned.json') @{
         table          = $table
@@ -171,7 +175,9 @@ foreach ($p in $Partitions) {
   SELECT CAST(r AS BIGINT) AS rowid_ma,
          CAST((r % 20) * 0.1 AS DOUBLE) AS ma5,
          CAST((r % 30) * 0.05 AS DOUBLE) AS ma10,
-         CAST((r % 60) * 0.025 AS DOUBLE) AS ma20
+         CAST((r % 60) * 0.025 AS DOUBLE) AS ma20,
+         CAST((r + 1) * 0.0625 AS DOUBLE) AS close,
+         CAST((r + 1) * 0.03125 AS DOUBLE) AS vwap
   FROM r
 ) TO '$($maDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, COMPRESSION ZSTD);"
     Run-DuckDB $sql
@@ -182,7 +188,7 @@ foreach ($p in $Partitions) {
         start_row      = $start
         row_count      = $rows
         row_group_size = 2048
-        columns        = @('rowid_ma', 'ma5', 'ma10', 'ma20')
+        columns        = @('rowid_ma', 'ma5', 'ma10', 'ma20', 'close', 'vwap')
     }
     # second transaction appends its part to the shared marker (contract v1.1)
     $markerParts = @()
@@ -192,6 +198,16 @@ foreach ($p in $Partitions) {
         parts = $markerParts
     }
 }
+
+# ---- ignored directory (contract §2.1d): a _tmp directory with stray parts --
+$tmpDir = Join-Path $tableDir '_tmp\transaction-999\index\date=2026-08-17'
+New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+$sql = "COPY (
+  WITH r AS (SELECT range AS r FROM range(0, 100))
+  SELECT DATE '2026-08-17' AS date, printf('%06d', r + 1) AS symbol, CAST(r AS DOUBLE) AS close
+  FROM r
+) TO '$($tmpDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET);"
+Run-DuckDB $sql
 
 Write-Host "Test data generated under $dataRoot"
 Write-Host "  table: $table, rows: 6000, groups: index / factor/alpha101 / fieldset/ma"

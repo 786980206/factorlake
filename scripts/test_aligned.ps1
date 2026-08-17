@@ -26,6 +26,16 @@ function Run-DuckDB([string]$sql) {
     return $out
 }
 
+# SQL containing backtick/double-quoted identifiers cannot survive PS 5.1
+# native-arg passing (-c mangles embedded quotes) — pipe via a temp file.
+function Run-DuckDB-File([string]$sql) {
+    $tmp = Join-Path $env:TEMP 'aligned_test_query.sql'
+    Set-Content -Path $tmp -Encoding UTF8 -Value $sql
+    $out = cmd /c "`"$db`" -csv -noheader < `"$tmp`"" 2>&1 | Out-String
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    return $out
+}
+
 # --- counts + cross-group alignment -----------------------------------------
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; WITH t AS (SELECT * FROM aligned_table('cnstk_ixday')) SELECT count(*) AS c, count(alpha001) AS a1, count(alpha099) AS a99, sum(CASE WHEN rowid != rowid_alpha OR rowid != rowid_ma THEN 1 ELSE 0 END) AS mis FROM t;"
 $vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','
@@ -69,6 +79,54 @@ $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(rowid_ma) FRO
 if ($out -match '(?m)^6000\r?$') { Write-Host 'PASS: single-group projection' } else { Write-Host "FAIL: single-group projection ($out)"; $script:failures++ }
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT alpha099 FROM aligned_table('cnstk_ixday') WHERE rowid = 3000;"
 if ($out -match '(?m)^3\.001\r?$') { Write-Host 'PASS: projection + schema evolution' } else { Write-Host "FAIL: projection + evolution ($out)"; $script:failures++ }
+
+# --- column-name rules (contract §2.2e) --------------------------------------
+# e1: columns duplicated with index resolve to the index copy (authoritative)
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT close FROM aligned_table('cnstk_ixday') WHERE rowid = 100;"
+if ($out -match '(?m)^50\.5\r?$') { Write-Host 'PASS: e1 bare close = index (authoritative)' } else { Write-Host "FAIL: e1 bare close ($out)"; $script:failures++ }
+# e1: the index-duplicated copy is ignored in the non-index group (qualified ref must fail)
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$out = Run-DuckDB-File "SET aligned_data_root='$dataRoot'; SELECT ""factor.alpha101.close"" FROM aligned_table('cnstk_ixday') LIMIT 1;"
+$ErrorActionPreference = $prevEAP
+if ($LASTEXITCODE -ne 0 -and $out -match 'not found') { Write-Host 'PASS: e1 qualified alpha101.close rejected' } else { Write-Host "FAIL: e1 qualified alpha101.close ($out)"; $script:failures++ }
+# e2: bare name of a cross-group duplicate must fail
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$out = Run-DuckDB-File "SET aligned_data_root='$dataRoot'; SELECT vwap FROM aligned_table('cnstk_ixday') LIMIT 1;"
+$ErrorActionPreference = $prevEAP
+if ($LASTEXITCODE -ne 0 -and $out -match 'not found') { Write-Host 'PASS: e2 bare vwap rejected' } else { Write-Host "FAIL: e2 bare vwap ($out)"; $script:failures++ }
+# e2: qualified names resolve per group
+$out = Run-DuckDB-File "SET aligned_data_root='$dataRoot'; SELECT ""factor.alpha101.vwap"" AS a, ""fieldset.ma.vwap"" AS m FROM aligned_table('cnstk_ixday') WHERE rowid = 100;"
+if ($out -match '(?m)^12\.625,3\.15625\r?$') { Write-Host 'PASS: e2 qualified vwap per group' } else { Write-Host "FAIL: e2 qualified vwap ($out)"; $script:failures++ }
+# e3: bare names of non-duplicated columns work
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rowid_alpha, ma5 FROM aligned_table('cnstk_ixday') WHERE rowid = 100;"
+if ($out -match '(?m)^100,0\.0\r?$') { Write-Host 'PASS: e3 bare non-duplicated columns' } else { Write-Host "FAIL: e3 bare columns ($out)"; $script:failures++ }
+
+# --- directory rules (contract §2.1b/c) --------------------------------------
+# §2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above;
+# without the rule the stray 100-row part would break discovery/counts)
+# §2.1b: a table without the mandatory index group must fail
+$badIdx = Join-Path $dataRoot 'badidx\_table.json'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badIdx) | Out-Null
+'{"name":"badidx","version":1,"key":["date","symbol"],"canonical_order":"fixed","row_count":10,"groups":["factor/alpha101"]}' | Set-Content -Path $badIdx -Encoding Ascii
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badidx');" 2>&1 | Out-String
+$ErrorActionPreference = $prevEAP
+if ($LASTEXITCODE -ne 0 -and $out -match "mandatory group 'index'") { Write-Host 'PASS: §2.1b missing index group rejected' } else { Write-Host "FAIL: §2.1b missing index ($out)"; $script:failures++ }
+Remove-Item (Join-Path $dataRoot 'badidx') -Recurse -Force
+# §2.1c: a one-level non-index group must fail (malformed group first in the
+# list so the check fires before any group dir is accessed)
+$badLvl = Join-Path $dataRoot 'badlvl\_table.json'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badLvl) | Out-Null
+'{"name":"badlvl","version":1,"key":["date"],"canonical_order":"fixed","row_count":10,"groups":["single","index"]}' | Set-Content -Path $badLvl -Encoding Ascii
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badlvl');" 2>&1 | Out-String
+$ErrorActionPreference = $prevEAP
+if ($LASTEXITCODE -ne 0 -and $out -match "two-level path") { Write-Host 'PASS: §2.1c one-level group rejected' } else { Write-Host "FAIL: §2.1c one-level group ($out)"; $script:failures++ }
+Remove-Item (Join-Path $dataRoot 'badlvl') -Recurse -Force
 
 # --- error cases (expected failures — must not terminate the script) ---------
 $prevEAP = $ErrorActionPreference

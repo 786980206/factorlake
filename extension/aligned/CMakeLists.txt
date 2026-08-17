@@ -15,6 +15,7 @@ set(ALIGNED_EXTENSION_FILES
     src/extension.cpp
     src/catalog/manifest.cpp
     src/resolver/row_space.cpp
+    src/resolver/partition_resolver.cpp
     src/scan/aligned_scan.cpp
 )
 

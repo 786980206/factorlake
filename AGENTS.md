@@ -320,8 +320,18 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
   - 验收：`scripts/test_aligned.ps1` **14/14 PASS**
 - [x] `scripts/gen_testdata.ps1` 测试数据生成器
 - [x] git 仓库（提交历史见 git log）
-- [ ] Phase 3 Partition / predicate pushdown（Hive pruning + RG stats）
-- [ ] Phase 4 Parallel scan（atomic task cursor）
+- [x] **Phase 3 Partition / Predicate Pushdown 完成（2026-08）**：
+  - Partition pruning：`PrunePartsByFilter`（等值走目录路径；范围走 part 路径反向重建 part 日期，
+    有界、不迭代日期）
+  - Row Group stats pruning：`ComputeRowGroupWindow` 用 parquet 列统计 `CheckStatistics`，
+    FILTER_ALWAYS_FALSE/FALSE_OR_NULL 的 RG 不进扫描窗口、整段 NULL 填充（行级 filter 必拒）
+  - Row-level filter：`TableFilterState::Initialize` + `ColumnSegment::FilterSelection` 链式
+    （尊重传入 selection，支持 AND 组合），经 scratch chunk 组装/Slice 后 `Reference` 输出
+  - §3.1/§4 用户约束全部落地：index 必须存在（§2.1b）、非 index 必须两级目录 lv1/lv2（§2.1c）、
+    路径段以 `.`/`_` 开头一律忽略（§2.1d）、重复列规则（§2.2e：与 index 重复→忽略非 index 副本；
+    非 index 组间重复→仅限定名 `lv1.lv2.col`；裸名→not found）
+  - 验收：`scripts/test_aligned.ps1` **21/21 PASS**（新增 §2.1b/c、§2.2e1/e2/e3 自动化测试）
+- [ ] Phase 4 Parallel scan（atomic task cursor）+ Metadata Cache
 
 ### Phase 1 关键经验（必须记住，避免重踩）
 
@@ -356,6 +366,29 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
 2. **全量列→投影位映射**放在 `AlignedScanGlobalState`（init_global 构建一次）：
    `projected_pos[full_id] = chunk 位置`；Group 级 `group_active` 决定是否打开。
    OpenPart 只读被请求列（`column_ids` 传给 ParquetReader 实现文件内列投影）。
+
+### Phase 3 关键经验
+
+1. **`ScanGroupWindow` 的 src_offset 计算（最隐蔽的数据错误，2026-08）**：
+   `src_offset = copy_from - win_pos` **只在窗口起点 == RG 起点时正确**（flow_off == rg_off）。
+   窗口从 RG 中部开始（flow_off > 0，如 chunk 2 请求 index day-18 part-000000 的 local
+   [1096,2048)，RG 是 [0,2048)）时，必须用：
+   `src_offset = seg.flow_off + (copy_from - seg.win_start) - rg_off`
+   （窗口行 w ↔ RG 行 flow_off + (w - win_start) ↔ chunk 行 = 该值 - rg_off）。
+   错误症状极具迷惑性：`count(rowid)` 显示 6000（被 count(*) 优化掩盖）、
+   `misaligned = 0`（index 与 alpha 被**同样方式**破坏 → 互相"对齐"）、
+   只有 count(alpha001)/count(alpha099) 各差 +1（952 行错位恰好各多 1 个命中）。
+   诊断方法：`sum(rowid)`（期望 17,997,000）+ `row_number() OVER ()` 定位错位区间；
+   **不要**依赖 count(rowid)/count(*)（DuckDB 会用 Cardinality 统计优化掉扫描）。
+2. **DuckDB COPY TO PARQUET 的 ROW_GROUP_SIZE 不精确**：请求 1000 实际写出
+   [0,2048)+[2048,3000)（writer 按 vector 大小 2048 flush）；分析 RG 布局以
+   `parquet_metadata` 实测为准，别信 manifest 声明。
+3. **PS 5.1 `-c` 传参无法携带引号标识符**：`"` 和 `` ` `` 都会被 mangle（DuckDB 1.5.4
+   也不支持反引号标识符）。测试脚本里带引号标识符的 SQL 走临时文件 +
+   `cmd /c "exe -csv -noheader < file"`（`Run-DuckDB-File`）。
+4. **行级 filter 路径**：`TableFilterState::Initialize(context, filter)` 一次；
+   `ColumnSegment::FilterSelection(sel, vec, vdata, filter, state, scan_count, approved)`
+   尊重传入 selection 且 `scan_count` 是当前 selection 长度（链式 AND 直接传 approved）。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。

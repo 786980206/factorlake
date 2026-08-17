@@ -188,6 +188,21 @@ static PartInfo ReadPartSidecar(FileSystem &fs, const string &sidecar_path) {
 	return part;
 }
 
+//! Contract §2.1d: true when any directory segment of the path starts with
+//! '.' or '_' (e.g. "_tmp/", ".hidden/"). The file name segment is excluded.
+static bool HasIgnoredPathSegment(const string &path) {
+	auto start = path.find_first_of("/\\");
+	while (start != string::npos) {
+		auto end = path.find_first_of("/\\", start + 1);
+		string segment = path.substr(start + 1, end == string::npos ? string::npos : end - start - 1);
+		if (!segment.empty() && (segment[0] == '.' || segment[0] == '_')) {
+			return true;
+		}
+		start = end;
+	}
+	return false;
+}
+
 //! Reads the commit marker of a partition directory (contract §9). Returns the
 //! set of committed part names (basenames). A missing or invalid marker means
 //! the directory is not committed and every part in it is invisible.
@@ -234,8 +249,31 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		                  table_name);
 	}
 
+	// Contract §2.1b: the 'index' group is mandatory
+	bool has_index = false;
+	for (auto &g : plan.table.groups) {
+		if (StringUtil::CIEquals(g, "index")) {
+			has_index = true;
+			break;
+		}
+	}
+	if (!has_index) {
+		throw IOException("Aligned table '%s': mandatory group 'index' is missing from _table.json", plan.table.name);
+	}
+
 	for (auto &group_name : plan.table.groups) {
 		GroupPlan group;
+		// Contract §2.1c: every non-index group is a two-level path 'lv1/lv2'
+		if (!StringUtil::CIEquals(group_name, "index")) {
+			auto slash = group_name.find('/');
+			if (slash == string::npos || group_name.find('/', slash + 1) != string::npos || slash == 0 ||
+			    slash + 1 >= group_name.size()) {
+				throw IOException("Aligned table '%s': group '%s' must be a two-level path 'lv1/lv2' (except 'index')",
+				                  plan.table.name, group_name);
+			}
+			group.lv1 = group_name.substr(0, slash);
+			group.lv2 = group_name.substr(slash + 1);
+		}
 		group.group_path = plan.table_path + "/" + group_name;
 		group.manifest = ReadGroupManifest(fs, group.group_path + "/_group.json");
 		if (!StringUtil::CIEquals(group.manifest.group, group_name)) {
@@ -247,10 +285,15 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			                  plan.table.name, group_name, group.manifest.row_count, plan.table.row_count);
 		}
 
-		// Discover part files (any physical partition layout; uncommitted parts are invisible)
+		// Discover part files (any physical partition layout; uncommitted parts
+		// are invisible; directories starting with '.' or '_' are ignored)
 		auto files = fs.GlobFiles(group.group_path + "/**/part-*.parquet", FileGlobOptions::ALLOW_EMPTY);
 		for (auto &file : files) {
 			auto &path = file.path;
+			if (HasIgnoredPathSegment(path)) {
+				// Contract §2.1d: ignore paths whose directory segments start with '.' or '_'
+				continue;
+			}
 			auto slash = path.find_last_of("/\\");
 			string dir = slash == string::npos ? "" : path.substr(0, slash);
 			auto committed = ReadCommitMarker(fs, dir, plan.table.name, group_name);

@@ -48,8 +48,10 @@ struct GroupPlan {
 	string group_path; // absolute path of the group directory
 	GroupManifest manifest;
 	vector<PartInfo> parts; // sorted by start_row, validated to tile [0, row_count)
-	vector<string> column_order; // union of part columns, first-seen order
+	vector<string> column_order; // union of part columns (physical names), first-seen order
 	vector<idx_t> output_positions; // table output position per column_order entry
+	string lv1; // first path level of the group ("factor"); empty for "index"
+	string lv2; // second path level ("alpha101"); empty for "index"
 };
 
 // The fully resolved scan plan of one logical table.

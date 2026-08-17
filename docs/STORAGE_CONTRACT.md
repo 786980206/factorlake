@@ -51,6 +51,32 @@
 4. Physical Partition 目录是**叶子目录**：直接包含 part 文件，不再有子目录（partitioning 模板的最后一层）。
 5. 目录里除本契约列出的文件外不允许其他文件（便于 glob 与校验）。
 
+### 2.1 目录硬性规则（v1.2，2026-08 用户补充）
+
+a. `<table_name>` 即表名（如 `cnstk_ixday`）。
+b. **`<table>/index` 必须存在**：每张表必须有 index Group（物理目录 + `_group.json`），
+   缺失即报错。Key 列与基础列都住在 index。
+c. **其余 Group 必须以两级目录存在**：`<table>/<lv1>/<lv2>/`（如 `factor/alpha101`、
+   `fieldset/ma`、`panel/cnstk_klday`）。manifest 的 `groups` 条目必须形如 `lv1/lv2`，
+   否则报错。Physical Partition 目录在 group 目录之下，不受此限制。
+d. **目录发现时忽略任何以 `.` 或 `_` 开头的目录**（如 `_tmp/`、`.hidden/`）：
+   glob 结果中路径段以 `.`/`_` 开头的 part 一律跳过；`_table.json`、`_group.json`、
+   sidecar 等以 `.`/`_` 开头的**文件**不受影响。
+
+### 2.2 列名规则（v1.2，2026-08 用户补充）
+
+e. **重复列名的处理**（按优先级）：
+
+   1. **与 index 中重复的列名，全部忽略**：非 index Group 中的同名列不进入表 schema
+      （index 列是权威的）；reader 扫描时跳过这些列（不读、不填）。
+   2. **非 index Group 之间重复的列名，必须用限定名引用**：`lv1_name.lv2_name.col_name`
+      （如 `factor.alpha101.close`）。表 schema 中这类列只以限定名注册（裸名不注册）；
+      引用裸名 → 报"列不存在"；引用限定名（DuckDB 中需反引号）→ 正常。
+   3. 非重复列名照常以裸名注册。
+
+   物理映射：Group 内部仍按裸名与 sidecar/parquet 列匹配；`lv1`/`lv2` 来自 group 路径。
+   Writer 侧：非 index Group 不应写与 index 重复的列（写了会被 Reader 忽略）。
+
 ---
 
 ## 3. Canonical Row Space（"row N 对齐"的精确定义）
