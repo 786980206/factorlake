@@ -175,8 +175,23 @@ fi
 # ---------- measurement ---------------------------------------------------------------
 now_ns(){ date +%s%N; }
 elapsed(){ echo "scale=9; ($2 - $1)/1000000000" | bc -l; }
-run_one(){ # e q f sel th -> prints "cold warm" (fresh process, run twice)
-  local e="$1" q="$2" f="$3" sel="$4" th="$5" sql a b cold warm
+# Repeat the SAME query REPEATS times in ONE duckdb process (separated by ';')
+# and time the whole batch, then divide by REPEATS. This amortizes the per-
+# process startup cost (~0.02s) that otherwise dominates tiny/cached datasets
+# (e.g. the A-ALIGNED-vs-A-NORMAL gap seen earlier was this startup noise, not
+# the engine). warm_s = mean per query.
+REPEATS=${REPEATS:-5}
+ddb_repeat(){ # pre sql threads -> mean seconds over REPEATS in one process
+  local pre="$1" sql="$2" th="$3" i batch="" a b dt
+  for i in $(seq 1 "$REPEATS"); do batch+="$sql "; done
+  a=$(now_ns)
+  "$DUCKDB" -light-mode -csv -noheader -c "SET threads=$th; $pre $batch" >/dev/null 2>&1 || true
+  b=$(now_ns)
+  dt=$(elapsed "$a" "$b")
+  echo "scale=9; $dt / $REPEATS" | bc -l
+}
+run_one(){ # e q f sel th -> prints "cold warm"
+  local e="$1" q="$2" f="$3" sel="$4" th="$5" sql a b cold warm pre
   sql=$(engine_sql "$e" "$q" "$f" "$sel" "$ROWS")
   if [[ "$sql" == __polars__* ]]; then
     read -r _ pe pq pf psel palpha pfs pbase prows <<< "$sql"
@@ -187,8 +202,10 @@ run_one(){ # e q f sel th -> prints "cold warm" (fresh process, run twice)
     return
   fi
   if [ "$e" = "A-ALIGNED" ] || [ "$e" = "A-NORMAL" ]; then pre="SET aligned_data_root='$OUT';"; else pre=""; fi
+  # cold: single fresh-process run (first touch; still includes startup)
   a=$(now_ns); "$DUCKDB" -light-mode -csv -noheader -c "SET threads=$th; $pre $sql" >/dev/null 2>&1 || true; b=$(now_ns); cold=$(elapsed "$a" "$b")
-  a=$(now_ns); "$DUCKDB" -light-mode -csv -noheader -c "SET threads=$th; $pre $sql" >/dev/null 2>&1 || true; b=$(now_ns); warm=$(elapsed "$a" "$b")
+  # warm: mean over REPEATS in ONE process (startup amortized out)
+  warm=$(ddb_repeat "$pre" "$sql" "$th")
   printf '%.6f %.6f' "$cold" "$warm"
 }
 
