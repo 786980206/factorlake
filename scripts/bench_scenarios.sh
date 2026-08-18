@@ -102,6 +102,9 @@ run_stage g-1m-q 1000000 128 90  "$ENG4" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S
 # g-10m: next scale step — 10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
 # expensive D-JOIN / P-JOIN baselines stay tractable (they are ~40-150x slower).
 run_stage g-10m 10000000 128 90 "$ENG6" "1" "Q2" "F1,F2" "S0"
+# g-w2: width direction — 500K x 1024 (W2) x 90%, heavy projections Q3/Q5, 4 DDB
+# engines, t=1. Verifies aligned's gap to D-WIDE narrows as columns/row-groups grow.
+run_stage g-w2 500000 1024 90 "$ENG4" "1" "Q3,Q5" "F1,F2" "S0"
 # sparsity sweep (reuse 1M x 128)
 for sp in dense 90 99; do
   run_stage "g-sparse-$sp" 1000000 128 "$sp" "$ENG4" "1,4" "Q2" "F2" "S1"
