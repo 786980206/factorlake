@@ -187,7 +187,7 @@ REPEATS=${REPEATS:-5}
 # ddb_run <th> <pre> <sql...> — run DuckDB, feeding the SQL through a temp file
 # on stdin so very wide queries (W3, thousands of columns) that overflow ARG_MAX
 # with `-c` still execute. All measurement/consistency calls go through here.
-DDB_SQL_TMP="$TMPDIR/rmb_$$.sql"
+DDB_SQL_TMP="${TMPDIR:-/tmp}/rmb_$$.sql"
 ddb_run(){ local th="$1" pre="$2"; shift 2
   printf 'SET threads=%s;\n%s\n' "$th" "$pre" > "$DDB_SQL_TMP"
   printf '%s\n' "$@" >> "$DDB_SQL_TMP"

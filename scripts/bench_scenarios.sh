@@ -95,9 +95,9 @@ thread_stage(){ [ -n "$ONLY" ] && [ "$ONLY" != "g-thread" ] && return 0
 }
 
 run_stage g-250k 250000 128 90   "$ENG6" "1,4" "Q2,Q5" "F1,F2" "S0"
-# g-1m 6-engine uses Q2 (35 cols, keeps polars fast). Full-scan Q5 (all 128 cols)
-# is expensive under polars hstack/join at 1M, so it runs in g-1m-q with 4 DDB engines.
-run_stage g-1m   1000000 128 90  "$ENG6" "1,4" "Q2" "F1,F2" "S0"
+# g-1m 6-engine uses Q2 (35 cols) but keeps to probe-only workload (t=1, F2 only)
+# so the slow polars P-JOIN baseline stays tractable at 1M.
+run_stage g-1m   1000000 128 90  "$ENG6" "1" "Q2" "F2" "S0"
 run_stage g-1m-q 1000000 128 90  "$ENG4" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S0,S1"
 # g-10m: next scale step — 10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
 # expensive D-JOIN / P-JOIN baselines stay tractable (they are ~40-150x slower).
