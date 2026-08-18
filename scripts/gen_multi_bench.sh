@@ -68,7 +68,9 @@ rowsPerDay=$((ROWS / ${#Days[@]}))
 
 rj(){ mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" > "$1"; }
 partn(){ printf 'part-%06d' "$1"; }
-run_duck(){ "$DUCKDB" -light-mode -c "$1" >/dev/null; }
+# Run a (potentially huge) SQL statement via a temp file on stdin, so very wide
+# datasets (W3, thousands of columns) that overflow ARG_MAX with `-c` still work.
+run_duck(){ local tmp="$OUT/.gen_bench.sql"; printf '%s\n' "$1" > "$tmp"; "$DUCKDB" -light-mode < "$tmp" >/dev/null; }
 
 echo "== gen $TABLE: rows=$ROWS width=$WIDTH (idx=$INDEX_COLS alpha=$ALPHA_COLS fs=$FIELDSET_COLS) sparse=${NULL_PCT}% aligned=$ALIGNED =="
 

@@ -184,11 +184,19 @@ elapsed(){ echo "scale=9; ($2 - $1)/1000000000" | bc -l; }
 # (e.g. the A-ALIGNED-vs-A-NORMAL gap seen earlier was this startup noise, not
 # the engine). warm_s = mean per query.
 REPEATS=${REPEATS:-5}
+# ddb_run <th> <pre> <sql...> — run DuckDB, feeding the SQL through a temp file
+# on stdin so very wide queries (W3, thousands of columns) that overflow ARG_MAX
+# with `-c` still execute. All measurement/consistency calls go through here.
+DDB_SQL_TMP="$TMPDIR/rmb_$$.sql"
+ddb_run(){ local th="$1" pre="$2"; shift 2
+  printf 'SET threads=%s;\n%s\n' "$th" "$pre" > "$DDB_SQL_TMP"
+  printf '%s\n' "$@" >> "$DDB_SQL_TMP"
+  "$DUCKDB" -light-mode -csv -noheader < "$DDB_SQL_TMP"
+}
 ddb_repeat(){ # pre sql threads -> mean seconds over REPEATS in one process
-  local pre="$1" sql="$2" th="$3" i batch="" a b dt
-  for i in $(seq 1 "$REPEATS"); do batch+="$sql "; done
+  local pre="$1" sql="$2" th="$3" i a b dt
   a=$(now_ns)
-  "$DUCKDB" -light-mode -csv -noheader -c "SET threads=$th; $pre $batch" >/dev/null 2>&1 || true
+  for i in $(seq 1 "$REPEATS"); do ddb_run "$th" "$pre" "$sql" >/dev/null 2>&1 || true; done
   b=$(now_ns)
   dt=$(elapsed "$a" "$b")
   echo "scale=9; $dt / $REPEATS" | bc -l
@@ -206,7 +214,7 @@ run_one(){ # e q f sel th -> prints "cold warm"
   fi
   if [ "$e" = "A-ALIGNED" ] || [ "$e" = "A-NORMAL" ]; then pre="SET aligned_data_root='$OUT';"; else pre=""; fi
   # cold: single fresh-process run (first touch; still includes startup)
-  a=$(now_ns); "$DUCKDB" -light-mode -csv -noheader -c "SET threads=$th; $pre $sql" >/dev/null 2>&1 || true; b=$(now_ns); cold=$(elapsed "$a" "$b")
+  a=$(now_ns); ddb_run "$th" "$pre" "$sql" >/dev/null 2>&1 || true; b=$(now_ns); cold=$(elapsed "$a" "$b")
   # warm: mean over REPEATS in ONE process (startup amortized out)
   warm=$(ddb_repeat "$pre" "$sql" "$th")
   printf '%.6f %.6f' "$cold" "$warm"
