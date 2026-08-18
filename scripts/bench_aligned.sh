@@ -46,7 +46,7 @@ JOIN_ALPHA="$BASELINE/join_alpha.parquet"
 JOIN_MA="$BASELINE/join_ma.parquet"
 WIDE="$BASELINE/wide.parquet"
 
-index_list="DATE '2026-09-01' + (r / $ROWS_PER_DAY)::INT AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid"
+index_list="DATE '2026-09-01' + (r // $ROWS_PER_DAY)::INT AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid"
 alpha_list="CAST(r AS BIGINT) AS rowid_alpha"
 for n in $(seq 0 99); do
   alpha_list+=", CASE WHEN r % 7 = 0 THEN CAST((r + $((n + 1))) * 0.001 AS DOUBLE) ELSE NULL END AS alpha$(printf '%03d' "$n")"

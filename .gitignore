@@ -16,3 +16,8 @@ testdata/
 *.duckdb
 .DS_Store
 Thumbs.db
+
+# Python venvs (uv-managed polars runner)
+.venv/
+.venv-bench/
+__pycache__/
