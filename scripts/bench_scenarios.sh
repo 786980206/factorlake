@@ -42,13 +42,29 @@ ENG4="D-WIDE,D-JOIN,A-ALIGNED,A-NORMAL"
 
 avail(){ free -h | awk 'NR==2{print $7}'; }
 
-# gen_data <rows> <width> <sparsity> — regenerate bench_mb (and drop normal sibling)
-gen_data(){ local rows="$1" width="$2" sp="$3"
-  if [ "$SKIP_REG" = 1 ]; then echo "  (skip-regen) using existing bench_mb"; return 0; fi
-  rm -rf "$OUT/bench_mb" "$OUT/bench_baseline_mb" "$OUT/bench_mb_normal"
-  echo "  gen: rows=$rows width=$width sparse=$sp ..."
-  bash "$ROOT/scripts/gen_multi_bench.sh" --rows "$rows" --width "$width" --sparsity "$sp" \
-       --aligned true --out "$OUT" --tag mb >/dev/null
+# gen_data <rows> <width> <sparsity> — regenerate bench_mb (and drop normal sibling).
+# gen_multi_bench.sh writes a .gen-meta marker (rows/width/sparsity). With
+# --skip-regen we regenerate only if the marker matches ALL of rows/width/sparsity;
+# a stale or foreign dataset otherwise triggers a confusing self-check FAIL.
+gen_data(){ local rows="$1" width="$2" sp="$3" meta
+  meta="$OUT/bench_mb/.gen-meta"
+  local need_regen=1
+  if [ "$SKIP_REG" = 1 ] && [ -f "$meta" ] && [ -d "$OUT/bench_baseline_mb" ]; then
+    local mrows mwidth mspare
+    IFS=, read -r mrows mwidth mspare < "$meta"
+    if [ "$mrows" = "$rows" ] && [ "$mwidth" = "$width" ] && [ "$mspare" = "$sp" ]; then
+      need_regen=0
+      echo "  (skip-regen) existing bench_mb matches rows=$rows width=$width sparse=$sp"
+    else
+      echo "  (skip-regen detected stale meta rows=$mrows/$mwidth/$mspare, regenerating $rows/$width/$sp)"
+    fi
+  fi
+  if [ "$need_regen" = 1 ]; then
+    rm -rf "$OUT/bench_mb" "$OUT/bench_baseline_mb" "$OUT/bench_mb_normal"
+    echo "  gen: rows=$rows width=$width sparse=$sp ..."
+    bash "$ROOT/scripts/gen_multi_bench.sh" --rows "$rows" --width "$width" --sparsity "$sp" \
+         --aligned true --out "$OUT" --tag mb >/dev/null
+  fi
 }
 
 # run_stage <label> <rows> <width> <sparsity> <engines> <threads> <queries> <filters> <sels>
@@ -78,7 +94,9 @@ thread_stage(){ [ -n "$ONLY" ] && [ "$ONLY" != "g-thread" ] && return 0
 }
 
 run_stage g-250k 250000 128 90   "$ENG6" "1,4" "Q2,Q5" "F1,F2" "S0"
-run_stage g-1m   1000000 128 90  "$ENG6" "1,4" "Q2,Q5" "F1,F2" "S0"
+# g-1m 6-engine uses Q2 (35 cols, keeps polars fast). Full-scan Q5 (all 128 cols)
+# is expensive under polars hstack/join at 1M, so it runs in g-1m-q with 4 DDB engines.
+run_stage g-1m   1000000 128 90  "$ENG6" "1,4" "Q2" "F1,F2" "S0"
 run_stage g-1m-q 1000000 128 90  "$ENG4" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S0,S1"
 # sparsity sweep (reuse 1M x 128)
 for sp in dense 90 99; do

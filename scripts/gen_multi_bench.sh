@@ -167,6 +167,9 @@ run_duck "COPY (WITH r AS (SELECT range AS r FROM range(0,$ROWS)) SELECT $base_s
 run_duck "COPY (WITH r AS (SELECT range AS r FROM range(0,$ROWS)) SELECT $alpha_only FROM r) TO '$joinAl' (FORMAT PARQUET, COMPRESSION ZSTD);"
 run_duck "COPY (WITH r AS (SELECT range AS r FROM range(0,$ROWS)) SELECT $fs_only FROM r) TO '$joinFs' (FORMAT PARQUET, COMPRESSION ZSTD);"
 
+# record generation marker so staged drivers can verify (rows,width,sparsity)
+printf '%s,%s,%s\n' "$ROWS" "$WIDTH" "$SPARSITY" > "$tableDir/.gen-meta"
+
 echo "Generated $TABLE under $OUT"
 echo "  rows=$ROWS cols=$WIDTH sparse=${NULL_PCT}% aligned=$ALIGNED"
 echo "  baselines -> $baseDir (wide.parquet, join_index.parquet, join_alpha.parquet, join_fs.parquet)"
