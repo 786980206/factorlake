@@ -268,7 +268,7 @@ src/
 | 3 | **Partition / Predicate Pushdown**：Hive pruning + Parquet stats + RG pruning + projection + row-level filter（§3.1/§4 规则自动化测试） | ✅ 验收 21/21（2026-08） |
 | 4 | **Parallel Scan**：Aligned Row Group 为任务单元 + Metadata Cache（ObjectCache LRU） | ✅ 验收：`test_parallel.ps1` 全 PASS，8 线程 ≈ 4.2× 加速（2026-08） |
 | 5 | **Writer**：`aligned_write(table, source, mapping)` → 按 Column Group 拆列 → Parquet Writer（逐组同 Row Boundary）→ `_tmp` 暂存 + sidecar + commit marker 原子提交（append-only） | ✅ 验收：`test_writer.ps1` 全 PASS（空表首写 + 追加 + 进化列 + 闭环读回，2026-08） |
-| 6 | **Benchmark**：1M rows × 127 cols；投影 5/25/120 列；扫描 25%/100%；并发 1/4/8；对比 wide / JOIN / polars 横向 concat | ✅ `bench_aligned.ps1` + `bench_polars.py`（carry 优化后 aligned 加速显著，2026-08） |
+| 6 | **Benchmark**：1M rows × 127 cols；投影 5/25/120 列；扫描 25%/100%；并发 1/4/8；对比 wide / JOIN / polars 横向 concat | ✅ 旧：`bench_aligned.ps1`+`bench_polars.py`；**新**:`bench_scenarios.sh` 多场景框架（6 引擎、250K→10M 逐级递增、内存监控、一键复现），结论见 `docs/BENCHMARK_MULTI_ANALYSIS.md`（A-ALIGNED vs D-JOIN 10M≈40×、vs P-JOIN≈152×） |
 | 7 | **Compaction / Evolution**：`aligned_compact(table, group)` 合并 part（同分区目录→新 part，原子 marker 切换，旧文件删除），写前模拟校验 | ✅ 验收：`test_compaction.ps1` 全 PASS（2026-08） |
 | + | **元数据 `aligned` 开关**：`_table.json` `aligned`(bool, 默认 true)；true=leaf 剪枝结果映射统一坐标后相交为全局扫描区间；false=各 leaf 独立剪枝/规划，不做跨 leaf 交集（union 扫描） | ✅ `test_aligned_flag.ps1` 全 PASS（2026-08） |
 

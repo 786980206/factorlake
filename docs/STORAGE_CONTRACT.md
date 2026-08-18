@@ -155,6 +155,12 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 - `key`：Canonical Key 列名（必须在 `index/` Group 中存在）。
 - `row_count`：表权威行数，写入时由 Writer 维护；Reader 以此为扫描基数。
 - `row_group_size`：全表默认 Row Group 大小，Group 可覆盖。
+- `aligned`（bool，默认 true）：叶子间剪枝是否可统一传播的开关。
+  - `true`（默认）：各 leaf 的 partition pruning 结果映射到统一 Logical Row
+    Space 坐标后**相交**为一个全局扫描区间（跨 leaf 传播剪枝）。
+  - `false`：各 leaf 独立剪枝/规划，**不做跨 leaf 交集**——全局扫描区间为各
+    active leaf kept-part 区间之**并集**（gap 由 leaf 自行 NULL 补）。
+  - Writer 重写 `_table.json` 时必须保留该字段，否则退化为默认 true。
 
 ### 5.2 `_group.json`
 

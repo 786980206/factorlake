@@ -332,7 +332,7 @@ ninja -C build duckdb
 
 #### 测试数据与验收脚本（bash 版）
 - `scripts/gen_testdata.sh` — 生成测试数据到 `testdata/`（布局与 PS 版一致，6000 行）
-- `scripts/test_aligned.sh` — `test_aligned.ps1` 的 bash 版，**25/25 PASS**
+- `scripts/test_aligned.sh` — `test_aligned.ps1` 的 bash 版，**28/28 PASS**（含 Phase 3 分区剪枝断言）
 - 共享 helper：`scripts/lib_aligned.sh`（环境变量 `DUCKDB` / `ALIGNED_DATA_ROOT` 可覆盖）
 
 ```bash
@@ -343,6 +343,21 @@ bash scripts/test_aligned.sh
 
 > 注：`duckdb/` 为 gitignored（vendored 源码，重新拉取见 §16.2）；测试数据 `testdata/` 同样 gitignored。
 > 运行示例 SQL 时用 `SET aligned_data_root='<abs-path>/testdata';`（见 §17 各 Phase 的基线命令）。
+
+#### 多场景基准（Linux，Phase 6+）
+- Group Settings 事实来源：`bench/multi_bench_config.sh`（引擎组 D-WIDE/D-JOIN/
+  P-CONCAT/P-JOIN/A-ALIGNED/A-NORMAL、规模 R1..R4×W1..W3、稀疏、Q1..Q5、F1..F5、
+  S0..S3、环境、Tier A/B/C 组合）
+- 参数化数据生成：`scripts/gen_multi_bench.sh`（`--rows --width --sparsity --aligned`
+  `--out --tag`；所有引擎读同一逻辑源，保证 key/顺序/NULL 一致；写 `.gen-meta` 标记）
+- **一键递增基准**：`scripts/bench_scenarios.sh`（g-250k→g-1m→g-1m-q→g-10m→g-w2→
+  g-sparse→g-thread，逐级递增 + 内存监控 + 每阶段保存 `bench/out/g-*.csv` + SUMMARY）
+- 低层 runner：`scripts/run_multi_bench.sh`（`REPEATS` env 均值、`QS_OVERRIDE` 等
+  覆盖查询/过滤/选择率、`SELF-CHECK` 分区剪枝 + `CONSISTENCY` 跨引擎行数校验）
+- **polars 引擎（P-CONCAT/P-JOIN）需 polars**：`uv venv --python 3.13 .venv-bench` +
+  `uv pip install --python .venv-bench/bin/python polars`；P-CONCAT 用
+  `DataFrame.hstack` 做位置对齐横向拼接（见 §Phase 6 经验 4）。缺失时 P-* 自动跳过。
+- 一键复现 & 结论见 `docs/BENCHMARK_MULTI_ANALYSIS.md`（权威结论文档）。
 
 
 ---
@@ -424,7 +439,7 @@ bash scripts/test_aligned.sh
 - [x] **Linux 迁移 + 迁移暴露的两个真实 Bug 修复（2026-08）**：
   - Linux 环境/构建链路见 §16.2：gitee clone `duckdb/`（v1.5.4）、`cmake -G Ninja` +
     `scripts/aligned_extension_config.cmake` 注册扩展、产物 `duckdb/build/duckdb`
-  - bash 版脚本 `scripts/{gen_testdata,lib_aligned,test_aligned}.sh`（`test_aligned.sh` **25/25 PASS**）
+  - bash 版脚本 `scripts/{gen_testdata,lib_aligned,test_aligned}.sh`（`test_aligned.sh` **28/28 PASS**，见上方新增 3 个分区剪枝断言）
   - **Bug A（整块被过滤后误判扫描结束）**：`AlignedScanFunction` 改为内部 `while(true)`
     跳过被 row filter 全部拒绝的空 chunk，直到产出非空 chunk 或真正耗尽才返回 0 行；
     否则 DuckDB 把 0 行 chunk 当扫描结束中断后续 chunk（`WHERE rowid>=2048` 曾 0 行，应 3952）
@@ -456,6 +471,24 @@ bash scripts/test_aligned.sh
     生效，只是**非首分区直接崩溃**、且小数据全缓存下固定开销掩盖剪枝收益。修复后实测
     (400K, aligned) s25(1/4 扫描) threads=1 ≈ 0.06s vs s100(全扫) ≈ 0.14-0.21s，**≈2-3× 收益**；
     aligned 相对 wide/join 的优势需在更大/冷缓存数据上才显现（见 docs/BENCHMARK.md）。
+- [x] **Phase 6+ 多场景基准 + 一键复现框架（2026-08）**：
+  - **Group Settings 事实来源** `bench/multi_bench_config.sh`（6 引擎组 D-WIDE/D-JOIN/
+    P-CONCAT/P-JOIN/A-ALIGNED/A-NORMAL、R1..R4×W1..W3、DENSE/SPARSE-90/99、Q1..Q5、
+    F1..F5、S0..S3、COLD/WARM、线程/文件数/分区、Tier A/B/C）
+  - **参数化生成器** `scripts/gen_multi_bench.sh`（`--rows/--width/--sparsity/--aligned`，
+    所有引擎读同一逻辑源保证一致；写 `.gen-meta` 供 `--skip-regen` 校验规模）
+  - **一键递增基准** `scripts/bench_scenarios.sh`（g-250k→g-1m→g-1m-q→g-10m→g-w2→
+    g-sparse→g-thread，逐级递增 + 内存监控 + bench/out/g-*.csv + SUMMARY）
+  - 低层 runner `scripts/run_multi_bench.sh`：`REPEATS` 同进程均值、`QS/FS/SS_OVERRIDE`
+    覆盖查询/过滤/选择率、`SELF-CHECK` 分区剪枝 + `CONSISTENCY` 跨引擎行数校验
+  - polars 引擎 `scripts/bench_polars_multi.py`（P-CONCAT 用 `DataFrame.hstack`、
+    P-JOIN 用 rowid hash join），经 `uv venv .venv-bench`（py3.13+polars）运行
+  - **实测结论**（详见 `docs/BENCHMARK_MULTI_ANALYSIS.md`）：A-ALIGNED 相对 D-JOIN 在
+    1M×128≈5×、10M×128≈40×，相对 P-JOIN 10M≈152×（position 组装近似线性 vs JOIN/hstack
+    超线性）；A-ALIGNED≈A-NORMAL（差异是测量噪声）；D-WIDE 在窄表单 reader 仍最快、
+    随列数(W2 1024)→1.4×收窄；并行小数据~1.6×。
+  - **测试驱动又修 4 个 bug**：A-NORMAL 兄弟表重建、`.gen-meta` 规模校验、超宽 SQL
+    stdin 绕 ARG_MAX、`$TMPDIR` 未设置秒崩（`${TMPDIR:-/tmp}`）。
 
 ### Phase 1 关键经验（必须记住，避免重踩）
 
@@ -576,8 +609,10 @@ bash scripts/test_aligned.sh
    不稳定（会把 SET 的 0.001 当成冷启动）；改为 Stopwatch 包 fresh-process 单次
    执行（跑 2 次取 warm）最稳。PS `$M` hashtable 键在脚本内丢失（scope 怪异）→
    改为执行时就往 `$all` 列表 append，报告/CSV 全从 `$all` 生成，避免键查找。
-4. **polars 横向 concat 基线**：`pl.concat([idx, a, m], how="horizontal")` 是位置对齐
-   横向拼接（正是本引擎消灭的路径）；`hstack` 需要 Series 不是 DataFrame。
+4. **polars 横向 concat 基线**：用 **`df.hstack(...)`（DataFrame.hstack，polars 1.x，
+   接受 DataFrame 或 Series）** 做纯位置对齐横向拼接，语义最准确（P-CONCAT 引擎，
+   见 `scripts/bench_polars_multi.py`）。`pl.concat([..], how="horizontal")` 虽结果相近，
+   但 `hstack` 才是明确"按物理行位置拼、不靠 key"的写法，正是本引擎要消灭的路径。
 
 ### Phase 7 关键经验（Compaction）
 
