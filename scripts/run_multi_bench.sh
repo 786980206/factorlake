@@ -16,7 +16,10 @@
 #                                   [--out DIR] [--threads 1,4,8]
 #                                   [--engines D-WIDE,D-JOIN,A-ALIGNED]
 #                                   [--no-regen]
-# env: DUCKDB (default build/duckdb), ALIGNED_DATA_ROOT
+# env: DUCKDB (default build/duckdb), ALIGNED_DATA_ROOT,
+#      REPEATS (int, default 5) executions per warm measurement —
+#      pass as env prefix, NOT a positional arg:
+#      REPEATS=5 bash scripts/run_multi_bench.sh --tier A ...
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="$ROOT/bench/multi_bench_config.sh"
@@ -245,8 +248,14 @@ if [ "$cc_fail" = 0 ]; then echo "CONSISTENCY OK: all ${#ENGINES[@]} engines ret
 
 # ---------- execution ------------------------------------------------------------------
 declare -a RESULTS
-# resolve array name indirection for the tier lists
-eval "Q_LIST=(\"\${$QS[@]}\")"; eval "F_LIST=(\"\${$FS[@]}\")"; eval "S_LIST=(\"\${$SS[@]}\")"
+# Resolve the tier's query/filter/sel lists, allowing a caller (e.g.
+# bench_scenarios.sh) to override them via QS_OVERRIDE/FS_OVERRIDE/SS_OVERRIDE.
+if [ -n "${QS_OVERRIDE:-}" ]; then IFS=',' read -ra Q_LIST <<< "$QS_OVERRIDE";
+else eval "Q_LIST=(\"\${$QS[@]}\")"; fi
+if [ -n "${FS_OVERRIDE:-}" ]; then IFS=',' read -ra F_LIST <<< "$FS_OVERRIDE";
+else eval "F_LIST=(\"\${$FS[@]}\")"; fi
+if [ -n "${SS_OVERRIDE:-}" ]; then IFS=',' read -ra S_LIST <<< "$SS_OVERRIDE";
+else eval "S_LIST=(\"\${$SS[@]}\")"; fi
 for e in "${ENGINES[@]}"; do
   echo "== engine: $e =="
   for q in "${Q_LIST[@]}"; do

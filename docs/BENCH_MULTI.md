@@ -1,45 +1,61 @@
 # AlignedTable Multi-Scenario Benchmark
 
 Date: 2026-08-18  Machine: local Linux (AGENTS.md §16.2); tier=A
-Dataset: bench_mb rows=1000000 cols=1024 (idx20+alpha753+fs251) sparse=90% NULL
-Engines: D-WIDE D-JOIN A-ALIGNED A-NORMAL; threads: 1 4
+Dataset: bench_mb rows=250000 cols=128 (idx20+alpha81+fs27) sparse=90% NULL
+Engines: D-WIDE D-JOIN A-ALIGNED A-NORMAL P-CONCAT P-JOIN; threads: 1 4
 
 | engine | query | filter | sel | threads | cold_s | warm_s |
 |--------|-------|--------|-----|---------|--------|--------|
-| D-WIDE | Q2 | F1 | S0 | 1 | 0.0422 | 0.0093 |
-| D-WIDE | Q2 | F1 | S0 | 4 | 0.0397 | 0.0099 |
-| D-WIDE | Q2 | F2 | S0 | 1 | 0.0415 | 0.0135 |
-| D-WIDE | Q2 | F2 | S0 | 4 | 0.0578 | 0.0118 |
-| D-WIDE | Q5 | F1 | S0 | 1 | 0.0615 | 0.0246 |
-| D-WIDE | Q5 | F1 | S0 | 4 | 0.0669 | 0.0257 |
-| D-WIDE | Q5 | F2 | S0 | 1 | 0.0561 | 0.0239 |
-| D-WIDE | Q5 | F2 | S0 | 4 | 0.0551 | 0.0237 |
-| D-JOIN | Q2 | F1 | S0 | 1 | 0.1961 | 0.1306 |
-| D-JOIN | Q2 | F1 | S0 | 4 | 0.1213 | 0.0656 |
-| D-JOIN | Q2 | F2 | S0 | 1 | 0.0992 | 0.0500 |
-| D-JOIN | Q2 | F2 | S0 | 4 | 0.0755 | 0.0370 |
-| D-JOIN | Q5 | F1 | S0 | 1 | 0.2069 | 0.1506 |
-| D-JOIN | Q5 | F1 | S0 | 4 | 0.1349 | 0.0779 |
-| D-JOIN | Q5 | F2 | S0 | 1 | 0.1197 | 0.0647 |
-| D-JOIN | Q5 | F2 | S0 | 4 | 0.0947 | 0.0511 |
-| A-ALIGNED | Q2 | F1 | S0 | 1 | 0.0501 | 0.0290 |
-| A-ALIGNED | Q2 | F1 | S0 | 4 | 0.0457 | 0.0203 |
-| A-ALIGNED | Q2 | F2 | S0 | 1 | 0.0482 | 0.0185 |
-| A-ALIGNED | Q2 | F2 | S0 | 4 | 0.0416 | 0.0168 |
-| A-ALIGNED | Q5 | F1 | S0 | 1 | 0.0538 | 0.0297 |
-| A-ALIGNED | Q5 | F1 | S0 | 4 | 0.0492 | 0.0291 |
-| A-ALIGNED | Q5 | F2 | S0 | 1 | 0.0470 | 0.0230 |
-| A-ALIGNED | Q5 | F2 | S0 | 4 | 0.0464 | 0.0221 |
-| A-NORMAL | Q2 | F1 | S0 | 1 | 0.0527 | 0.0265 |
-| A-NORMAL | Q2 | F1 | S0 | 4 | 0.0478 | 0.0216 |
-| A-NORMAL | Q2 | F2 | S0 | 1 | 0.0438 | 0.0188 |
-| A-NORMAL | Q2 | F2 | S0 | 4 | 0.0495 | 0.0185 |
-| A-NORMAL | Q5 | F1 | S0 | 1 | 0.0600 | 0.0301 |
-| A-NORMAL | Q5 | F1 | S0 | 4 | 0.0711 | 0.0272 |
-| A-NORMAL | Q5 | F2 | S0 | 1 | 0.0483 | 0.0239 |
-| A-NORMAL | Q5 | F2 | S0 | 4 | 0.0482 | 0.0229 |
+| D-WIDE | Q2 | F1 | S0 | 1 | 0.0221 | 0.0056 |
+| D-WIDE | Q2 | F1 | S0 | 4 | 0.0302 | 0.0054 |
+| D-WIDE | Q2 | F2 | S0 | 1 | 0.0234 | 0.0058 |
+| D-WIDE | Q2 | F2 | S0 | 4 | 0.0239 | 0.0059 |
+| D-WIDE | Q5 | F1 | S0 | 1 | 0.0213 | 0.0059 |
+| D-WIDE | Q5 | F1 | S0 | 4 | 0.0264 | 0.0057 |
+| D-WIDE | Q5 | F2 | S0 | 1 | 0.0237 | 0.0071 |
+| D-WIDE | Q5 | F2 | S0 | 4 | 0.0241 | 0.0066 |
+| D-JOIN | Q2 | F1 | S0 | 1 | 0.0701 | 0.0379 |
+| D-JOIN | Q2 | F1 | S0 | 4 | 0.0431 | 0.0248 |
+| D-JOIN | Q2 | F2 | S0 | 1 | 0.0591 | 0.0255 |
+| D-JOIN | Q2 | F2 | S0 | 4 | 0.0439 | 0.0219 |
+| D-JOIN | Q5 | F1 | S0 | 1 | 0.0641 | 0.0384 |
+| D-JOIN | Q5 | F1 | S0 | 4 | 0.0445 | 0.0229 |
+| D-JOIN | Q5 | F2 | S0 | 1 | 0.0463 | 0.0247 |
+| D-JOIN | Q5 | F2 | S0 | 4 | 0.0429 | 0.0207 |
+| A-ALIGNED | Q2 | F1 | S0 | 1 | 0.0260 | 0.0085 |
+| A-ALIGNED | Q2 | F1 | S0 | 4 | 0.0255 | 0.0079 |
+| A-ALIGNED | Q2 | F2 | S0 | 1 | 0.0239 | 0.0070 |
+| A-ALIGNED | Q2 | F2 | S0 | 4 | 0.0261 | 0.0080 |
+| A-ALIGNED | Q5 | F1 | S0 | 1 | 0.0274 | 0.0086 |
+| A-ALIGNED | Q5 | F1 | S0 | 4 | 0.0261 | 0.0099 |
+| A-ALIGNED | Q5 | F2 | S0 | 1 | 0.0246 | 0.0084 |
+| A-ALIGNED | Q5 | F2 | S0 | 4 | 0.0255 | 0.0077 |
+| A-NORMAL | Q2 | F1 | S0 | 1 | 0.0252 | 0.0089 |
+| A-NORMAL | Q2 | F1 | S0 | 4 | 0.0256 | 0.0080 |
+| A-NORMAL | Q2 | F2 | S0 | 1 | 0.0240 | 0.0071 |
+| A-NORMAL | Q2 | F2 | S0 | 4 | 0.0258 | 0.0075 |
+| A-NORMAL | Q5 | F1 | S0 | 1 | 0.0279 | 0.0097 |
+| A-NORMAL | Q5 | F1 | S0 | 4 | 0.0260 | 0.0091 |
+| A-NORMAL | Q5 | F2 | S0 | 1 | 0.0254 | 0.0078 |
+| A-NORMAL | Q5 | F2 | S0 | 4 | 0.0258 | 0.0096 |
+| P-CONCAT | Q2 | F1 | S0 | 1 | 0.0885 | 0.0514 |
+| P-CONCAT | Q2 | F1 | S0 | 4 | 0.0635 | 0.0361 |
+| P-CONCAT | Q2 | F2 | S0 | 1 | 0.0897 | 0.0513 |
+| P-CONCAT | Q2 | F2 | S0 | 4 | 0.0535 | 0.0406 |
+| P-CONCAT | Q5 | F1 | S0 | 1 | 0.2129 | 0.1046 |
+| P-CONCAT | Q5 | F1 | S0 | 4 | 0.1203 | 0.1268 |
+| P-CONCAT | Q5 | F2 | S0 | 1 | 0.2150 | 0.1043 |
+| P-CONCAT | Q5 | F2 | S0 | 4 | 0.1177 | 0.1013 |
+| P-JOIN | Q2 | F1 | S0 | 1 | 0.2874 | 0.1627 |
+| P-JOIN | Q2 | F1 | S0 | 4 | 0.1105 | 0.0729 |
+| P-JOIN | Q2 | F2 | S0 | 1 | 0.2666 | 0.1582 |
+| P-JOIN | Q2 | F2 | S0 | 4 | 0.1100 | 0.0720 |
+| P-JOIN | Q5 | F1 | S0 | 1 | 0.8446 | 0.3959 |
+| P-JOIN | Q5 | F1 | S0 | 4 | 0.2840 | 0.1719 |
+| P-JOIN | Q5 | F2 | S0 | 1 | 0.7030 | 0.3742 |
+| P-JOIN | Q5 | F2 | S0 | 4 | 0.2619 | 0.1950 |
 
 > Column layout: index 20 (date,symbol,close,volume,rowid + ix001..ix015),
-> alpha753 sparse (90% NULL), fs251. Q1~3 Q2~35 Q3~500 Q4~5000 Q5=ALL.
+> alpha81 sparse (90% NULL), fs27. Q1~3 Q2~35 Q3~500 Q4~5000 Q5=ALL.
 > warm = fresh-process 2nd run (page cache warmed); cold = 1st touch in fresh process.
 > A-NORMAL is the plugin's aligned=false (union-interval per-leaf pruning), not a key join.
