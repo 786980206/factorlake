@@ -12,6 +12,7 @@
 #   g-250k  : 250K x W1(128)  x SPARSE-90  -> warmup, fast full 6-engine run
 #   g-1m    : 1M   x W1(128)  x SPARSE-90  -> primary 6-engine comparison
 #   g-1m-q  : 1M   x W1(128)  x SPARSE-90  -> richer query/filter/sel (4 engines)
+#   g-10m   : 10M  x W1(128)  x SPARSE-90  -> next scale, 6 engines, Q2 t=1
 #   g-sparse: 1M   x W1, DENSE vs 90 vs 99 (Q2/F2/S1, 4 engines)
 #   g-thread: 1M   x W1, aligned both modes, Q2/F1/S0 threads 1/2/4/8
 #
@@ -98,6 +99,9 @@ run_stage g-250k 250000 128 90   "$ENG6" "1,4" "Q2,Q5" "F1,F2" "S0"
 # is expensive under polars hstack/join at 1M, so it runs in g-1m-q with 4 DDB engines.
 run_stage g-1m   1000000 128 90  "$ENG6" "1,4" "Q2" "F1,F2" "S0"
 run_stage g-1m-q 1000000 128 90  "$ENG4" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S0,S1"
+# g-10m: next scale step — 10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
+# expensive D-JOIN / P-JOIN baselines stay tractable (they are ~40-150x slower).
+run_stage g-10m 10000000 128 90 "$ENG6" "1" "Q2" "F1,F2" "S0"
 # sparsity sweep (reuse 1M x 128)
 for sp in dense 90 99; do
   run_stage "g-sparse-$sp" 1000000 128 "$sp" "$ENG4" "1,4" "Q2" "F2" "S1"

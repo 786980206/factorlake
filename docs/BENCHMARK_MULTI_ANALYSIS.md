@@ -104,11 +104,57 @@ bash scripts/run_multi_bench.sh --tier A --rows 200000 --width 128 --sparsity 90
    取均值**（本框架 `REPEATS=5`），并在比较 AEg 结论前用同进程交替跑 + `EXPLAIN`
    复核。跨引擎行数与分区剪枝一致性校验也必须先过（本框架 `CONSISTENCY OK`）。
 
-### 下一步（更新）
+---
 
-- **W3(10K 列) 实测**：看 A-ALIGNED 相对 D-WIDE/D-JOIN 随列组数进一步的相对位移
-  （预期 aligned 优势扩大）。用 `--width 10240`，但先在 `--rows` 较小（如 1M）下验证
-  生成与查询可行性（10K 列生成量大）。
+## 追加：10,000,000 × 128（10M）实测 —— 六引擎全跑通
+
+> 逐级递增到 10M×128（90% 稀疏）。生成 4m52s、存储 aligned 515M + baseline 1.1G、
+> 全程内存 16Gi 稳定。数据与自检一致（10M/4 = 2.5M 行/分区）。
+
+### 结果（warm = 同进程 REPEATS×均值，秒；Q2=35 列，t=1）
+
+| 引擎 | Q2/F1 | Q2/F2 |
+|------|-------|-------|
+| D-WIDE     | 0.016 | 0.023 |
+| **A-ALIGNED** | **0.109** | **0.048** |
+| A-NORMAL   | 0.113 | 0.044 |
+| D-JOIN     | 4.32  | 2.01  |
+| P-CONCAT   | 2.60  | 2.73  |
+| P-JOIN     | 16.5  | 16.2  |
+
+### 10M 结论（A-ALIGNED Q2/F1 = 0.109s 基准）
+
+| 对比 | 倍率 |
+|------|------|
+| A-ALIGNED vs D-JOIN   | **~40×** |
+| A-ALIGNED vs P-JOIN   | **~152×** |
+| A-ALIGNED vs P-CONCAT | **~24×** |
+| A-ALIGNED vs D-WIDE   | 0.109 vs 0.016（D-WIDE 快 ~6.6×）|
+
+1. **aligned 的零-JOIN position 组装优势随数据量急剧放大**：相对 D-JOIN 从 1M 的 ~5×
+   放大到 10M 的 ~40×，相对 P-JOIN 从 ~100× 到 ~152×。原因是 position 组装接近线性，
+   而 hash-JOIN/hstack 的成本（构建大哈希表、nest-loop、内存重排）随行数超线性增长。
+   这是"align 先验消灭 JOIN 重排"在真实大数据上的直接证据。
+
+2. **D-WIDE 仍最快（0.016s）**：单文件顺序扫描依然优于 aligned 的多 Group 组装——
+   128 列窄表、全缓存下期望如此。aligned 相对 D-WIDE 的优势要等**列数/列组数上升**
+   （W2/W3）或**冷缓存**才出现（多 reader 并行加载不同列组、免扫无关列）。
+
+3. **D-JOIN 与 P-JOIN 在 10M 已慢到不可忽略**（2-16s），说明"拆成多个 parquet 再用
+   key JOIN 拼回"这条路在大数据上代价巨大——正是本项目要消除的核心成本。
+
+### 一键复现（逐级递增，含资源监控）
+
+```bash
+bash scripts/bench_scenarios.sh              # g-250k→g-1m→g-1m-q→g-10m→g-sparse→g-thread
+bash scripts/bench_scenarios.sh --only g-10m  # 仅 10M 阶段
+# 结果: bench/out/SUMMARY.csv
+```
+
+## 下一步（更新）
+
+- **宽度提升（W2 1024 / W3 10K 列）**：看 A-ALIGNED 相对 D-WIDE 随列数/列组数上升的
+  相对位移（aligned 免扫无关列 + 多 reader 优势预期在此显现）。先跑 W2 小行数验证。
+- **并行**：10M 六级引擎下测线程 1→8（当前 10M 数据量足够看并行收益是否起来）。
 - **冷缓存**：大数据集 root 下 `sync; echo 3 >/proc/sys/vm/drop_caches` 验证 COLD。
-- **稀疏度**：DENSE/SPARSE-90/SPARSE-99 对比存储与扫描差异。
 
