@@ -566,40 +566,6 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		active = {{0, bind.total_rows}};
 	}
 	result->active_intervals = std::move(active);
-	if (getenv("ALIGNED_TRACE_INIT")) {
-		FILE *f = fopen("D:/proj/factorlake/init_trace.txt", "w");
-		if (f) {
-			fprintf(f, "aligned=%d active_intervals=[", bind.plan.table.aligned ? 1 : 0);
-			for (auto &iv : result->active_intervals) {
-				fprintf(f, "(%llu,%llu)", (unsigned long long)iv.first, (unsigned long long)iv.second);
-			}
-			fprintf(f, "] ncol=%llu nprojected=%llu\n", (unsigned long long)input.column_ids.size(),
-			        (unsigned long long)result->projected_pos.size());
-			for (idx_t cid = 0; cid < input.column_ids.size(); cid++) {
-				fprintf(f, "  column_id[%llu]=%lld proj=%lld\n", (unsigned long long)cid,
-				        (long long)input.column_ids[cid],
-				        (long long)result->projected_pos[(idx_t)input.column_ids[cid]]);
-			}
-			if (input.filters) {
-				fprintf(f, "  nfilters=%llu\n", (unsigned long long)input.filters->filters.size());
-				for (auto &e : input.filters->filters) {
-					fprintf(f, "    filter_key=%llu\n", (unsigned long long)e.first);
-				}
-			} else {
-				fprintf(f, "  nfilters=0 (null)\n");
-			}
-			fprintf(f, "  nrow_filters=%llu\n", (unsigned long long)result->row_filters.size());
-			for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
-				if (!result->group_active[gi]) {
-					continue;
-				}
-				fprintf(f, "  group[%llu] kept=%llu/%llu\n", (unsigned long long)gi,
-				        (unsigned long long)result->kept_parts[gi].size(),
-				        (unsigned long long)bind.plan.groups[gi].parts.size());
-			}
-			fclose(f);
-		}
-	}
 	return std::move(result);
 }
 
@@ -719,8 +685,6 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 				window_start = rg_start;
 			}
 			g.rg_window_rows += rg.count;
-			idx_t seg_start = MaxValue<idx_t>(rg_start, local_start) - window_start;
-			idx_t seg_end = MinValue<idx_t>(rg_start + rg.count, local_end) - window_start;
 			bool skip = false;
 			if (rg.partition_row_group) {
 				for (auto &gf : group_filters) {
@@ -743,8 +707,13 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 				}
 			}
 			if (skip) {
-				// Clamped segment: only the wanted portion is NULL-filled
-				g.rg_skip.emplace_back(seg_start, seg_end - seg_start);
+				// Record the ENTIRE row group in window coordinates so that a
+				// later chunk wanting a different portion of the same stats-
+				// skipped RG is still NULL-filled (and never tries to read a
+				// NULL scan_state/chunk). Clamping to the current wanted
+				// segment would leave the rest of the RG uncovered, crashing
+				// with "dereference unique_ptr that is NULL".
+				g.rg_skip.emplace_back(rg_start - window_start, rg.count);
 			} else {
 				g.rg_window.push_back(i);
 				// The plan segment covers the ENTIRE row group (flow_off = 0,
@@ -854,17 +823,24 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			// onward. Only a backward re-position (parallel) before those rows
 			// needs a recompute. We conservatively recompute when the wanted
 			// start is before the first un-placed stream row.
-			idx_t unplaced_from;
+			//
+			// If rg_plan is empty the entire row-group window is stats-skipped
+			// (all rows are NULL-filled and never match the pushed-down filter).
+			// There is nothing to read, so the stream position is irrelevant and
+			// no recompute is needed — accessing rg_plan[0] here would be OOB.
 			if (g.carry_count > 0) {
-				unplaced_from = g.carry_win_start_row;
-			} else {
+				idx_t unplaced_from = g.carry_win_start_row;
+				if (local_start - g.rg_window_start < unplaced_from) {
+					ComputeRowGroupWindow(context, g, local_start, local_end, part, group_filters);
+				}
+			} else if (!g.rg_plan.empty()) {
 				// no carry: the stream has read up to parquet_pos (window
 				// coordinate via the current segment)
 				const auto &seg0 = g.rg_plan[g.rg_seg_idx];
-				unplaced_from = seg0.win_start + (g.parquet_pos - seg0.flow_start);
-			}
-			if (local_start - g.rg_window_start < unplaced_from) {
-				ComputeRowGroupWindow(context, g, local_start, local_end, part, group_filters);
+				idx_t unplaced_from = seg0.win_start + (g.parquet_pos - seg0.flow_start);
+				if (local_start - g.rg_window_start < unplaced_from) {
+					ComputeRowGroupWindow(context, g, local_start, local_end, part, group_filters);
+				}
 			}
 		}
 
@@ -1056,30 +1032,8 @@ static void ApplyRowFilters(ClientContext &context, DataChunk &chunk, vector<Ali
 	for (auto &rf : filters) {
 		UnifiedVectorFormat vdata;
 		chunk.data[rf.projected_pos].ToUnifiedFormat(count, vdata);
-		if (getenv("ALIGNED_TRACE_INIT")) {
-			FILE *f = fopen("D:/proj/factorlake/filter_trace.txt", "a");
-			if (f) {
-				fprintf(f, "BEFORE pos=%llu ftype=%d count=%llu", (unsigned long long)rf.projected_pos,
-				        (int)rf.filter->filter_type, (unsigned long long)count);
-				if (vdata.sel) {
-					auto *d = UnifiedVectorFormat::GetData<int64_t>(vdata);
-					fprintf(f, " v0=%lld v1=%lld v2=%lld",
-					        (long long)d[vdata.sel->get_index(0)], (long long)d[vdata.sel->get_index(1)],
-					        (long long)d[vdata.sel->get_index(2)]);
-				}
-				fprintf(f, "\n");
-				fclose(f);
-			}
-		}
 		ColumnSegment::FilterSelection(sel, chunk.data[rf.projected_pos], vdata, *rf.filter, *rf.state, count,
 		                               approved);
-		if (getenv("ALIGNED_TRACE_INIT")) {
-			FILE *f = fopen("D:/proj/factorlake/filter_trace.txt", "a");
-			if (f) {
-				fprintf(f, "AFTER  approved=%llu\n", (unsigned long long)approved);
-				fclose(f);
-			}
-		}
 		if (approved == 0) {
 			break;
 		}
@@ -1098,74 +1052,103 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 	auto &gstate = data.global_state->Cast<AlignedScanGlobalState>();
 	auto &lstate = data.local_state->Cast<AlignedScanLocalState>();
 
-	// Phase 4: claim the next contiguous range from the shared cursor (or
-	// continue the thread's current range). The lock is held only for the
-	// claim; the actual scan runs outside it with this thread's own local
-	// state.
-	idx_t chunk_start;
-	idx_t chunk_rows;
-	if (lstate.range_next >= lstate.range_end) {
-		lock_guard<mutex> lock(gstate.cursor_lock);
-		while (gstate.interval_idx < gstate.active_intervals.size() &&
-		       gstate.next_row >= gstate.active_intervals[gstate.interval_idx].second) {
-			gstate.interval_idx++;
-			gstate.next_row = gstate.interval_idx < gstate.active_intervals.size()
-			                      ? gstate.active_intervals[gstate.interval_idx].first
-			                      : gstate.next_row;
+	// With pushed-down filters (or filter-column removal) a whole 2048-row
+	// chunk may be rejected by the row-level filters. DuckDB's executor treats a
+	// returned 0-cardinality chunk as end-of-scan, so we must NEVER emit an empty
+	// chunk mid-stream: loop internally, advancing to the next logical chunk,
+	// until we have produced a non-empty chunk or have genuinely exhausted all
+	// active intervals (only then return a 0-cardinality chunk to signal EOF).
+	while (true) {
+		// Phase 4: claim the next contiguous range from the shared cursor (or
+		// continue the thread's current range). The lock is held only for the
+		// claim; the actual scan runs outside it with this thread's own local
+		// state.
+		if (lstate.range_next >= lstate.range_end) {
+			lock_guard<mutex> lock(gstate.cursor_lock);
+			while (gstate.interval_idx < gstate.active_intervals.size() &&
+			       gstate.next_row >= gstate.active_intervals[gstate.interval_idx].second) {
+				gstate.interval_idx++;
+				gstate.next_row = gstate.interval_idx < gstate.active_intervals.size()
+				                      ? gstate.active_intervals[gstate.interval_idx].first
+				                      : gstate.next_row;
+			}
+			if (gstate.interval_idx >= gstate.active_intervals.size()) {
+				output.SetCardinality(0);
+				return;
+			}
+			// The shared cursor is initialized to 0, but a pruned scan's first
+			// active interval can begin at a nonzero row (e.g. a partition
+			// filter that keeps only day2..). Snap the cursor up to the current
+			// interval's start, otherwise the first claim starts at row 0 and
+			// underflows against the data's actual start_row (partition pruning
+			// on any non-first partition would crash with a huge row number).
+			idx_t interval_start = gstate.active_intervals[gstate.interval_idx].first;
+			if (gstate.next_row < interval_start) {
+				gstate.next_row = interval_start;
+			}
+			idx_t interval_end = gstate.active_intervals[gstate.interval_idx].second;
+			idx_t range_end = MinValue<idx_t>(gstate.next_row + AlignedScanGlobalState::CLAIM_RANGE, interval_end);
+			lstate.range_next = gstate.next_row;
+			lstate.range_end = range_end;
+			gstate.next_row = range_end;
 		}
-		if (gstate.interval_idx >= gstate.active_intervals.size()) {
-			output.SetCardinality(0);
-			return;
-		}
-		idx_t interval_end = gstate.active_intervals[gstate.interval_idx].second;
-		idx_t range_end = MinValue<idx_t>(gstate.next_row + AlignedScanGlobalState::CLAIM_RANGE, interval_end);
-		lstate.range_next = gstate.next_row;
-		lstate.range_end = range_end;
-		gstate.next_row = range_end;
-	}
-	chunk_start = lstate.range_next;
-	chunk_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, lstate.range_end - chunk_start);
-	lstate.range_next += chunk_rows;
-
-	// With pushed-down filters or filter-column removal we assemble into a
-	// scratch chunk (which we own and reset), then reference it into the output.
-	// The executor reuses the output chunk across calls; slicing it in place
-	// would leave dictionary vectors behind and corrupt the next call.
-	bool use_scratch = !lstate.row_filters.empty() || !gstate.projection_ids.empty();
-	auto &target = use_scratch ? *lstate.scratch : output;
-	if (use_scratch) {
-		target.Reset();
-	}
-	target.SetCardinality(chunk_rows);
-
-	// All active groups fill their requested columns for the same logical row
-	// range (no JOIN, no concat). Inactive groups are never opened (projection
-	// pushdown, Phase 2).
-	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
-		if (!gstate.group_active[gi]) {
+		idx_t chunk_start = lstate.range_next;
+		idx_t chunk_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, lstate.range_end - chunk_start);
+		if (chunk_rows == 0) {
+			// Current range exhausted; reclaim the next one (loop continues)
 			continue;
 		}
-		if (bind.plan.groups[gi].parts.empty()) {
-			// Empty group: contributes no columns
-			continue;
-		}
-		const auto &parts = gstate.kept_parts[gi].empty() ? bind.plan.groups[gi].parts : gstate.kept_parts[gi];
-		ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, gstate.projected_pos, parts,
-		                gstate.group_filters[gi]);
-	}
+		lstate.range_next += chunk_rows;
 
-	// Apply the pushed-down filters to the assembled chunk (per-thread states)
-	if (!lstate.row_filters.empty()) {
-		ApplyRowFilters(context, target, lstate.row_filters);
-	}
-
-	// Produce the final output chunk
-	if (use_scratch) {
-		if (gstate.projection_ids.empty()) {
-			output.Reference(target);
-		} else {
-			output.ReferenceColumns(target, gstate.projection_ids);
+		// With pushed-down filters or filter-column removal we assemble into a
+		// scratch chunk (which we own and reset), then reference it into the
+		// output. The executor reuses the output chunk across calls; slicing it
+		// in place would leave dictionary vectors behind and corrupt the next
+		// call.
+		bool use_scratch = !lstate.row_filters.empty() || !gstate.projection_ids.empty();
+		auto &target = use_scratch ? *lstate.scratch : output;
+		if (use_scratch) {
+			target.Reset();
 		}
+		target.SetCardinality(chunk_rows);
+
+		// All active groups fill their requested columns for the same logical
+		// row range (no JOIN, no concat). Inactive groups are never opened
+		// (projection pushdown, Phase 2).
+		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
+			if (!gstate.group_active[gi]) {
+				continue;
+			}
+			if (bind.plan.groups[gi].parts.empty()) {
+				// Empty group: contributes no columns
+				continue;
+			}
+			const auto &parts = gstate.kept_parts[gi].empty() ? bind.plan.groups[gi].parts : gstate.kept_parts[gi];
+			ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, gstate.projected_pos, parts,
+			                gstate.group_filters[gi]);
+		}
+
+		// Apply the pushed-down filters to the assembled chunk (per-thread states)
+		if (!lstate.row_filters.empty()) {
+			ApplyRowFilters(context, target, lstate.row_filters);
+		}
+
+		// Produce the final output chunk. If a scratch chunk ends up empty
+		// (all rows rejected by the filters), do NOT emit it — advance to the
+		// next logical chunk instead (loop continues).
+		if (use_scratch) {
+			if (target.size() == 0) {
+				continue;
+			}
+			if (gstate.projection_ids.empty()) {
+				output.Reference(target);
+			} else {
+				output.ReferenceColumns(target, gstate.projection_ids);
+			}
+		}
+		// When not using scratch there are no row filters, so the output chunk
+		// is always non-empty (chunk_rows > 0); fall through to return.
+		return;
 	}
 }
 

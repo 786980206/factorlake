@@ -275,9 +275,15 @@ src/
 
 ---
 
-## 16. 环境与构建（Windows + scoop）
+## 16. 环境与构建（Windows + Linux）
 
-### 已确认环境（2026-08）
+> 项目在 Windows（PowerShell + scoop + MSVC）与 Linux（brew + gcc + Ninja）两条
+> 开发链路上均可构建。源码、扩展代码、`scripts/` 共享同一套逻辑；仅环境/构建命令、
+> 测试脚本后缀（`.ps1` vs `.sh`）不同。
+
+### 16.1 Windows（scoop + MSVC）
+
+#### 已确认环境（2026-08）
 - scoop（buckets: main/extras/versions/nerf-fonts/java/dbx），aria2 加速可用
 - 已装：`git 2.44.0`、`cmake 4.0.3`、`duckdb 1.5.4`(CLI)、`python310`、`vcredist2022`、`7zip`
 - **MSVC**：VS2022 BuildTools 装在 `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`
@@ -286,7 +292,7 @@ src/
 - **ninja**：`scoop install ninja`（2026-08 安装中/已完成）
 - 目标 DuckDB 源码版本：**v1.5.4**（与 CLI 严格一致，extension ABI 版本锁定）
 
-### 构建命令（MSVC 环境必须在 PATH 里）
+#### 构建命令（MSVC 环境必须在 PATH 里）
 PowerShell 里通过 cmd 导入 vcvars64 再跑 cmake：
 
 ```powershell
@@ -295,6 +301,49 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
 
 测试用 `duckdb -unsigned -c "LOAD 'build/release/extension/aligned/aligned.duckdb_extension'; ..."`
 （自定义扩展需 `-unsigned`；或直接用同源码树构建出的 duckdb CLI，避免 platform 校验问题）。
+
+### 16.2 Linux（brew + gcc + Ninja）
+
+#### 已确认环境（2026-08）
+- **DuckDB v1.5.4 CLI**：`/home/windsing/.duckdb/cli/1.5.4/duckdb`（已加入 `~/.bashrc` PATH，验证为 v1.5.4 Variegata）
+- 工具链：cmake 3.28、gcc/g++ 13.3、git 2.43、python3、`brew install ninja`（ninja 1.13.2）
+- **DuckDB v1.5.4 源码**：从 gitee 镜像 clone 到 `/home/windsing/proj/factorlake/duckdb/`
+  （v1.5.4，commit `08e34c4`，与 CLI 一致，gitignored）
+
+#### 构建命令
+扩展通过 `scripts/aligned_extension_config.cmake` 注册进 DuckDB 构建：
+
+```bash
+cd /home/windsing/proj/factorlake/duckdb
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DDUCKDB_EXTENSION_CONFIGS=/home/windsing/proj/factorlake/scripts/aligned_extension_config.cmake
+ninja -C build duckdb
+```
+
+改完单个源文件后增量重编（只重编该文件并链接）：
+
+```bash
+cd /home/windsing/proj/factorlake/duckdb
+rm -f build/extension/aligned/CMakeFiles/aligned_extension.dir/src/scan/aligned_scan.cpp.o
+ninja -C build duckdb
+```
+
+产物：`duckdb/build/duckdb`（已静态链接 aligned 扩展，可直接运行，无需 `-unsigned`）。
+
+#### 测试数据与验收脚本（bash 版）
+- `scripts/gen_testdata.sh` — 生成测试数据到 `testdata/`（布局与 PS 版一致，6000 行）
+- `scripts/test_aligned.sh` — `test_aligned.ps1` 的 bash 版，**25/25 PASS**
+- 共享 helper：`scripts/lib_aligned.sh`（环境变量 `DUCKDB` / `ALIGNED_DATA_ROOT` 可覆盖）
+
+```bash
+cd /home/windsing/proj/factorlake
+bash scripts/gen_testdata.sh    # 首次或需要重建数据时
+bash scripts/test_aligned.sh
+```
+
+> 注：`duckdb/` 为 gitignored（vendored 源码，重新拉取见 §16.2）；测试数据 `testdata/` 同样 gitignored。
+> 运行示例 SQL 时用 `SET aligned_data_root='<abs-path>/testdata';`（见 §17 各 Phase 的基线命令）。
+
 
 ---
 
@@ -372,6 +421,41 @@ cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC
   - **aligned=false**：各 leaf 独立剪枝/规划，**不做跨 leaf 交集**——全局扫描区间为各
     active leaf kept-part 区间之**并集**（`UnionIntervals`），gap 由 leaf 自行 NULL 补
   - 验收：`test_aligned_flag.ps1` 全 PASS（aligned=false 全扫描 + 各 leaf 独立分区剪枝）
+- [x] **Linux 迁移 + 迁移暴露的两个真实 Bug 修复（2026-08）**：
+  - Linux 环境/构建链路见 §16.2：gitee clone `duckdb/`（v1.5.4）、`cmake -G Ninja` +
+    `scripts/aligned_extension_config.cmake` 注册扩展、产物 `duckdb/build/duckdb`
+  - bash 版脚本 `scripts/{gen_testdata,lib_aligned,test_aligned}.sh`（`test_aligned.sh` **25/25 PASS**）
+  - **Bug A（整块被过滤后误判扫描结束）**：`AlignedScanFunction` 改为内部 `while(true)`
+    跳过被 row filter 全部拒绝的空 chunk，直到产出非空 chunk 或真正耗尽才返回 0 行；
+    否则 DuckDB 把 0 行 chunk 当扫描结束中断后续 chunk（`WHERE rowid>=2048` 曾 0 行，应 3952）
+  - **Bug B（stats-skipped 行组的 `rg_skip` 只记录部分区间）**：`ComputeRowGroupWindow`
+    被跳过的 RG 由"当前 wanted 范围的重叠段"改记为**整 RG 范围**
+    （`rg_skip.emplace_back(rg_start - window_start, rg.count)`），避免下一块想要同 RG
+    其它部分时 `rg_skip` 未覆盖 → `read_need>0` 访问 NULL `scan_state`/`chunk` 崩溃
+    （`WHERE rowid=2048` 投影 symbol 曾崩溃，现返回 `002049`）
+  - 清除了 `aligned_scan.cpp` 内全部 `getenv("ALIGNED_DEBUG"/"ALIGNED_TRACE_INIT")` 调试打印
+    与 Windows 写死路径 `D:/proj/factorlake/...`（`init_trace.txt`/`filter_trace.txt`）
+- [x] **Phase 3 分区剪枝游标 Bug（非首分区崩溃）修复 + Linux 基准工具（2026-08）**：
+  - **Bug C（共享游标起点未对齐剪枝区间）**：`AlignedScanGlobalState::next_row` 初值 0，
+    但剪枝后首个 active interval 起点可 >0（如按日期过滤只保留第 2/3/4 个分区）。
+    首次 claim 用 `range_next = next_row = 0` 去扫起始行 >0 的 part →
+    `local_start = cursor - part.start_row` 无符号下溢 → 抛巨大行号（≈ -分区起点），
+    真实症状：`WHERE date` 命中**非首分区**的任何查询都联错
+    （`count(*)`/`count(col)` 报 "no row groups cover rows [184467440737XXX,...)"）。
+  - **修复**：claim 时把 `next_row` 钳到当前 interval 起点
+    （`if (next_row < interval_start) next_row = interval_start`）；首分区（start=0）因
+    与初值 0 重合而未暴露。验证：testdata/b 的数据第 2/3/4 分区均正确返回。
+  - **验收**：`scripts/test_aligned.sh` 新增 3 个分区剪枝断言（day18->rows[3000,6000)、
+    剪枝+行滤错分区=0、匹配分区=1），**28/28 PASS**。
+  - **Linux 基准工具**：`scripts/gen_bench.sh`（gen_bench.ps1 的 bash 版，`-n` 或位置参数
+    控制行数）+ `scripts/bench_aligned.sh`（aligned/wide/join × p5/p25/p100/s25/s100 ×
+    线程 1/4/8，含**非首分区剪枝自检**：断言 date='2026-09-02' 返回 rowsPerDay）。
+    修复了 `alpha*()/ma20()` 末指令 `[ ... ] && printf` 在 `set -e` 下让命令替换返回非零导致
+    脚本秒退的问题；计时改用整数纳秒避免偶发负值。
+  - **Phase 6 结论修正**：此前"分区剪枝完全失效（s25≈s100）"的判断不成立——剪枝在首分区一直
+    生效，只是**非首分区直接崩溃**、且小数据全缓存下固定开销掩盖剪枝收益。修复后实测
+    (400K, aligned) s25(1/4 扫描) threads=1 ≈ 0.06s vs s100(全扫) ≈ 0.14-0.21s，**≈2-3× 收益**；
+    aligned 相对 wide/join 的优势需在更大/冷缓存数据上才显现（见 docs/BENCHMARK.md）。
 
 ### Phase 1 关键经验（必须记住，避免重踩）
 

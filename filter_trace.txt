@@ -1,2 +1,0 @@
-BEFORE pos=0 ftype=0 count=2048 v0=0 v1=1 v2=2
-AFTER  approved=100
