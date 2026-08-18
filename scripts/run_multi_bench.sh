@@ -94,15 +94,17 @@ if [ "$need_gen" = 1 ] && [ "$FLAG_NOREGEN" = 0 ]; then
 fi
 if [ ! -f "$OUT/$ALIGNED_TABLE/_table.json" ]; then echo "aligned table missing (use --no-regen only if data exists): $OUT/$ALIGNED_TABLE"; exit 1; fi
 
-# A-NORMAL sibling: symlink the group dirs + flip _table.json aligned flag
-if [ -n "$(printf '%s\n' "${ENGINES[@]}" | grep -x 'A-NORMAL' || true)" ] && [ ! -f "$OUT/$NORMAL_TABLE/_table.json" ]; then
+# A-NORMAL sibling: symlink the group dirs + flip _table.json aligned flag.
+# Always rebuilt so it stays in lockstep with the main table's row_count (a
+# stale sibling from an earlier scale caused a row_count mismatch).
+if [ -n "$(printf '%s\n' "${ENGINES[@]}" | grep -x 'A-NORMAL' || true)" ]; then
   rm -rf "$OUT/$NORMAL_TABLE"; mkdir -p "$OUT/$NORMAL_TABLE"
   ln -s "$(readlink -f "$OUT/$ALIGNED_TABLE/index")" "$OUT/$NORMAL_TABLE/index"
   ln -s "$(readlink -f "$OUT/$ALIGNED_TABLE/factor")" "$OUT/$NORMAL_TABLE/factor"
   ln -s "$(readlink -f "$OUT/$ALIGNED_TABLE/fieldset")" "$OUT/$NORMAL_TABLE/fieldset"
-  python3 - "$OUT/$ALIGNED_TABLE/_table.json" "$OUT/$NORMAL_TABLE/_table.json" <<'PY'
+  python3 - "$OUT/$ALIGNED_TABLE/_table.json" "$OUT/$NORMAL_TABLE/_table.json" "$NORMAL_TABLE" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); d['aligned']=False; d['name']='bench_mb_normal'
+d=json.load(open(sys.argv[1])); d['aligned']=False; d['name']=sys.argv[3]
 json.dump(d, open(sys.argv[2],'w'))
 PY
 fi
