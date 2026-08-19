@@ -34,7 +34,10 @@ function Run-DuckDB-ExpectError([string]$sql, [string]$pattern) {
     return $false
 }
 
-# ---- fresh table (manifests only, row_count 0) ------------------------------
+# ---- fresh table (manifest only, row_count 0) ------------------------------
+# Partitioning lives in _table.json (explicit: required for an empty table;
+# derived from the directory layout otherwise). There are no _group.json
+# files, no sidecars and no commit markers.
 if (Test-Path $tableDir) { Remove-Item $tableDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $tableDir | Out-Null
 function Write-JsonFile([string]$path, $obj) {
@@ -45,25 +48,18 @@ Write-JsonFile (Join-Path $tableDir '_table.json') @{
     name = $table; version = 1; schema_version = 1; key = @('date', 'symbol')
     canonical_order = 'fixed'; row_count = 0; row_group_size = 131072
     groups = @('index', 'factor/alpha101', 'fieldset/ma')
-}
-Write-JsonFile (Join-Path $tableDir 'index\_group.json') @{
-    group = 'index'; row_count = 0; row_group_size = 2048
-    partitioning = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })
-}
-Write-JsonFile (Join-Path $tableDir 'factor\alpha101\_group.json') @{
-    group = 'factor/alpha101'; row_count = 0; row_group_size = 2048
-    partitioning = @(
-        @{ template = 'year=%Y'; source = 'date' },
-        @{ template = 'month=%m'; source = 'date' },
-        @{ template = 'day=%d'; source = 'date' }
-    )
-}
-Write-JsonFile (Join-Path $tableDir 'fieldset\ma\_group.json') @{
-    group = 'fieldset/ma'; row_count = 0; row_group_size = 2048
-    partitioning = @(
-        @{ template = 'year=%Y'; source = 'date' },
-        @{ template = 'month=%m'; source = 'date' }
-    )
+    partitioning = @{
+        'index' = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })
+        'factor/alpha101' = @(
+            @{ template = 'year=%Y'; source = 'date' },
+            @{ template = 'month=%Y-%m'; source = 'date' },
+            @{ template = 'date=%Y-%m-%d'; source = 'date' }
+        )
+        'fieldset/ma' = @(
+            @{ template = 'year=%Y'; source = 'date' },
+            @{ template = 'month=%Y-%m'; source = 'date' }
+        )
+    }
 }
 
 # ---- staging batch 1: rows [0, 3000) on 2026-09-10 --------------------------
@@ -140,13 +136,16 @@ Expect-Equal 'qualified factor.alpha101.vwap' $out.Trim() '25.25'
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*) FROM aligned_table('$table');"
 Expect-Equal 'table row_count reflects append' $out.Trim() '6000'
 
-# ma coarse partition dir holds both parts (shared marker)
-if ((Test-Path (Join-Path $tableDir 'fieldset\ma\year=2026\month=09\part-000000.parquet')) -and
-    (Test-Path (Join-Path $tableDir 'fieldset\ma\year=2026\month=09\part-000001.parquet'))) {
+# ma coarse partition dir holds both parts (no marker — parts are discovered
+# by globbing)
+if ((Test-Path (Join-Path $tableDir 'fieldset\ma\year=2026\month=2026-09\part-000000.parquet')) -and
+    (Test-Path (Join-Path $tableDir 'fieldset\ma\year=2026\month=2026-09\part-000001.parquet'))) {
     Write-Host 'PASS: ma coarse partition dir has both parts'
 } else { Write-Host 'FAIL: ma parts missing'; $script:failures++ }
-$marker = Get-Content (Join-Path $tableDir 'fieldset\ma\year=2026\month=09\.aligned-commit.json') -Raw
-if ($marker -match 'part-000000' -and $marker -match 'part-000001') { Write-Host 'PASS: ma marker lists both parts' } else { Write-Host "FAIL: ma marker ($marker)"; $script:failures++ }
+
+# last_txid bumped in _table.json
+$tm = Get-Content (Join-Path $tableDir '_table.json') -Raw
+if ($tm -match '"last_txid"\s*:\s*2') { Write-Host 'PASS: last_txid bumped to 2' } else { Write-Host "FAIL: last_txid ($tm)"; $script:failures++ }
 
 # no leftover staging tree
 $leftover = Get-ChildItem $tableDir -Recurse -Directory -Filter '_tmp' -ErrorAction SilentlyContinue

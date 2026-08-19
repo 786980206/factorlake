@@ -16,7 +16,7 @@
 #
 # Usage:
 #   gen_multi_bench.sh --rows N --width N --sparsity dense|90|99
-#                      --aligned true|false [--out DIR] [--tag NAME]
+#                      [--out DIR] [--tag NAME]
 # env: DUCKDB (default build/duckdb)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
     --rows) ROWS=$2; shift 2;;
     --width) WIDTH=$2; shift 2;;
     --sparsity) SPARSITY=$2; shift 2;;
-    --aligned) ALIGNED=$2; shift 2;;
+    --aligned) ALIGNED=$2; shift 2;; # accepted for CLI compat; reader now ignores this flag
     --out) OUT=$2; shift 2;;
     --tag) TAG=$2; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 1;;
@@ -48,7 +48,6 @@ case "$SPARSITY" in
   *) echo "sparsity must be dense|90|99" >&2; exit 1;;
 esac
 if [ $((ROWS % 4)) -ne 0 ]; then echo "rows must be divisible by 4" >&2; exit 1; fi
-[ "$ALIGNED" = true ] || [ "$ALIGNED" = false ] || { echo "aligned must be true|false" >&2; exit 1; }
 
 # column layout
 INDEX_COLS=20
@@ -58,7 +57,6 @@ TOTAL_COLS=$(( INDEX_COLS + ALPHA_COLS + FIELDSET_COLS ))
 if [ $TOTAL_COLS -ne "$WIDTH" ]; then echo "width split mismatch ($TOTAL_COLS != $WIDTH)" >&2; exit 1; fi
 
 TABLE="bench_${TAG}"
-ALTER="bench_alter_${TAG}"
 tableDir="$OUT/$TABLE"
 PART_ROWS=65536
 RGS_INDEX=32768
@@ -70,17 +68,13 @@ rj(){ mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" > "$1"; }
 partn(){ printf 'part-%06d' "$1"; }
 # Run a (potentially huge) SQL statement via a temp file on stdin, so very wide
 # datasets (W3, thousands of columns) that overflow ARG_MAX with `-c` still work.
-run_duck(){ local tmp="$OUT/.gen_bench.sql"; printf '%s\n' "$1" > "$tmp"; "$DUCKDB" -light-mode < "$tmp" >/dev/null; }
+run_duck(){ local tmp="$OUT/.gen_bench.sql"; printf '%s\n' "$1" > "$tmp"; "/d/proj/factorlake/duckdb/build/duckdb_aligned.exe" -light-mode < "$tmp" >/dev/null; }
 
 echo "== gen $TABLE: rows=$ROWS width=$WIDTH (idx=$INDEX_COLS alpha=$ALPHA_COLS fs=$FIELDSET_COLS) sparse=${NULL_PCT}% aligned=$ALIGNED =="
 
-# ---------------- aligned table manifests ----------------
+# ---------------- aligned table manifest ----------------
 rm -rf "$tableDir"; mkdir -p "$tableDir"
-aligned_txt=$([ "$ALIGNED" = true ] && echo true || echo false)
-rj "$tableDir/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"schema_version\":1,\"key\":[\"date\",\"symbol\"],\"canonical_order\":\"fixed\",\"row_count\":$ROWS,\"row_group_size\":131072,\"aligned\":$aligned_txt,\"groups\":[\"index\",\"factor/alpha\",\"fieldset/fs\"]}"
-rj "$tableDir/index/_group.json" "{\"group\":\"index\",\"row_count\":$ROWS,\"row_group_size\":$RGS_INDEX,\"partitioning\":[{\"template\":\"date=%Y-%m-%d\",\"source\":\"date\"}]}"
-rj "$tableDir/factor/alpha/_group.json" "{\"group\":\"factor/alpha\",\"row_count\":$ROWS,\"row_group_size\":$RGS_BIG,\"partitioning\":[{\"template\":\"year=%Y\",\"source\":\"date\"},{\"template\":\"month=%m\",\"source\":\"date\"},{\"template\":\"day=%d\",\"source\":\"date\"}]}"
-rj "$tableDir/fieldset/fs/_group.json" "{\"group\":\"fieldset/fs\",\"row_count\":$ROWS,\"row_group_size\":$RGS_BIG,\"partitioning\":[{\"template\":\"year=%Y\",\"source\":\"date\"},{\"template\":\"month=%m\",\"source\":\"date\"}]}"
+rj "$tableDir/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"schema_version\":1,\"key\":[\"date\",\"symbol\"],\"canonical_order\":\"fixed\",\"row_count\":$ROWS,\"row_group_size\":131072,\"groups\":[\"index\",\"factor/alpha\",\"fieldset/fs\"]}"
 
 # ---------------- column definition helpers ----------------
 # index_cols returns a SQL select list for the given global row range [g0,g1)
@@ -109,10 +103,6 @@ ALPHA_SEL=$(alpha_col_list)
 FS_SEL=$(fieldset_col_list)
 IX_SEL=$(extra_index_cols)
 
-# alpha and fieldset column name JSON arrays
-alpha_names='["rowid_alpha"'; for n in $(seq 0 $((ALPHA_COLS-1))); do alpha_names+=", \"alpha$(printf '%03d' "$n")\""; done; alpha_names+="]"
-fs_names='["rowid_fs"'; for n in $(seq 0 $((FIELDSET_COLS-1))); do fs_names+=", \"fs$(printf '%03d' "$n")\""; done; fs_names+="]"
-
 # ---------------- per-day parts -----------------
 txid=0; dayStart=0
 for date in "${Days[@]}"; do
@@ -120,34 +110,22 @@ for date in "${Days[@]}"; do
 
   # index group: day-level partition, parts of PART_ROWS, RGS 32768
   indexDir="$tableDir/index/date=$date"; mkdir -p "$indexDir"
-  ps=0; markers=()
+  ps=0
   while [ $ps -lt $rowsPerDay ]; do
     pc=$((PART_ROWS < rowsPerDay-ps ? PART_ROWS : rowsPerDay-ps))
-    gStart=$((start+ps)); pn=$(partn ${#markers[@]})
-    local_sel="CAST(r AS DOUBLE) AS rowid"
+    gStart=$((start+ps)); pn=$(partn $((ps / PART_ROWS)))
     run_duck "COPY (WITH r AS (SELECT range AS r FROM range($gStart,$((gStart+pc)))) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid $([ -n "$IX_SEL" ] && echo ", $IX_SEL") FROM r) TO '$indexDir/$pn.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
-    ixcols='["date","symbol","close","volume","rowid"'
-    for n in $(seq 1 $((INDEX_COLS-5))); do ixcols+=", \"ix$(printf '%03d' "$n")\""; done
-    ixcols+="]"
-    rj "$indexDir/$pn.aligned.json" "{\"table\":\"$TABLE\",\"group\":\"index\",\"part\":\"$pn\",\"start_row\":$gStart,\"row_count\":$pc,\"row_group_size\":$RGS_INDEX,\"columns\":$ixcols}"
-    markers+=("$pn"); ps=$((ps+pc))
+    ps=$((ps+pc))
   done
-  mp="["; for i in "${!markers[@]}"; do [ $i -gt 0 ] && mp+=","; mp+="\"${markers[$i]}\""; done; mp+="]"
-  rj "$indexDir/.aligned-commit.json" "{\"txid\":$txid,\"parts\":$mp}"
 
-  # alpha group: year/month/day, 1 part, ALPHA_COLS sparse cols
-  alphaDir="$tableDir/factor/alpha/year=2026/month=09/day=$date"; mkdir -p "$alphaDir"
+  # alpha group: year/month/date, 1 part, ALPHA_COLS sparse cols
+  alphaDir="$tableDir/factor/alpha/year=2026/month=2026-09/date=$date"; mkdir -p "$alphaDir"
   run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT CAST(r AS BIGINT) AS rowid_alpha $([ -n "$ALPHA_SEL" ] && echo ", $ALPHA_SEL") FROM r) TO '$alphaDir/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
-  rj "$alphaDir/part-000000.aligned.json" "{\"table\":\"$TABLE\",\"group\":\"factor/alpha\",\"part\":\"part-000000\",\"start_row\":$start,\"row_count\":$rowsPerDay,\"row_group_size\":$RGS_BIG,\"columns\":$alpha_names}"
-  rj "$alphaDir/.aligned-commit.json" "{\"txid\":$txid,\"parts\":[\"part-000000\"]}"
 
   # fieldset group: coarse year/month, 1 part per day
-  fsDir="$tableDir/fieldset/fs/year=2026/month=09"; mkdir -p "$fsDir"
+  fsDir="$tableDir/fieldset/fs/year=2026/month=2026-09"; mkdir -p "$fsDir"
   pn=$(partn $((txid-1)))
   run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT CAST(r AS BIGINT) AS rowid_fs $([ -n "$FS_SEL" ] && echo ", $FS_SEL") FROM r) TO '$fsDir/$pn.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
-  rj "$fsDir/$pn.aligned.json" "{\"table\":\"$TABLE\",\"group\":\"fieldset/fs\",\"part\":\"$pn\",\"start_row\":$start,\"row_count\":$rowsPerDay,\"row_group_size\":$RGS_BIG,\"columns\":$fs_names}"
-  mparts="["; for k in $(seq 0 $((txid-1))); do [ $k -gt 0 ] && mparts+=","; mparts+="\"$(partn $k)\""; done; mparts+="]"
-  rj "$fsDir/.aligned-commit.json" "{\"txid\":$txid,\"parts\":$mparts}"
 
   dayStart=$((dayStart+rowsPerDay))
 done

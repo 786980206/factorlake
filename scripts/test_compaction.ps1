@@ -47,18 +47,14 @@ Write-JsonFile (Join-Path $tableDir '_table.json') @{
     name = $table; version = 1; schema_version = 1; key = @('date', 'symbol')
     canonical_order = 'fixed'; row_count = 0; row_group_size = 131072
     groups = @('index', 'factor/alpha101')
-}
-Write-JsonFile (Join-Path $tableDir 'index\_group.json') @{
-    group = 'index'; row_count = 0; row_group_size = 2048
-    partitioning = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })
-}
-Write-JsonFile (Join-Path $tableDir 'factor\alpha101\_group.json') @{
-    group = 'factor/alpha101'; row_count = 0; row_group_size = 2048
-    partitioning = @(
-        @{ template = 'year=%Y'; source = 'date' },
-        @{ template = 'month=%m'; source = 'date' },
-        @{ template = 'day=%d'; source = 'date' }
-    )
+    partitioning = @{
+        'index' = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })
+        'factor/alpha101' = @(
+            @{ template = 'year=%Y'; source = 'date' },
+            @{ template = 'month=%Y-%m'; source = 'date' },
+            @{ template = 'date=%Y-%m-%d'; source = 'date' }
+        )
+    }
 }
 
 # ---- write 2 batches on the SAME day (same partition dir, 2 parts) -----------
@@ -73,7 +69,7 @@ $o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_written, parts_w
 Expect-Equal 'write 2' $o.Trim() '2000,2,2'
 
 # ---- alpha dir should have 2 parts now ---------------------------------------
-$alphaDir = Join-Path $tableDir 'factor\alpha101\year=2026\month=07\day=01'
+$alphaDir = Join-Path $tableDir 'factor\alpha101\year=2026\month=2026-07\date=2026-07-01'
 $before = (Get-ChildItem $alphaDir -Filter 'part-*.parquet').Count
 Expect-Equal 'alpha parts before compact' $before 2
 

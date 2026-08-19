@@ -156,24 +156,12 @@ struct AlignedScanLocalState : public LocalTableFunctionState {
 
 namespace {
 
-//! Opens a parquet file and validates the sidecar-declared column order against
-//! the actual file schema (contract §7 / §10). Returns the reader.
+//! Opens a parquet file and returns the reader. Part metadata (row count,
+//! columns) is read from the Parquet footer at plan time; there is no sidecar
+//! to validate against anymore.
 unique_ptr<ParquetReader> OpenPartReader(ClientContext &context, const PartInfo &part, const string &table_name,
                                          const string &group_name) {
-	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(part.path), ParquetOptions(context));
-	if (reader->columns.size() != part.columns.size()) {
-		throw IOException("Aligned table '%s' group '%s' part '%s': sidecar declares %llu columns but the file has "
-		                  "%llu (schema mismatch)",
-		                  table_name, group_name, part.part_name, part.columns.size(), reader->columns.size());
-	}
-	for (idx_t i = 0; i < part.columns.size(); i++) {
-		if (reader->columns[i].name != part.columns[i]) {
-			throw IOException("Aligned table '%s' group '%s' part '%s': sidecar column %llu is '%s' but the file has "
-		                      "'%s' (column order mismatch)",
-		                      table_name, group_name, part.part_name, i, part.columns[i], reader->columns[i].name);
-		}
-	}
-	return reader;
+	return make_uniq<ParquetReader>(context, OpenFileInfo(part.path), ParquetOptions(context));
 }
 
 } // namespace
@@ -430,42 +418,6 @@ static vector<pair<idx_t, idx_t>> IntersectIntervals(const vector<pair<idx_t, id
 	return result;
 }
 
-//! Merges two sorted, disjoint interval lists into their union (used when the
-//! table's leaves are NOT aligned: pruning must not be intersected, so the scan
-//! covers any range where any active leaf still has data).
-static vector<pair<idx_t, idx_t>> UnionIntervals(const vector<pair<idx_t, idx_t>> &a,
-                                                 const vector<pair<idx_t, idx_t>> &b) {
-	vector<pair<idx_t, idx_t>> merged;
-	merged.reserve(a.size() + b.size());
-	idx_t i = 0;
-	idx_t j = 0;
-	while (i < a.size() && j < b.size()) {
-		if (a[i].first < b[j].first) {
-			merged.push_back(a[i++]);
-		} else {
-			merged.push_back(b[j++]);
-		}
-	}
-	while (i < a.size()) {
-		merged.push_back(a[i++]);
-	}
-	while (j < b.size()) {
-		merged.push_back(b[j++]);
-	}
-	// merge overlaps/adjacents
-	vector<pair<idx_t, idx_t>> result;
-	for (auto &iv : merged) {
-		if (result.empty()) {
-			result.push_back(iv);
-		} else if (iv.first <= result.back().second) {
-			result.back().second = MaxValue<idx_t>(result.back().second, iv.second);
-		} else {
-			result.push_back(iv);
-		}
-	}
-	return result;
-}
-
 unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<AlignedTableBindData>();
 	auto result = make_uniq<AlignedScanGlobalState>();
@@ -530,15 +482,11 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		}
 	}
 
-	// Active row intervals. With alignment (manifest "aligned" = true, the
-	// default) every leaf shares the same Logical Row Space, so the per-leaf
-	// partition-pruning results map to a unified physical-group coordinate and
-	// are INTERSECTED into one global scan range: a range pruned by any active
-	// leaf is skipped for all leaves. When "aligned" = false the leaves are not
-	// guaranteed position-aligned, so pruning must NOT be propagated across
-	// leaves via intersection — instead each leaf keeps its own pruned parts and
-	// the global cursor covers the UNION, letting each leaf read only its kept
-	// parts (gaps are NULL-filled).
+	// Active row intervals. All tables are position-aligned (the alignment
+	// contract — no per-table switch anymore), so every leaf shares the same
+	// Logical Row Space and the per-leaf partition-pruning results map to a
+	// unified coordinate: they are INTERSECTED into one global scan range. A
+	// range pruned by any active leaf is skipped for all leaves.
 	vector<pair<idx_t, idx_t>> active;
 	bool any_active = false;
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
@@ -551,10 +499,8 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		if (!any_active) {
 			active = std::move(intervals);
 			any_active = true;
-		} else if (bind.plan.table.aligned) {
-			active = IntersectIntervals(active, intervals);
 		} else {
-			active = UnionIntervals(active, intervals);
+			active = IntersectIntervals(active, intervals);
 		}
 		if (active.empty()) {
 			break;

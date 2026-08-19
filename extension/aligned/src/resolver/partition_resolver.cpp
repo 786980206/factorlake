@@ -55,6 +55,89 @@ bool EvaluatePartitionTemplate(const string &template_str, date_t value, string 
 	return true;
 }
 
+namespace {
+
+//! True when the range [from, to) of s contains only ASCII digits.
+bool IsDigits(const string &s, size_t from, size_t to) {
+	if (to > s.size() || from >= to) {
+		return false;
+	}
+	for (size_t i = from; i < to; i++) {
+		if (s[i] < '0' || s[i] > '9') {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! Maps a partition segment value to its template ("" when not a recognized
+//! format): "2026" -> "year=%Y", "2026-08" -> "month=%Y-%m",
+//! "2026-08-17" -> "date=%Y-%m-%d".
+string SegmentValueToTemplate(const string &value) {
+	if (value.size() == 4 && IsDigits(value, 0, 4)) {
+		return "year=%Y";
+	}
+	if (value.size() == 7 && value[4] == '-' && IsDigits(value, 0, 4) && IsDigits(value, 5, 7)) {
+		return "month=%Y-%m";
+	}
+	if (value.size() == 10 && value[4] == '-' && value[7] == '-' && IsDigits(value, 0, 4) &&
+	    IsDigits(value, 5, 7) && IsDigits(value, 8, 10)) {
+		return "date=%Y-%m-%d";
+	}
+	return "";
+}
+
+} // namespace
+
+vector<PartitionTemplate> DerivePartitioningFromPaths(const vector<string> &paths, const string &table_name,
+                                                      const string &group_name) {
+	// Ordered segment names (first-seen order) and their templates.
+	vector<string> order;
+	case_insensitive_map_t<string> templates_by_name;
+	for (auto &raw : paths) {
+		string path = raw;
+		std::replace(path.begin(), path.end(), '\\', '/');
+		// Split the path into segments and inspect each name=value segment.
+		size_t pos = 0;
+		while (pos < path.size()) {
+			auto slash = path.find('/', pos);
+			string segment = path.substr(pos, slash == string::npos ? string::npos : slash - pos);
+			pos = slash == string::npos ? path.size() : slash + 1;
+			auto eq = segment.find('=');
+			if (eq == string::npos || eq == 0) {
+				continue;
+			}
+			string name = segment.substr(0, eq);
+			if (!StringUtil::CIEquals(name, "year") && !StringUtil::CIEquals(name, "month") &&
+			    !StringUtil::CIEquals(name, "date")) {
+				continue; // unknown partition kind: ignored
+			}
+			string tmpl = SegmentValueToTemplate(segment.substr(eq + 1));
+			if (tmpl.empty()) {
+				continue; // unrecognized value format: ignored
+			}
+			auto it = templates_by_name.find(name);
+			if (it == templates_by_name.end()) {
+				templates_by_name[name] = tmpl;
+				order.push_back(name);
+			} else if (it->second != tmpl) {
+				throw IOException("Aligned table '%s' group '%s': partition segment '%s' has inconsistent formats "
+				                  "('%s' vs '%s')",
+				                  table_name, group_name, name, it->second, tmpl);
+			}
+		}
+	}
+	vector<PartitionTemplate> result;
+	result.reserve(order.size());
+	for (auto &name : order) {
+		PartitionTemplate tmpl;
+		tmpl.template_str = templates_by_name[name];
+		tmpl.source = "date"; // the partition source column is always `date`
+		result.push_back(std::move(tmpl));
+	}
+	return result;
+}
+
 static bool IsConstantDateFilter(const TableFilter &filter, ExpressionType &cmp, date_t &value) {
 	if (filter.filter_type != TableFilterType::CONSTANT_COMPARISON) {
 		return false;

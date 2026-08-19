@@ -104,33 +104,39 @@ fieldset/ma/      year=2026/month=08/
 
 ## 5. Manifest（轻量，不做 Catalog DB）
 
-目录本身就是 Catalog，文件发现用 Hive layout。每张 Logical Table 一个 `_table.json`：
+目录本身就是 Catalog，文件发现用 Hive layout。每张 Logical Table **一个** `_table.json`
+（**没有 `_group.json`、没有 part sidecar、没有 commit marker**，v2 契约）：
 
 ```json
 {
   "name": "cnstk_ixday",
   "version": 1,
+  "schema_version": 1,
   "key": ["date", "symbol"],
   "canonical_order": "fixed",
+  "row_count": 1234567890,
+  "row_group_size": 131072,
+  "part_rows": 4194304,
+  "last_txid": 42,
   "groups": ["index", "factor/alpha101", "factor/alpha191", "fieldset/ema",
              "fieldset/ma", "fieldset/qoq", "fieldset/ttm", "fieldset/yoy",
-             "panel/cnstk_icday", "panel/cnstk_ixday", "panel/cnstk_klday"]
+             "panel/cnstk_icday", "panel/cnstk_ixday", "panel/cnstk_klday"],
+  "partitioning": {
+    "index":          [{"template": "date=%Y-%m-%d", "source": "date"}],
+    "factor/alpha101": [{"template": "year=%Y", "source": "date"},
+                        {"template": "month=%Y-%m", "source": "date"},
+                        {"template": "date=%Y-%m-%d", "source": "date"}]
+  }
 }
 ```
 
-每个 Group 一个 `_group.json`：
-
-```json
-{
-  "group": "factor/alpha101",
-  "row_count": 1234567890,
-  "partitioning": ["year", "month", "day"],
-  "row_group_size": 131072
-}
-```
-
-Manifest 不记录所有 Parquet 文件，只负责：Logical Table 定义、Key、
-Schema version、Column Group 列表、Row count、Canonical Row Space metadata、Group metadata。
+- `row_count` 只记账，**Reader 以 Parquet footer 汇总为准**（所有 Group 必须一致）。
+- `last_txid`：最近成功提交的事务号（Writer/Compactor 每次 commit +1；无 marker 文件）。
+- `partitioning`（可选）：`group → 有序目录模板`，模板只允许 `year=%Y` / `month=%Y-%m` /
+  `date=%Y-%m-%d`，source 固定 `date`。**空表起步必须显式给出**；否则从目录结构推导
+  （仅识别这三种段，未知 `name=value` 段忽略）；Writer 重写 manifest 必须原样写回。
+- 行区间契约：同一 Group 的 part 按 (分区目录字符串序, part 序号数值序) 排序，
+  start_row 由 footer 行数累加；跨 Group 总行数必须完全一致（否则 fail-fast）。
 
 ---
 
@@ -194,8 +200,10 @@ AlignedTableWriter: Arrow RecordBatch → 按 Column Group 拆多个 Parquet Wri
 ```
 
 - 第一版 **Immutable + Append-only**：`part-001/002/003...`，新数据只追加，不改旧文件。
-- **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 commit 成正式 partition；
-  崩溃则丢弃 transaction，读取端永远不会看到"index 有数据、alpha 没写完"的非法状态。
+- **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式 partition，
+  再原子重写 `_table.json`（row_count 记账 + last_txid+1，partitioning 原样写回）；
+  崩溃则丢弃 transaction（`_tmp/` 对 Reader 永不可见），扫描时跨 Group 行数
+  fail-fast 兜底。无 sidecar、无 marker 文件。
 - **Compaction**（后续）：后台合并 old parts → 新 part，保持 Canonical Row Space /
   Row Ordering / Row Group Boundary 不变，atomic switch，查询不中断。
 - **Schema Evolution**（后续）：新列在老 partition 上读到 NULL，不重写历史。
@@ -429,13 +437,31 @@ bash scripts/test_aligned.sh
     拒绝 schema-evolution 合并）→ 暂存 → move+sidecar → 替换 commit marker（临时名+rename）→
     删旧文件；失败清理 `_tmp`
   - 验收：`test_compaction.ps1` 全 PASS（2→1 part，前后 count/sum/misalign 全对，index 未动）
-- [x] **新增需求：元数据 `aligned` 开关（2026-08）**：
-  - `_table.json` 新字段 `aligned`(bool, 默认 true)；writer 重写 manifest 时保留
-  - **aligned=true**（默认）：各 leaf 的 partition pruning 结果映射统一坐标后**相交**
-    为一个全局扫描区间（跨 leaf 传播剪枝）——`IntersectIntervals`
-  - **aligned=false**：各 leaf 独立剪枝/规划，**不做跨 leaf 交集**——全局扫描区间为各
-    active leaf kept-part 区间之**并集**（`UnionIntervals`），gap 由 leaf 自行 NULL 补
-  - 验收：`test_aligned_flag.ps1` 全 PASS（aligned=false 全扫描 + 各 leaf 独立分区剪枝）
+- [x] **新增需求：元数据 `aligned` 开关（2026-08，已随 v2 契约回滚）**：
+  - 曾加入 `_table.json.aligned`(bool) 与 UnionIntervals 并集剪枝路径；
+    **v2 契约已删除该语义**：读端忽略 `aligned` 字段、`UnionIntervals`/aligned=false
+    分支从代码删除，固定为相交剪枝（`IntersectIntervals`）——见"v2 契约收尾"条目
+  - 历史验收：`test_aligned_flag.ps1` 当时全 PASS（该脚本已删除）
+- [x] **v2 契约收尾：20 步改造全部落地（2026-08）**：
+  - **删除**：`_group.json`、part sidecar（`*.aligned.json`）、commit marker
+    （`.aligned-commit.json`）、`aligned` 字段语义（固定 true）；`aligned_scan.cpp`
+    删除 `UnionIntervals` 与 aligned=false 分支；`OpenPartReader` 删 sidecar 列序校验
+  - **`_table.json` 升级**：新增 `last_txid`（事务记录，每次 commit +1）、可选
+    `partitioning` map（`group → [{template, source}]`，模板仅 `year=%Y`/`month=%Y-%m`/
+    `date=%Y-%m-%d`，source 固定 `date`，空表起步必须显式，writer 重写必须原样写回）；
+    `row_count` 只记账、Reader 以 footer 为准
+  - **行区间**：part 按 (分区目录字符串序, part 序号数值序) 排序，start_row 由 footer
+    行数全局累加；跨 Group 总行数必须完全一致（fail-fast）——`BuildTablePlan` 重写
+  - **目录推导**：`DerivePartitioningFromPaths` 从目录推导分区（仅识别 year/month/date
+    段，格式冲突报错，未知 `name=value` 段忽略）
+  - **Writer/Compactor**：txid = `last_txid+1`；commit 段干净（move + 重写 `_table.json`）；
+    rgs 用 `_table.json.row_group_size`（兜底 131072）
+  - **验收**：test_aligned.ps1 25 项、test_writer.ps1 17 项、test_compaction.ps1 17 项、
+    test_parallel.ps1 全 PASS（1M 行 bench 数据，8 线程 0.055s vs 1 线程 0.12s）；
+    bench 生成器 gen_bench.ps1/sh、gen_multi_bench.sh 已去除旧契约产物（`day=`→`date=`）；
+    清理 build2/build-debug 临时构建目录；`docs/STORAGE_CONTRACT.md` 重写为 v2
+  - 注意：A-NORMAL 引擎（run_multi_bench.sh 翻转 aligned 字段的兄弟表）行为现与
+    A-ALIGNED 相同，仅保留作历史对照
 - [x] **Linux 迁移 + 迁移暴露的两个真实 Bug 修复（2026-08）**：
   - Linux 环境/构建链路见 §16.2：gitee clone `duckdb/`（v1.5.4）、`cmake -G Ninja` +
     `scripts/aligned_extension_config.cmake` 注册扩展、产物 `duckdb/build/duckdb`
@@ -490,9 +516,7 @@ bash scripts/test_aligned.sh
   - **测试驱动又修 4 个 bug**：A-NORMAL 兄弟表重建、`.gen-meta` 规模校验、超宽 SQL
     stdin 绕 ARG_MAX、`$TMPDIR` 未设置秒崩（`${TMPDIR:-/tmp}`）。
 
-### Phase 1 关键经验（必须记住，避免重踩）
-
-1. **`VectorOperations::Copy` 的 5 参语义**：`Copy(source, target, source_count, source_offset, target_offset)`
+### Phase 1 关键经验（必须记住，避免重踩）：`Copy(source, target, source_count, source_offset, target_offset)`
    中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。
    传"行数"会在 `source_offset > count` 时下溢 → 字典向量 selection 越界读 → 崩溃。
    正确调用：`Copy(src, dst, src_offset + copy_count, src_offset, dst_offset)`。
@@ -626,11 +650,13 @@ bash scripts/test_aligned.sh
 
 ### 新增需求（aligned 开关）关键经验
 
-1. `_table.json` 的 `aligned` 字段是**叶子间剪枝是否可统一传播**的开关：
+1. `_table.json` 的 `aligned` 字段曾是**叶子间剪枝是否可统一传播**的开关：
    true → 各 leaf kept-part 区间**相交**（`IntersectIntervals`，全局一个扫描区间）；
-   false → **并集**（`UnionIntervals`，各 leaf 独立剪枝、独立 scan planning，
-   不做 cross-leaf 交集传播）。yyjson 判布尔用 `yyjson_is_bool`/`yyjson_get_bool`。
-2. writer 重写 `_table.json` 时务必保留 `aligned` 字段，否则会退化成默认 true。
+   false → **并集**（`UnionIntervals`）。**v2 契约已删除该开关**：读端忽略 `aligned`
+   字段，固定为相交剪枝（`IntersectIntervals`）；`UnionIntervals` 与 aligned=false
+   分支已从代码删除。yyjson 判布尔用 `yyjson_is_bool`/`yyjson_get_bool`。
+2. writer 重写 `_table.json` 时务必保留 `partitioning` 字段，否则显式分区配置
+   丢失（退化为目录推导，可能改变未来写入的目录布局）。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。

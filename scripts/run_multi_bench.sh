@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="$ROOT/bench/multi_bench_config.sh"
 source "$CONFIG"
 
-DUCKDB="${DUCKDB:-$ROOT/duckdb/build/duckdb}"
+DUCKDB="${DUCKDB:-$ROOT/duckdb/build/duckdb_aligned.exe}"
 OUT="${ALIGNED_DATA_ROOT:-$ROOT/testdata}"
 TIER=A
 ROWS_ARG=""
@@ -85,8 +85,8 @@ ALPHA=$(layout_alpha "$WIDTH")
 FIELDSET=$(layout_fieldset "$WIDTH")
 echo "== Tier $TIER: rows=$ROWS width=$WIDTH (alpha=$ALPHA fs=$FIELDSET) sparse=$SPARSITY engines=${ENGINES[*]} threads=${THREADS[*]} =="
 
-ALIGNED_TABLE="bench_mb"        # physical table for aligned=true (and baselines)
-NORMAL_TABLE="bench_mb_normal"  # aligned=false sibling (symlinked group dirs)
+ALIGNED_TABLE="bench_mb"        # physical table
+NORMAL_TABLE="bench_mb_normal"  # sibling with flipped _table.json (reader ignores the flag)
 
 # ---------- data generation (once per rows/width/sparsity) --------------------------
 GEN_FLAGS=(--rows "$ROWS" --width "$WIDTH" --sparsity "$SPARSITY" --aligned true --out "$OUT" --tag mb)
@@ -97,9 +97,10 @@ if [ "$need_gen" = 1 ] && [ "$FLAG_NOREGEN" = 0 ]; then
 fi
 if [ ! -f "$OUT/$ALIGNED_TABLE/_table.json" ]; then echo "aligned table missing (use --no-regen only if data exists): $OUT/$ALIGNED_TABLE"; exit 1; fi
 
-# A-NORMAL sibling: symlink the group dirs + flip _table.json aligned flag.
-# Always rebuilt so it stays in lockstep with the main table's row_count (a
-# stale sibling from an earlier scale caused a row_count mismatch).
+# A-NORMAL sibling: symlink the group dirs + flip the aligned flag (kept for
+# historical comparability; the reader now ignores the flag so behavior matches
+# A-ALIGNED). Always rebuilt so it stays in lockstep with the main table's
+# row_count (a stale sibling from an earlier scale caused a row_count mismatch).
 if [ -n "$(printf '%s\n' "${ENGINES[@]}" | grep -x 'A-NORMAL' || true)" ]; then
   rm -rf "$OUT/$NORMAL_TABLE"; mkdir -p "$OUT/$NORMAL_TABLE"
   ln -s "$(readlink -f "$OUT/$ALIGNED_TABLE/index")" "$OUT/$NORMAL_TABLE/index"

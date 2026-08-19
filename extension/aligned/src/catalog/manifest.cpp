@@ -1,11 +1,13 @@
 #include "catalog/manifest.hpp"
+#include "resolver/partition_resolver.hpp"
 #include "resolver/row_space.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "parquet_reader.hpp"
 #include "yyjson.hpp"
 
-#include <unordered_set>
+#include <algorithm>
 
 namespace duckdb {
 
@@ -94,6 +96,86 @@ vector<string> GetStringArray(duckdb_yyjson::yyjson_val *obj, const char *key, c
 	return result;
 }
 
+//! Parses the optional _table.json "partitioning" map (group -> templates).
+//! The group manifests are gone; partitioning lives in the table manifest.
+void ParsePartitioning(duckdb_yyjson::yyjson_val *obj, case_insensitive_map_t<vector<PartitionTemplate>> &out,
+                       const string &path) {
+	auto val = duckdb_yyjson::yyjson_obj_get(obj, "partitioning");
+	if (!val) {
+		return; // optional: derived from the directory layout instead
+	}
+	if (!duckdb_yyjson::yyjson_is_obj(val)) {
+		throw IOException("Aligned table: field 'partitioning' in '%s' must be an object (group -> templates)", path);
+	}
+	size_t idx;
+	size_t max;
+	duckdb_yyjson::yyjson_val *key;
+	duckdb_yyjson::yyjson_val *entry;
+	yyjson_obj_foreach(val, idx, max, key, entry) {
+		string group_name(duckdb_yyjson::yyjson_get_str(key), duckdb_yyjson::yyjson_get_len(key));
+		if (!duckdb_yyjson::yyjson_is_arr(entry)) {
+			throw IOException("Aligned table: partitioning entry '%s' in '%s' must be an array", group_name, path);
+		}
+		vector<PartitionTemplate> templates;
+		auto size = duckdb_yyjson::yyjson_arr_size(entry);
+		for (size_t i = 0; i < size; i++) {
+			auto item = duckdb_yyjson::yyjson_arr_get(entry, i);
+			if (!duckdb_yyjson::yyjson_is_obj(item)) {
+				throw IOException("Aligned table: partitioning entries of '%s' in '%s' must be objects", group_name,
+				                  path);
+			}
+			PartitionTemplate tmpl;
+			if (!GetStringField(item, "template", tmpl.template_str) || tmpl.template_str.empty()) {
+				throw IOException("Aligned table: partitioning entry %zu of '%s' in '%s' is missing 'template'", i,
+				                  group_name, path);
+			}
+			if (!GetStringField(item, "source", tmpl.source) || tmpl.source.empty()) {
+				throw IOException("Aligned table: partitioning entry %zu of '%s' in '%s' is missing 'source'", i,
+				                  group_name, path);
+			}
+			templates.push_back(std::move(tmpl));
+		}
+		out[group_name] = std::move(templates);
+	}
+}
+
+//! Contract §2.1d: true when any directory segment of the path starts with
+//! '.' or '_' (e.g. "_tmp/", ".hidden/"). The file name segment is excluded.
+bool HasIgnoredPathSegment(const string &path) {
+	auto start = path.find_first_of("/\\");
+	while (start != string::npos) {
+		auto end = path.find_first_of("/\\", start + 1);
+		string segment = path.substr(start + 1, end == string::npos ? string::npos : end - start - 1);
+		if (!segment.empty() && (segment[0] == '.' || segment[0] == '_')) {
+			return true;
+		}
+		start = end;
+	}
+	return false;
+}
+
+//! Parses a "part-%06llu" file name; returns false when malformed.
+bool ParsePartName(const string &base_name, idx_t &part_id) {
+	if (base_name.rfind("part-", 0) != 0) {
+		return false;
+	}
+	string num_str = base_name.substr(5);
+	if (num_str.empty() || num_str.size() > 20) {
+		return false;
+	}
+	for (auto c : num_str) {
+		if (c < '0' || c > '9') {
+			return false;
+		}
+	}
+	try {
+		part_id = std::stoull(num_str);
+	} catch (...) {
+		return false;
+	}
+	return true;
+}
+
 } // namespace
 
 TableManifest ReadTableManifest(FileSystem &fs, const string &manifest_path) {
@@ -114,24 +196,14 @@ TableManifest ReadTableManifest(FileSystem &fs, const string &manifest_path) {
 		if (GetStringField(root, "canonical_order", canonical_order)) {
 			manifest.canonical_order = canonical_order;
 		}
-		// aligned (bool, default true): whether leaf pruning results can be
-		// unified into one alignment-group coordinate via intersection.
-		auto aligned_val = duckdb_yyjson::yyjson_obj_get(root, "aligned");
-		if (aligned_val) {
-			if (duckdb_yyjson::yyjson_is_bool(aligned_val)) {
-				manifest.aligned = duckdb_yyjson::yyjson_get_bool(aligned_val);
-			} else if (duckdb_yyjson::yyjson_is_true(aligned_val)) {
-				manifest.aligned = true;
-			} else if (duckdb_yyjson::yyjson_is_false(aligned_val)) {
-				manifest.aligned = false;
-			} else {
-				throw IOException("Aligned table: field 'aligned' in '%s' must be a boolean", manifest_path);
-			}
-		}
+		// row_count is bookkeeping only (written by the writer); the reader
+		// derives the total row count from the Parquet footers.
 		GetUIntField(root, "row_count", manifest.row_count);
 		GetUIntField(root, "row_group_size", manifest.row_group_size);
 		GetUIntField(root, "part_rows", manifest.part_rows);
+		GetUIntField(root, "last_txid", manifest.last_txid);
 		manifest.groups = GetStringArray(root, "groups", manifest_path, true);
+		ParsePartitioning(root, manifest.partitioning, manifest_path);
 	});
 	if (manifest.key.empty()) {
 		throw IOException("Aligned table: manifest '%s' declares an empty key", manifest_path);
@@ -144,109 +216,6 @@ TableManifest ReadTableManifest(FileSystem &fs, const string &manifest_path) {
 		                  manifest_path, manifest.canonical_order);
 	}
 	return manifest;
-}
-
-static GroupManifest ReadGroupManifest(FileSystem &fs, const string &manifest_path) {
-	string content = ReadTextFile(fs, manifest_path);
-	GroupManifest manifest;
-	WithJsonObject(manifest_path, content, [&](duckdb_yyjson::yyjson_val *root) {
-		manifest.group = GetRequiredString(root, "group", manifest_path);
-		GetUIntField(root, "row_count", manifest.row_count);
-		GetUIntField(root, "row_group_size", manifest.row_group_size);
-		auto partitioning = duckdb_yyjson::yyjson_obj_get(root, "partitioning");
-		if (partitioning) {
-			if (!duckdb_yyjson::yyjson_is_arr(partitioning)) {
-				throw IOException("Aligned table: 'partitioning' in '%s' must be an array", manifest_path);
-			}
-			auto size = duckdb_yyjson::yyjson_arr_size(partitioning);
-			for (size_t i = 0; i < size; i++) {
-				auto item = duckdb_yyjson::yyjson_arr_get(partitioning, i);
-				if (!duckdb_yyjson::yyjson_is_obj(item)) {
-					throw IOException("Aligned table: 'partitioning' entries in '%s' must be objects", manifest_path);
-				}
-				PartitionTemplate tmpl;
-				if (!GetStringField(item, "template", tmpl.template_str) || tmpl.template_str.empty()) {
-					throw IOException("Aligned table: 'partitioning' entry %zu in '%s' is missing 'template'", i,
-					                  manifest_path);
-				}
-				if (!GetStringField(item, "source", tmpl.source) || tmpl.source.empty()) {
-					throw IOException("Aligned table: 'partitioning' entry %zu in '%s' is missing 'source'", i,
-					                  manifest_path);
-				}
-				manifest.partitioning.push_back(std::move(tmpl));
-			}
-		}
-	});
-	return manifest;
-}
-
-static PartInfo ReadPartSidecar(FileSystem &fs, const string &sidecar_path) {
-	string content = ReadTextFile(fs, sidecar_path);
-	PartInfo part;
-	WithJsonObject(sidecar_path, content, [&](duckdb_yyjson::yyjson_val *root) {
-		part.part_name = GetRequiredString(root, "part", sidecar_path);
-		// table/group are validated by the caller against the scan context
-		idx_t start_row = 0;
-		if (!GetUIntField(root, "start_row", start_row)) {
-			throw IOException("Aligned table: sidecar '%s' is missing 'start_row'", sidecar_path);
-		}
-		part.start_row = start_row;
-		if (!GetUIntField(root, "row_count", part.row_count)) {
-			throw IOException("Aligned table: sidecar '%s' is missing 'row_count'", sidecar_path);
-		}
-		GetUIntField(root, "row_group_size", part.row_group_size);
-		part.columns = GetStringArray(root, "columns", sidecar_path, true);
-	});
-	if (part.columns.empty()) {
-		throw IOException("Aligned table: sidecar '%s' declares no columns", sidecar_path);
-	}
-	return part;
-}
-
-//! Contract §2.1d: true when any directory segment of the path starts with
-//! '.' or '_' (e.g. "_tmp/", ".hidden/"). The file name segment is excluded.
-static bool HasIgnoredPathSegment(const string &path) {
-	auto start = path.find_first_of("/\\");
-	while (start != string::npos) {
-		auto end = path.find_first_of("/\\", start + 1);
-		string segment = path.substr(start + 1, end == string::npos ? string::npos : end - start - 1);
-		if (!segment.empty() && (segment[0] == '.' || segment[0] == '_')) {
-			return true;
-		}
-		start = end;
-	}
-	return false;
-}
-
-//! Reads the commit marker of a partition directory (contract §9). Returns the
-//! set of committed part names (basenames). A missing or invalid marker means
-//! the directory is not committed and every part in it is invisible.
-static unordered_set<string> ReadCommitMarker(FileSystem &fs, const string &dir, const string &table_name,
-                                              const string &group_name) {
-	unordered_set<string> result;
-	string marker_path = dir + "/.aligned-commit.json";
-	if (!fs.FileExists(marker_path)) {
-		return result;
-	}
-	string content;
-	try {
-		content = ReadTextFile(fs, marker_path);
-	} catch (...) {
-		throw IOException("Aligned table '%s' group '%s': unreadable commit marker '%s'", table_name, group_name,
-		                  marker_path);
-	}
-	WithJsonObject(marker_path, content, [&](duckdb_yyjson::yyjson_val *root) {
-		idx_t txid = 0;
-		if (!GetUIntField(root, "txid", txid)) {
-			throw IOException("Aligned table '%s' group '%s': commit marker '%s' is missing 'txid'", table_name,
-			                  group_name, marker_path);
-		}
-		auto parts = GetStringArray(root, "parts", marker_path, true);
-		for (auto &part : parts) {
-			result.insert(part);
-		}
-	});
-	return result;
 }
 
 void BuildTablePlan(ClientContext &context, const string &root_path, const string &table_name, TablePlan &plan) {
@@ -278,6 +247,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 
 	for (auto &group_name : plan.table.groups) {
 		GroupPlan group;
+		group.manifest.group = group_name;
 		// Contract §2.1c: every non-index group is a two-level path 'lv1/lv2'
 		if (!StringUtil::CIEquals(group_name, "index")) {
 			auto slash = group_name.find('/');
@@ -290,60 +260,88 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			group.lv2 = group_name.substr(slash + 1);
 		}
 		group.group_path = plan.table_path + "/" + group_name;
-		group.manifest = ReadGroupManifest(fs, group.group_path + "/_group.json");
-		if (!StringUtil::CIEquals(group.manifest.group, group_name)) {
-			throw IOException("Aligned table '%s': group manifest name '%s' does not match group '%s'",
-			                  plan.table.name, group.manifest.group, group_name);
-		}
-		if (group.manifest.row_count != plan.table.row_count) {
-			throw IOException("Aligned table '%s': group '%s' row_count %llu does not match table row_count %llu",
-			                  plan.table.name, group_name, group.manifest.row_count, plan.table.row_count);
-		}
 
-		// Discover part files (any physical partition layout; uncommitted parts
-		// are invisible; directories starting with '.' or '_' are ignored)
+		// Discover part files (any physical partition layout; directories
+		// starting with '.' or '_' are ignored — contract §2.1d). Part
+		// metadata (row count, columns) comes from the Parquet footer only;
+		// there are no sidecars and no commit markers anymore.
 		auto files = fs.GlobFiles(group.group_path + "/**/part-*.parquet", FileGlobOptions::ALLOW_EMPTY);
+		struct DiscoveredPart {
+			string dir_rel; // partition dir relative to the group root ("" = none)
+			idx_t part_id;  // numeric id from the file name
+			PartInfo part;
+		};
+		vector<DiscoveredPart> discovered;
+		vector<string> part_paths; // for partition-schema derivation
 		for (auto &file : files) {
 			auto &path = file.path;
 			if (HasIgnoredPathSegment(path)) {
-				continue; // ignore hidden dirs
+				continue; // uncommitted / stray directories are invisible
 			}
-			// Extract base name without extension
 			auto slash = path.find_last_of("/\\");
 			string base_name = slash == string::npos ? path : path.substr(slash + 1);
 			if (StringUtil::EndsWith(base_name, ".parquet")) {
 				base_name = base_name.substr(0, base_name.size() - 8);
 			}
-			// Validate part naming
-			if (base_name.rfind("part-", 0) != 0) {
+			idx_t part_id = 0;
+			if (!ParsePartName(base_name, part_id)) {
 				continue; // not a valid part file
 			}
-			string num_str = base_name.substr(5);
-			idx_t part_id = 0;
-			try {
-				part_id = std::stoull(num_str);
-			} catch (...) {
-				continue; // malformed part number
-			}
-			// Open Parquet to read schema and row count
+			// Open the Parquet footer for row count + column names
 			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
-			PartInfo part;
-			part.path = path;
-			part.part_name = base_name;
-			idx_t part_rows = plan.table.part_rows ? plan.table.part_rows : 4194304ull;
-			part.start_row = part_id * part_rows;
-			part.row_count = reader->NumRows();
-			part.row_group_size = plan.table.row_group_size;
+			DiscoveredPart dp;
+			dp.part.path = path;
+			dp.part.part_name = base_name;
+			dp.part.row_count = reader->NumRows();
 			for (auto &col : reader->columns) {
-				part.columns.push_back(col.name);
+				dp.part.columns.push_back(col.name);
 			}
-			group.parts.push_back(std::move(part));
+			// Partition dir relative to the group root (normalized to '/')
+			string norm = path;
+			std::replace(norm.begin(), norm.end(), '\\', '/');
+			string prefix = group.group_path;
+			std::replace(prefix.begin(), prefix.end(), '\\', '/');
+			if (norm.size() > prefix.size() && StringUtil::StartsWith(norm, prefix + "/")) {
+				dp.dir_rel = norm.substr(prefix.size() + 1);
+			}
+			// strip the file name
+			auto last = dp.dir_rel.find_last_of('/');
+			dp.dir_rel = last == string::npos ? "" : dp.dir_rel.substr(0, last);
+			dp.part_id = part_id;
+			part_paths.push_back(norm);
+			discovered.push_back(std::move(dp));
 		}
 
-		// Sort by start_row and validate the row space (contract §3 / §7)
-		std::sort(group.parts.begin(), group.parts.end(),
-		          [](const PartInfo &a, const PartInfo &b) { return a.start_row < b.start_row; });
-		ValidateRowSpace(plan.table.name, group_name, plan.table.row_count, group.parts);
+		// Partitioning: explicit (from _table.json) wins; otherwise derive it
+		// from the directory layout (only year=/month=/date= are recognized).
+		auto explicit_it = plan.table.partitioning.find(group_name);
+		if (explicit_it != plan.table.partitioning.end() && !explicit_it->second.empty()) {
+			group.manifest.partitioning = explicit_it->second;
+		} else {
+			group.manifest.partitioning = DerivePartitioningFromPaths(part_paths, plan.table.name, group_name);
+		}
+
+		// Sort into row order: partition dir (string order == chronological
+		// order for the fixed year/month/date formats) then part id (write
+		// order). start_row accumulates footer row counts in that order.
+		std::sort(discovered.begin(), discovered.end(),
+		          [](const DiscoveredPart &a, const DiscoveredPart &b) {
+			          if (a.dir_rel != b.dir_rel) {
+				          return a.dir_rel < b.dir_rel;
+			          }
+			          return a.part_id < b.part_id;
+		          });
+		idx_t start = 0;
+		group.parts.reserve(discovered.size());
+		for (auto &dp : discovered) {
+			dp.part.start_row = start;
+			start += dp.part.row_count;
+			group.parts.push_back(std::move(dp.part));
+		}
+		// Validate the group's row space: parts tile [0, group_rows) exactly
+		// (the alignment contract for this group).
+		idx_t group_rows = start;
+		ValidateRowSpace(plan.table.name, group_name, group_rows, group.parts);
 
 		// Column order: union of part columns, first-seen order (contract §8)
 		for (auto &part : group.parts) {
@@ -355,6 +353,21 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		}
 		plan.groups.push_back(std::move(group));
 	}
+
+	// Cross-group alignment: every group must cover the SAME total row count
+	// (all groups live on the same Logical Row Space — contract §3).
+	idx_t total = plan.groups[0].parts.empty() ? 0 : plan.groups[0].parts.back().start_row +
+	                                                  plan.groups[0].parts.back().row_count;
+	for (auto &group : plan.groups) {
+		idx_t group_rows =
+		    group.parts.empty() ? 0 : group.parts.back().start_row + group.parts.back().row_count;
+		if (group_rows != total) {
+			throw IOException("Aligned table '%s': group '%s' covers %llu rows but the table covers %llu rows "
+			                  "(alignment violation)",
+			                  plan.table.name, group.manifest.group, group_rows, total);
+		}
+	}
+	plan.table.row_count = total;
 }
 
 } // namespace duckdb

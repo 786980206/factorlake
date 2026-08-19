@@ -16,9 +16,6 @@
 #include "parquet_field_id.hpp"
 #include "parquet_shredding.hpp"
 #include "zstd_file_system.hpp"
-#include "yyjson.hpp"
-
-#include <set>
 
 namespace duckdb {
 
@@ -50,17 +47,6 @@ struct AlignedWriteGlobalState : public GlobalTableFunctionState {
 //===----------------------------------------------------------------------===//
 // Small JSON / file helpers
 //===----------------------------------------------------------------------===//
-
-static string ReadTextFile(FileSystem &fs, const string &path) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	idx_t size = handle->GetFileSize();
-	string result;
-	result.resize(size);
-	if (size > 0) {
-		handle->Read(&result[0], size, 0);
-	}
-	return result;
-}
 
 static void WriteTextFile(FileSystem &fs, const string &path, const string &content) {
 	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
@@ -100,34 +86,12 @@ static string JsonStringArray(const vector<string> &items) {
 	return out;
 }
 
-//! Reads a commit marker: returns the parts and txid of a partition dir
-//! (empty / 0 when the dir has no marker).
-static void ReadMarker(FileSystem &fs, const string &dir, idx_t &txid, vector<string> &parts) {
-	string marker_path = dir + "/.aligned-commit.json";
-	if (!fs.FileExists(marker_path)) {
-		return;
-	}
-	string content = ReadTextFile(fs, marker_path);
-	auto doc = duckdb_yyjson::yyjson_read(content.c_str(), content.size(), 0);
-	if (!doc) {
-		throw IOException("Aligned table: invalid commit marker JSON in '%s'", marker_path);
-	}
-	auto root = duckdb_yyjson::yyjson_doc_get_root(doc);
-	auto txid_val = duckdb_yyjson::yyjson_obj_get(root, "txid");
-	if (txid_val && duckdb_yyjson::yyjson_is_uint(txid_val)) {
-		txid = duckdb_yyjson::yyjson_get_uint(txid_val);
-	}
-	auto parts_val = duckdb_yyjson::yyjson_obj_get(root, "parts");
-	if (parts_val && duckdb_yyjson::yyjson_is_arr(parts_val)) {
-		auto size = duckdb_yyjson::yyjson_arr_size(parts_val);
-		for (size_t i = 0; i < size; i++) {
-			auto item = duckdb_yyjson::yyjson_arr_get(parts_val, i);
-			if (duckdb_yyjson::yyjson_is_str(item)) {
-				parts.emplace_back(duckdb_yyjson::yyjson_get_str(item), duckdb_yyjson::yyjson_get_len(item));
-			}
-		}
-	}
-	duckdb_yyjson::yyjson_doc_free(doc);
+//! Next transaction id = last_txid + 1. There are no commit markers anymore;
+//! _table.json's last_txid field is the only transaction record (bumped on
+//! every successful commit). Crash leftovers in _tmp/ are invisible to
+//! readers ('.'/'_' dirs) and cleaned up by the next transaction.
+static idx_t NextTransactionId(const TablePlan &plan) {
+	return plan.table.last_txid + 1;
 }
 
 //! Scans a directory for existing part-*.parquet files and returns the next
@@ -322,7 +286,6 @@ struct GroupWriterState {
 	unique_ptr<DataChunk> slice; // scratch chunk for row-slice assembly
 
 	vector<WrittenPart> written;
-	vector<string> touched_dirs; // target dirs whose marker needs updating
 };
 
 } // namespace
@@ -405,24 +368,8 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 		}
 	}
 
-	// txid = max existing txid + 1
-	idx_t txid = 1;
-	{
-		std::set<string> seen_dirs;
-		for (auto &group : bind.plan.groups) {
-			for (auto &part : group.parts) {
-				auto slash = part.path.find_last_of("/\\");
-				string dir = slash == string::npos ? "" : part.path.substr(0, slash);
-				if (!seen_dirs.insert(dir).second) {
-					continue;
-				}
-				idx_t marker_txid = 0;
-				vector<string> marker_parts;
-				ReadMarker(fs, dir, marker_txid, marker_parts);
-				txid = MaxValue<idx_t>(txid, marker_txid + 1);
-			}
-		}
-	}
+	// txid = last committed txid + 1 (markers are gone)
+	idx_t txid = NextTransactionId(bind.plan);
 	gstate.txid = txid;
 	string tmp_root = bind.plan.table_path + "/_tmp/transaction-" + to_string(txid);
 
@@ -466,8 +413,7 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &gs = gstates[gi];
 			gs.group = &bind.plan.groups[gi];
-			gs.rgs = gs.group->manifest.row_group_size > 0 ? gs.group->manifest.row_group_size
-			                                               : bind.plan.table.row_group_size;
+			gs.rgs = bind.plan.table.row_group_size > 0 ? bind.plan.table.row_group_size : 131072;
 			gs.col_names = bind.group_columns[gi];
 			for (auto &col : bind.group_columns[gi]) {
 				gs.col_types.push_back(reader->columns[needed_file_idx[needed_pos[col]]].type);
@@ -587,7 +533,12 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 			ClosePart(gs);
 		}
 
-		// Commit: move staged parts into place, write sidecars, update markers
+		// Commit: move the staged parts into place. There are no sidecars and
+		// no commit markers anymore — the part files themselves are the
+		// commit record (each target dir + part name is unique per
+		// transaction). Readers only see the parts after the moves complete;
+		// a failed transaction leaves only _tmp/ leftovers, which are
+		// invisible ('.'/'_' dirs) and cleaned up by the next commit.
 		for (auto &gs : gstates) {
 			for (auto &part : gs.written) {
 				fs.CreateDirectoriesRecursive(part.target_dir);
@@ -598,78 +549,48 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 					                  part.target_dir);
 				}
 				fs.MoveFile(part.staged_path, target_path);
-			#if 0 // Disabled sidecar, markers, group manifests
-			// sidecar
-				string sidecar = "{\"table\":\"" + JsonEscape(bind.plan.table.name) + "\",\"group\":\"" +
-				                 JsonEscape(gs.group->manifest.group) + "\",\"part\":\"" + JsonEscape(part.part_name) +
-				                 "\",\"start_row\":" + to_string(part.start_row) + ",\"row_count\":" +
-				                 to_string(part.row_count) + ",\"row_group_size\":" + to_string(gs.rgs) +
-				                 ",\"columns\":" + JsonStringArray(part.columns) + "}";
-				WriteTextFile(fs, part.target_dir + "/" + part.part_name + ".aligned.json", sidecar);
-				gs.touched_dirs.push_back(part.target_dir);
 				gstate.parts_written++;
 			}
 		}
 
-		// Markers: one per touched partition dir (read-modify-write)
-		{
-			std::set<string> done_dirs;
-			for (auto &gs : gstates) {
-				for (auto &dir : gs.touched_dirs) {
-					if (!done_dirs.insert(dir).second) {
-						continue;
-					}
-					vector<string> parts;
-					idx_t old_txid = 0;
-					ReadMarker(fs, dir, old_txid, parts);
-					// add the parts written by this transaction
-					for (auto &gs2 : gstates) {
-						for (auto &part : gs2.written) {
-							if (part.target_dir == dir) {
-								parts.push_back(part.part_name);
-							}
-						}
-					}
-					string marker = "{\"txid\":" + to_string(txid) + ",\"parts\":" + JsonStringArray(parts) + "}";
-					// write via a temp name then move, so a concurrent reader
-					// never sees a half-written marker
-					string tmp_marker = dir + "/.aligned-commit.json.tmp";
-					WriteTextFile(fs, tmp_marker, marker);
-					fs.MoveFile(tmp_marker, dir + "/.aligned-commit.json");
-				}
-			}
-		}
-
-		// Bump row counts in _table.json and every _group.json
+		// Bump the row count and last_txid in _table.json. The group
+		// manifests (_group.json) are gone; row counts are derived from the
+		// Parquet footers anyway.
 		{
 			auto &plan = bind.plan;
+			string partitioning;
+			if (!plan.table.partitioning.empty()) {
+				partitioning = ",\"partitioning\":{";
+				bool first_group = true;
+				for (auto &entry : plan.table.partitioning) {
+					if (!first_group) {
+						partitioning += ",";
+					}
+					first_group = false;
+					partitioning += "\"" + JsonEscape(entry.first) + "\":[";
+					for (idx_t i = 0; i < entry.second.size(); i++) {
+						if (i > 0) {
+							partitioning += ",";
+						}
+						partitioning += "{\"template\":\"" + JsonEscape(entry.second[i].template_str) +
+						                "\",\"source\":\"" + JsonEscape(entry.second[i].source) + "\"}";
+					}
+					partitioning += "]";
+				}
+				partitioning += "}";
+			}
 			string table_manifest =
 			    "{\"name\":\"" + JsonEscape(plan.table.name) + "\",\"version\":" + to_string(plan.table.version) +
 			    ",\"schema_version\":" + to_string(plan.table.schema_version) + ",\"key\":" +
 			    JsonStringArray(plan.table.key) + ",\"canonical_order\":\"" + JsonEscape(plan.table.canonical_order) +
-			    "\",\"aligned\":" + (plan.table.aligned ? "true" : "false") + ",\"row_count\":" + to_string(new_total) +
-			    ",\"row_group_size\":" + to_string(plan.table.row_group_size) + ",\"groups\":" +
-			    JsonStringArray(plan.table.groups) + "}";
-			WriteTextFile(fs, plan.table_path + "/_table.json", table_manifest);
-			for (auto &group : plan.groups) {
-				string group_manifest = "{\"group\":\"" + JsonEscape(group.manifest.group) + "\",\"row_count\":" +
-				                        to_string(new_total) + ",\"row_group_size\":" +
-				                        to_string(group.manifest.row_group_size);
-				if (!group.manifest.partitioning.empty()) {
-					group_manifest += ",\"partitioning\":[";
-					for (idx_t i = 0; i < group.manifest.partitioning.size(); i++) {
-						if (i > 0) {
-							group_manifest += ",";
-						}
-						group_manifest += "{\"template\":\"" +
-						                  JsonEscape(group.manifest.partitioning[i].template_str) + "\",\"source\":\"" +
-						                  JsonEscape(group.manifest.partitioning[i].source) + "\"}";
-					}
-					group_manifest += "]";
-				}
-				group_manifest += "}";
-				WriteTextFile(fs, group.group_path + "/_group.json", group_manifest);
+			    "\",\"row_count\":" + to_string(new_total) + ",\"row_group_size\":" +
+			    to_string(plan.table.row_group_size);
+			if (plan.table.part_rows > 0) {
+				table_manifest += ",\"part_rows\":" + to_string(plan.table.part_rows);
 			}
+			table_manifest += ",\"last_txid\":" + to_string(txid) + ",\"groups\":" + JsonStringArray(plan.table.groups) +
+			                  partitioning + "}";
+			WriteTextFile(fs, plan.table_path + "/_table.json", table_manifest);
 		}
 
 		// Cleanup the staging tree (the transaction dir is removed recursively;

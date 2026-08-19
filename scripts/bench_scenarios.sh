@@ -41,7 +41,7 @@ mkdir -p "$BENCH_OUT"
 ENG6="D-WIDE,D-JOIN,A-ALIGNED,A-NORMAL,P-CONCAT,P-JOIN"
 ENG4="D-WIDE,D-JOIN,A-ALIGNED,A-NORMAL"
 
-avail(){ free -h | awk 'NR==2{print $7}'; }
+avail(){ echo "N/A"; }
 
 # gen_data <rows> <width> <sparsity> — regenerate bench_mb (and drop normal sibling).
 # gen_multi_bench.sh writes a .gen-meta marker (rows/width/sparsity). With

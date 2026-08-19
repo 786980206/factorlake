@@ -14,9 +14,8 @@
 #include "parquet_field_id.hpp"
 #include "parquet_shredding.hpp"
 #include "zstd_file_system.hpp"
-#include "yyjson.hpp"
 
-#include <set>
+#include <map>
 
 namespace duckdb {
 
@@ -39,27 +38,8 @@ struct AlignedCompactGlobalState : public GlobalTableFunctionState {
 };
 
 //===----------------------------------------------------------------------===//
-// Small JSON / file helpers (see aligned_writer.cpp for the same helpers)
+// Small helpers (see aligned_writer.cpp for the same helpers)
 //===----------------------------------------------------------------------===//
-
-static string ReadTextFile(FileSystem &fs, const string &path) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	idx_t size = handle->GetFileSize();
-	string result;
-	result.resize(size);
-	if (size > 0) {
-		handle->Read(&result[0], size, 0);
-	}
-	return result;
-}
-
-static void WriteTextFile(FileSystem &fs, const string &path, const string &content) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
-	handle->Truncate(0);
-	handle->Write(const_cast<char *>(content.c_str()), content.size());
-	handle->Sync();
-	handle->Close();
-}
 
 static string JsonEscape(const string &s) {
 	string out;
@@ -88,32 +68,56 @@ static string JsonStringArray(const vector<string> &items) {
 	return out;
 }
 
-static void ReadMarker(FileSystem &fs, const string &dir, idx_t &txid, vector<string> &parts) {
-	string marker_path = dir + "/.aligned-commit.json";
-	if (!fs.FileExists(marker_path)) {
-		return;
-	}
-	string content = ReadTextFile(fs, marker_path);
-	auto doc = duckdb_yyjson::yyjson_read(content.c_str(), content.size(), 0);
-	if (!doc) {
-		throw IOException("Aligned table: invalid commit marker JSON in '%s'", marker_path);
-	}
-	auto root = duckdb_yyjson::yyjson_doc_get_root(doc);
-	auto txid_val = duckdb_yyjson::yyjson_obj_get(root, "txid");
-	if (txid_val && duckdb_yyjson::yyjson_is_uint(txid_val)) {
-		txid = duckdb_yyjson::yyjson_get_uint(txid_val);
-	}
-	auto parts_val = duckdb_yyjson::yyjson_obj_get(root, "parts");
-	if (parts_val && duckdb_yyjson::yyjson_is_arr(parts_val)) {
-		auto size = duckdb_yyjson::yyjson_arr_size(parts_val);
-		for (size_t i = 0; i < size; i++) {
-			auto item = duckdb_yyjson::yyjson_arr_get(parts_val, i);
-			if (duckdb_yyjson::yyjson_is_str(item)) {
-				parts.emplace_back(duckdb_yyjson::yyjson_get_str(item), duckdb_yyjson::yyjson_get_len(item));
+static void WriteTextFile(FileSystem &fs, const string &path, const string &content) {
+	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
+	// FILE_FLAGS_FILE_CREATE does not truncate an existing file: the old tail
+	// would remain past the new content (invalid JSON on rewrite).
+	handle->Truncate(0);
+	handle->Write(const_cast<char *>(content.c_str()), content.size());
+	handle->Sync();
+	handle->Close();
+}
+
+//! Bumps last_txid in _table.json (row counts and everything else unchanged).
+static void BumpLastTxid(FileSystem &fs, const TablePlan &plan, idx_t txid) {
+	auto &table = plan.table;
+	string partitioning;
+	if (!table.partitioning.empty()) {
+		partitioning = ",\"partitioning\":{";
+		bool first_group = true;
+		for (auto &entry : table.partitioning) {
+			if (!first_group) {
+				partitioning += ",";
 			}
+			first_group = false;
+			partitioning += "\"" + JsonEscape(entry.first) + "\":[";
+			for (idx_t i = 0; i < entry.second.size(); i++) {
+				if (i > 0) {
+					partitioning += ",";
+				}
+				partitioning += "{\"template\":\"" + JsonEscape(entry.second[i].template_str) + "\",\"source\":\"" +
+				                JsonEscape(entry.second[i].source) + "\"}";
+			}
+			partitioning += "]";
 		}
+		partitioning += "}";
 	}
-	duckdb_yyjson::yyjson_doc_free(doc);
+	string manifest = "{\"name\":\"" + JsonEscape(table.name) + "\",\"version\":" + to_string(table.version) +
+	                  ",\"schema_version\":" + to_string(table.schema_version) + ",\"key\":" + JsonStringArray(table.key) +
+	                  ",\"canonical_order\":\"" + JsonEscape(table.canonical_order) + "\",\"row_count\":" +
+	                  to_string(table.row_count) + ",\"row_group_size\":" + to_string(table.row_group_size);
+	if (table.part_rows > 0) {
+		manifest += ",\"part_rows\":" + to_string(table.part_rows);
+	}
+	manifest += ",\"last_txid\":" + to_string(txid) + ",\"groups\":" + JsonStringArray(table.groups) + partitioning + "}";
+	WriteTextFile(fs, plan.table_path + "/_table.json", manifest);
+}
+
+//! Next transaction id = last_txid + 1 (there are no commit markers anymore;
+//! _table.json's last_txid is the only transaction record, bumped on every
+//! successful commit).
+static idx_t NextTransactionId(const TablePlan &plan) {
+	return plan.table.last_txid + 1;
 }
 
 static idx_t NextPartIndex(FileSystem &fs, const string &dir) {
@@ -206,14 +210,8 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 		by_dir[dir].push_back(&part);
 	}
 
-	// txid = max existing + 1
-	idx_t txid = 1;
-	for (auto &kv : by_dir) {
-		idx_t marker_txid = 0;
-		vector<string> marker_parts;
-		ReadMarker(fs, kv.first, marker_txid, marker_parts);
-		txid = MaxValue<idx_t>(txid, marker_txid + 1);
-	}
+	// txid = last committed txid + 1 (markers are gone)
+	idx_t txid = NextTransactionId(bind.plan);
 	string tmp_root = bind.plan.table_path + "/_tmp/transaction-" + to_string(txid);
 
 	try {
@@ -273,8 +271,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			}
 
 			// Staged new part
-			idx_t rgs = group.manifest.row_group_size > 0 ? group.manifest.row_group_size
-			                                              : bind.plan.table.row_group_size;
+			idx_t rgs = bind.plan.table.row_group_size > 0 ? bind.plan.table.row_group_size : 131072;
 			string part_name = StringUtil::Format("part-%06llu", (unsigned long long)NextPartIndex(fs, dir));
 			string staged_dir = tmp_root + "/" + group.manifest.group;
 			fs.CreateDirectoriesRecursive(staged_dir);
@@ -294,8 +291,8 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			for (auto &part : parts) {
 				auto part_reader =
 				    make_uniq<ParquetReader>(context, OpenFileInfo(part->path), ParquetOptions(context));
-				// fresh reader: column_ids is empty — read ALL columns in the
-				// sidecar order
+				// fresh reader: column_ids is empty — read ALL columns in
+				// file order (the merged part keeps parts[0]'s column order)
 				for (idx_t i = 0; i < part->columns.size(); i++) {
 					part_reader->column_ids.push_back(MultiFileLocalColumnId(i));
 				}
@@ -329,43 +326,33 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			writer->Flush(*buffer, transform);
 			writer->Finalize();
 
-			// Sidecar for the merged part
-			string sidecar = "{\"table\":\"" + JsonEscape(bind.plan.table.name) + "\",\"group\":\"" +
-			                 JsonEscape(group.manifest.group) + "\",\"part\":\"" + JsonEscape(part_name) +
-			                 "\",\"start_row\":" + to_string(start_row) + ",\"row_count\":" + to_string(row_count) +
-			                 ",\"row_group_size\":" + to_string(rgs) + ",\"columns\":" +
-			                 JsonStringArray(parts[0]->columns) + "}";
-			string staged_sidecar = staged_dir + "/" + part_name + ".aligned.json";
-			WriteTextFile(fs, staged_sidecar, sidecar);
-
-			// Commit: move the new part + sidecar into place, replace the
-			// marker, then delete the old parts
+			// Commit: move the new part into place, then delete the old
+			// parts. There are no sidecars and no commit markers — the part
+			// file move is the atomic switch (readers glob only visible
+			// part-*.parquet files).
 			string target_path = dir + "/" + part_name + ".parquet";
 			if (fs.FileExists(target_path)) {
 				throw IOException("Aligned table '%s' group '%s': part '%s' already exists in '%s'",
 				                  bind.plan.table.name, group.manifest.group, part_name, dir);
 			}
 			fs.MoveFile(staged_path, target_path);
-			fs.MoveFile(staged_sidecar, dir + "/" + part_name + ".aligned.json");
 
-			string marker = "{\"txid\":" + to_string(txid) + ",\"parts\":" + JsonStringArray({part_name}) + "}";
-			string tmp_marker = dir + "/.aligned-commit.json.tmp";
-			WriteTextFile(fs, tmp_marker, marker);
-			fs.MoveFile(tmp_marker, dir + "/.aligned-commit.json");
-
-			// Delete the old parts (after the marker switch: they are already
-			// invisible; failure here only leaves orphaned files)
+			// Delete the old parts (after the new part is in place: they are
+			// already invisible to readers; failure here only leaves
+			// orphaned files)
 			for (auto &part : parts) {
 				fs.RemoveFile(part->path);
-				string old_sidecar = part->path.substr(0, part->path.size() - 8) + ".aligned.json";
-				if (fs.FileExists(old_sidecar)) {
-					fs.RemoveFile(old_sidecar);
-				}
 			}
 
 			dirs_compacted++;
 			parts_after -= parts.size();
 			parts_after += 1;
+		}
+
+		// Bump last_txid in _table.json (row counts unchanged — compaction
+		// preserves the row space)
+		if (dirs_compacted > 0) {
+			BumpLastTxid(fs, bind.plan, txid);
 		}
 
 		// Cleanup the staging tree (best-effort for the empty parent)

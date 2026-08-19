@@ -1,18 +1,24 @@
 # gen_testdata.ps1
-# Generates an AlignedTable test dataset under testdata/ (contract-compliant).
+# Generates an AlignedTable test dataset under testdata/ (new contract, no sidecars).
 #
 # Layout exercised by this script:
 #   cnstk_ixday/
-#     _table.json
-#     index/  date=2026-08-17/  (2 parts, RGS 2048)   date=2026-08-18/  (2 parts, RGS 2048)
-#     factor/alpha101/  year=2026/month=08/day=17/  (1 part, RGS 1000 — irregular RG boundaries)
-#                       year=2026/month=08/day=18/  (1 part, RGS 1000, +alpha099: schema evolution)
-#     fieldset/ma/      year=2026/month=08/         (2 parts from 2 transactions — coarse partitioning,
-#                                                    one commit marker listing both, contract v1.1)
+#     _table.json                              (includes optional part_rows override)
+#     index/        date=2026-08-17/  (2 parts, RGS 2048)
+#                   date=2026-08-18/  (2 parts, RGS 2048)
+#     factor/alpha101/ year=2026/month=08/date=17/  (1 part, RGS 1000)
+#                      year=2026/month=08/date=18/  (1 part, RGS 1000, +alpha099 schema evolution)
+#     fieldset/ma/  year=2026/month=08/           (2 parts from 2 transactions — coarse partitioning)
 #
 # Global row space: [0,3000) = 2026-08-17, [3000,6000) = 2026-08-18.
 # Every group carries a `rowid` BIGINT column (test-only oracle) equal to the
 # global row number, so alignment can be verified by cross-group comparison.
+#
+# New contract (alpha branch, 2026-08):
+#   * Metadata is read from _table.json + per-directory layout + Parquet footer.
+#     No *.aligned.json sidecars. No .aligned-commit.json markers.
+#   * Partition names must be one of: year=, month=, date= (no day=).
+#   * PART_ROWS defaults to 4_194_304; optional override in _table.json's part_rows.
 
 $ErrorActionPreference = 'Stop'
 
@@ -27,7 +33,6 @@ New-Item -ItemType Directory -Force -Path $tableDir | Out-Null
 
 function Write-JsonFile([string]$path, $obj) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
-    # ASCII encoding => no BOM, valid UTF-8 JSON (all test content is ASCII)
     ($obj | ConvertTo-Json -Depth 8) | Set-Content -Path $path -Encoding Ascii
 }
 
@@ -39,6 +44,10 @@ function Run-DuckDB([string]$sql) {
 function Part-Name([int]$i) { 'part-{0:D6}' -f $i }
 
 # ---- _table.json ------------------------------------------------------------
+# The only manifest. Group metadata (row counts, partitioning) is derived from
+# the directory layout + Parquet footers; no _group.json files exist. The
+# explicit partitioning map is omitted on purpose so the reader's directory
+# derivation path is exercised.
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
     name            = $table
     version         = 1
@@ -47,42 +56,14 @@ Write-JsonFile (Join-Path $tableDir '_table.json') @{
     canonical_order = 'fixed'
     row_count       = 6000
     row_group_size  = 131072
+    part_rows       = 4194304
     groups          = @('index', 'factor/alpha101', 'fieldset/ma')
-}
-
-# ---- group manifests --------------------------------------------------------
-Write-JsonFile (Join-Path $tableDir 'index\_group.json') @{
-    group          = 'index'
-    row_count      = 6000
-    row_group_size = 2048
-    partitioning   = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })
-}
-
-Write-JsonFile (Join-Path $tableDir 'factor\alpha101\_group.json') @{
-    group          = 'factor/alpha101'
-    row_count      = 6000
-    row_group_size = 1000
-    partitioning   = @(
-        @{ template = 'year=%Y'; source = 'date' },
-        @{ template = 'month=%m'; source = 'date' },
-        @{ template = 'day=%d'; source = 'date' }
-    )
-}
-
-Write-JsonFile (Join-Path $tableDir 'fieldset\ma\_group.json') @{
-    group          = 'fieldset/ma'
-    row_count      = 6000
-    row_group_size = 2048
-    partitioning   = @(
-        @{ template = 'year=%Y'; source = 'date' },
-        @{ template = 'month=%m'; source = 'date' }
-    )
 }
 
 # ---- logical partitions -----------------------------------------------------
 $Partitions = @(
-    @{ date = '2026-08-17'; start = 0;    rows = 3000; txid = 1 },
-    @{ date = '2026-08-18'; start = 3000; rows = 3000; txid = 2 }
+    @{ date = '2026-08-17'; start = 0;    rows = 3000 },
+    @{ date = '2026-08-18'; start = 3000; rows = 3000 }
 )
 
 foreach ($p in $Partitions) {
@@ -90,9 +71,8 @@ foreach ($p in $Partitions) {
     $start = [int]$p.start
     $rows = [int]$p.rows
     $end = $start + $rows
-    $txid = [int]$p.txid
 
-    # ---- index group: day-level partition, 2 parts per day (RGS 2048) -------
+    # ---- index group: date-level partition, 2 parts per day (RGS 2048) -------
     $indexDir = Join-Path $tableDir "index\date=$date"
     New-Item -ItemType Directory -Force -Path $indexDir | Out-Null
     $partStarts = @(0, 2048)
@@ -112,23 +92,10 @@ foreach ($p in $Partitions) {
   FROM r
 ) TO '$($indexDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, COMPRESSION ZSTD);"
         Run-DuckDB $sql
-        Write-JsonFile (Join-Path $indexDir "$partName.aligned.json") @{
-            table          = $table
-            group          = 'index'
-            part           = $partName
-            start_row      = $gStart
-            row_count      = $pc
-            row_group_size = 2048
-            columns        = @('date', 'symbol', 'close', 'volume', 'rowid')
-        }
-    }
-    Write-JsonFile (Join-Path $indexDir '.aligned-commit.json') @{
-        txid  = $txid
-        parts = @((Part-Name 0), (Part-Name 1))
     }
 
-    # ---- alpha101 group: year/month/day partition, 1 part (RGS 1000) --------
-    $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=08\day=$date"
+    # ---- alpha101 group: year/month/date partition, 1 part (RGS 1000) --------
+    $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=08\date=$date"
     New-Item -ItemType Directory -Force -Path $alphaDir | Out-Null
     $alphaCols = 1..10 | ForEach-Object {
         "CASE WHEN r % 5 = 0 THEN CAST((r + $_ + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha$('{0:D3}' -f $_)"
@@ -138,8 +105,6 @@ foreach ($p in $Partitions) {
         # schema evolution: this partition introduces a new column
         $extra = ", CASE WHEN r % 3 = 0 THEN CAST((r + 1) * 0.001 AS DOUBLE) ELSE NULL END AS alpha099"
     }
-    # close duplicates the index column (contract §2.2e.1: ignored by the reader);
-    # vwap duplicates across non-index groups (contract §2.2e.2: qualified names only)
     $alphaColList = @('CAST(r AS BIGINT) AS rowid_alpha') + $alphaCols +
         @('CAST((r + 1) * 0.25 AS DOUBLE) AS close', 'CAST((r + 1) * 0.125 AS DOUBLE) AS vwap')
     $sql = "COPY (
@@ -148,27 +113,11 @@ foreach ($p in $Partitions) {
   FROM r
 ) TO '$($alphaDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 1000, COMPRESSION ZSTD);"
     Run-DuckDB $sql
-    $alphaColumns = @('rowid_alpha') + (1..10 | ForEach-Object { "alpha$('{0:D3}' -f $_)" }) +
-        @('close', 'vwap')
-    if ($extra) { $alphaColumns += 'alpha099' }
-    Write-JsonFile (Join-Path $alphaDir 'part-000000.aligned.json') @{
-        table          = $table
-        group          = 'factor/alpha101'
-        part           = 'part-000000'
-        start_row      = $start
-        row_count      = $rows
-        row_group_size = 1000
-        columns        = $alphaColumns
-    }
-    Write-JsonFile (Join-Path $alphaDir '.aligned-commit.json') @{
-        txid  = $txid
-        parts = @('part-000000')
-    }
 
     # ---- ma group: COARSE year/month partition (both days share one dir) ----
     $maDir = Join-Path $tableDir 'fieldset\ma\year=2026\month=08'
     New-Item -ItemType Directory -Force -Path $maDir | Out-Null
-    $partIdx = $p.txid - 1
+    $partIdx = $Partitions.IndexOf($p)
     $partName = Part-Name $partIdx
     $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($start, $end))
@@ -181,22 +130,6 @@ foreach ($p in $Partitions) {
   FROM r
 ) TO '$($maDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, COMPRESSION ZSTD);"
     Run-DuckDB $sql
-    Write-JsonFile (Join-Path $maDir "$partName.aligned.json") @{
-        table          = $table
-        group          = 'fieldset/ma'
-        part           = $partName
-        start_row      = $start
-        row_count      = $rows
-        row_group_size = 2048
-        columns        = @('rowid_ma', 'ma5', 'ma10', 'ma20', 'close', 'vwap')
-    }
-    # second transaction appends its part to the shared marker (contract v1.1)
-    $markerParts = @()
-    for ($k = 0; $k -le $partIdx; $k++) { $markerParts += (Part-Name $k) }
-    Write-JsonFile (Join-Path $maDir '.aligned-commit.json') @{
-        txid  = $txid
-        parts = $markerParts
-    }
 }
 
 # ---- ignored directory (contract §2.1d): a _tmp directory with stray parts --

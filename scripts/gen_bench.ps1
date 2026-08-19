@@ -1,14 +1,15 @@
 # gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
 # and Phase 6 (benchmark). Contract-compliant: index mandatory, two-level
-# non-index groups, sidecars + commit markers, _tmp ignored.
+# non-index groups, no sidecars, no commit markers, no _group.json, _tmp
+# ignored. Partition names: year= / month= / date= only.
 #
 # Layout:
 #   bench_ixday/
 #     _table.json                     row_count = $TotalRows
 #     index/   date=2026-09-01..04/   4 parts per day (PART_ROWS each), RGS 32768
-#     factor/alpha101/ year=2026/month=09/day=01..04/   1 part per day, RGS 65536, 100 sparse cols
-#     fieldset/ma/     year=2026/month=09/              4 parts (one per day), RGS 65536, 20 cols
+#     factor/alpha101/ year=2026/month=2026-09/date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
+#     fieldset/ma/     year=2026/month=2026-09/                      4 parts (one per day), RGS 65536, 20 cols
 #
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\gen_bench.ps1 [-TotalRows 1000000]
 
@@ -55,31 +56,6 @@ Write-JsonFile (Join-Path $tableDir '_table.json') @{
     row_group_size  = 131072
     groups          = @('index', 'factor/alpha101', 'fieldset/ma')
 }
-Write-JsonFile (Join-Path $tableDir 'index\_group.json') @{
-    group          = 'index'
-    row_count      = $TotalRows
-    row_group_size = $RGS_INDEX
-    partitioning   = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })
-}
-Write-JsonFile (Join-Path $tableDir 'factor\alpha101\_group.json') @{
-    group          = 'factor/alpha101'
-    row_count      = $TotalRows
-    row_group_size = $RGS_BIG
-    partitioning   = @(
-        @{ template = 'year=%Y'; source = 'date' },
-        @{ template = 'month=%m'; source = 'date' },
-        @{ template = 'day=%d'; source = 'date' }
-    )
-}
-Write-JsonFile (Join-Path $tableDir 'fieldset\ma\_group.json') @{
-    group          = 'fieldset/ma'
-    row_count      = $TotalRows
-    row_group_size = $RGS_BIG
-    partitioning   = @(
-        @{ template = 'year=%Y'; source = 'date' },
-        @{ template = 'month=%m'; source = 'date' }
-    )
-}
 
 $alphaCols = 0..99 | ForEach-Object {
     "CASE WHEN r % 7 = 0 THEN CAST((r + $_ + 1) * 0.001 AS DOUBLE) ELSE NULL END AS alpha$('{0:D3}' -f $_)"
@@ -100,12 +76,11 @@ foreach ($d in $Days) {
     # ---- index: 4 parts per day (PART_ROWS each), RGS 32768 -----------------
     $indexDir = Join-Path $tableDir "index\date=$date"
     New-Item -ItemType Directory -Force -Path $indexDir | Out-Null
-    $markerParts = @()
     $ps = 0
     while ($ps -lt $rows) {
         $pc = [Math]::Min($PART_ROWS, $rows - $ps)
         $gStart = $start + $ps
-        $partName = Part-Name ($markerParts.Count)
+        $partName = Part-Name ($ps / $PART_ROWS)
         $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($gStart, $($gStart + $pc)))
   SELECT DATE '$date' AS date, printf('%06d', r + 1) AS symbol,
@@ -115,22 +90,11 @@ foreach ($d in $Days) {
   FROM r
 ) TO '$($indexDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
         Run-DuckDB $sql
-        Write-JsonFile (Join-Path $indexDir "$partName.aligned.json") @{
-            table          = $table
-            group          = 'index'
-            part           = $partName
-            start_row      = $gStart
-            row_count      = $pc
-            row_group_size = $RGS_INDEX
-            columns        = @('date', 'symbol', 'close', 'volume', 'rowid')
-        }
-        $markerParts += $partName
         $ps += $pc
     }
-    Write-JsonFile (Join-Path $indexDir '.aligned-commit.json') @{ txid = $txid; parts = $markerParts }
 
     # ---- alpha101: 1 part per day (RGS 65536), 100 sparse cols --------------
-    $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=09\day=$date"
+    $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=2026-09\date=$date"
     New-Item -ItemType Directory -Force -Path $alphaDir | Out-Null
     $colList = @('CAST(r AS BIGINT) AS rowid_alpha') + $alphaCols
     $sql = "COPY (
@@ -139,20 +103,9 @@ foreach ($d in $Days) {
   FROM r
 ) TO '$($alphaDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
     Run-DuckDB $sql
-    $alphaColumns = @('rowid_alpha') + (0..99 | ForEach-Object { "alpha$('{0:D3}' -f $_)" })
-    Write-JsonFile (Join-Path $alphaDir 'part-000000.aligned.json') @{
-        table          = $table
-        group          = 'factor/alpha101'
-        part           = 'part-000000'
-        start_row      = $start
-        row_count      = $rows
-        row_group_size = $RGS_BIG
-        columns        = $alphaColumns
-    }
-    Write-JsonFile (Join-Path $alphaDir '.aligned-commit.json') @{ txid = $txid; parts = @('part-000000') }
 
     # ---- ma: coarse year/month partition, 1 part per day --------------------
-    $maDir = Join-Path $tableDir 'fieldset\ma\year=2026\month=09'
+    $maDir = Join-Path $tableDir 'fieldset\ma\year=2026\month=2026-09'
     New-Item -ItemType Directory -Force -Path $maDir | Out-Null
     $partName = Part-Name ($txid - 1)
     $colList = @('CAST(r AS BIGINT) AS rowid_ma') + $maCols
@@ -162,18 +115,6 @@ foreach ($d in $Days) {
   FROM r
 ) TO '$($maDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
     Run-DuckDB $sql
-    Write-JsonFile (Join-Path $maDir "$partName.aligned.json") @{
-        table          = $table
-        group          = 'fieldset/ma'
-        part           = $partName
-        start_row      = $start
-        row_count      = $rows
-        row_group_size = $RGS_BIG
-        columns        = @('rowid_ma') + (0..19 | ForEach-Object { "ma$('{0:D3}' -f $_)" })
-    }
-    $markerParts = @()
-    for ($k = 0; $k -le ($txid - 1); $k++) { $markerParts += (Part-Name $k) }
-    Write-JsonFile (Join-Path $maDir '.aligned-commit.json') @{ txid = $txid; parts = $markerParts }
 
     $dayStart += $rows
 }

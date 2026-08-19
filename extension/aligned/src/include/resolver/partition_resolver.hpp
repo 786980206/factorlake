@@ -12,6 +12,16 @@ namespace duckdb {
 //! unsupported specifiers or has no specifiers.
 bool EvaluatePartitionTemplate(const string &template_str, date_t value, string &result);
 
+//! Derives the partition schema of a group from its part file paths. Only the
+//! fixed segment kinds are recognized: year=YYYY, month=YYYY-MM and
+//! date=YYYY-MM-DD (segment name -> template). Other name=value segments are
+//! ignored. The partition source column is always the logical "date" column.
+//! Throws IOException when parts of the same group disagree on a segment's
+//! format. Returns an empty list when no recognized segment exists (an
+//! unpartitioned group).
+vector<PartitionTemplate> DerivePartitioningFromPaths(const vector<string> &paths, const string &table_name,
+                                                      const string &group_name);
+
 //! Prunes a part list by a constant comparison filter on a partition source
 //! column (contract §4). The templates must be the prefix of the group's
 //! partitioning list that is sourced from the filtered column.
