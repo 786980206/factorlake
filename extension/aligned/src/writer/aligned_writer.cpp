@@ -598,7 +598,8 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 					                  part.target_dir);
 				}
 				fs.MoveFile(part.staged_path, target_path);
-				// sidecar
+			#if 0 // Disabled sidecar, markers, group manifests
+			// sidecar
 				string sidecar = "{\"table\":\"" + JsonEscape(bind.plan.table.name) + "\",\"group\":\"" +
 				                 JsonEscape(gs.group->manifest.group) + "\",\"part\":\"" + JsonEscape(part.part_name) +
 				                 "\",\"start_row\":" + to_string(part.start_row) + ",\"row_count\":" +

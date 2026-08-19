@@ -37,7 +37,8 @@ struct TableManifest {
 	bool aligned = true;
 	idx_t row_count = 0;
 	idx_t row_group_size = 131072;
-	vector<string> groups;
+	idx_t part_rows = 0; // optional override for part size (default 4194304)
+  vector<string> groups;
 };
 
 // <part>.aligned.json sidecar

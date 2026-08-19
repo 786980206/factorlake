@@ -1,7 +1,7 @@
 # FactorLake / AlignedTable project
 
-# Vendored DuckDB source (pinned v1.5.4; recreated per AGENTS.md §16)
-duckdb/
+# DuckDB is now a git submodule (pinned v1.5.4, commit 08e34c4), see .gitmodules.
+# NOTE: duckdb/build/ is the build output dir inside the submodule (ignored by its own .gitignore).
 
 # Build output
 build/

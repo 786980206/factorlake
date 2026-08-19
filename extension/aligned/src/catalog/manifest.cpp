@@ -130,6 +130,7 @@ TableManifest ReadTableManifest(FileSystem &fs, const string &manifest_path) {
 		}
 		GetUIntField(root, "row_count", manifest.row_count);
 		GetUIntField(root, "row_group_size", manifest.row_group_size);
+		GetUIntField(root, "part_rows", manifest.part_rows);
 		manifest.groups = GetStringArray(root, "groups", manifest_path, true);
 	});
 	if (manifest.key.empty()) {
@@ -305,37 +306,37 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		for (auto &file : files) {
 			auto &path = file.path;
 			if (HasIgnoredPathSegment(path)) {
-				// Contract §2.1d: ignore paths whose directory segments start with '.' or '_'
-				continue;
+				continue; // ignore hidden dirs
 			}
+			// Extract base name without extension
 			auto slash = path.find_last_of("/\\");
-			string dir = slash == string::npos ? "" : path.substr(0, slash);
-			auto committed = ReadCommitMarker(fs, dir, plan.table.name, group_name);
-			if (committed.empty()) {
-				// Partition dir without a commit marker is treated as nonexistent (contract §9)
-				continue;
-			}
-			auto base_slash = path.find_last_of("/\\");
-			string base_name = base_slash == string::npos ? path : path.substr(base_slash + 1);
+			string base_name = slash == string::npos ? path : path.substr(slash + 1);
 			if (StringUtil::EndsWith(base_name, ".parquet")) {
-				// marker "parts" lists part names without the .parquet suffix (matching sidecar "part")
 				base_name = base_name.substr(0, base_name.size() - 8);
 			}
-			if (committed.find(base_name) == committed.end()) {
-				// Part exists on disk but is not listed by the commit marker (contract §9)
-				continue;
+			// Validate part naming
+			if (base_name.rfind("part-", 0) != 0) {
+				continue; // not a valid part file
 			}
-			if (path.size() < 8) {
-				throw IOException("Aligned table '%s': unexpected file '%s' in group '%s'", plan.table.name, path,
-				                  group_name);
+			string num_str = base_name.substr(5);
+			idx_t part_id = 0;
+			try {
+				part_id = std::stoull(num_str);
+			} catch (...) {
+				continue; // malformed part number
 			}
-			string sidecar_path = path.substr(0, path.size() - 8) + ".aligned.json";
-			if (!fs.FileExists(sidecar_path)) {
-				throw IOException("Aligned table '%s' group '%s': missing sidecar '%s'", plan.table.name, group_name,
-				                  sidecar_path);
-			}
-			auto part = ReadPartSidecar(fs, sidecar_path);
+			// Open Parquet to read schema and row count
+			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
+			PartInfo part;
 			part.path = path;
+			part.part_name = base_name;
+			idx_t part_rows = plan.table.part_rows ? plan.table.part_rows : 4194304ull;
+			part.start_row = part_id * part_rows;
+			part.row_count = reader->NumRows();
+			part.row_group_size = plan.table.row_group_size;
+			for (auto &col : reader->columns) {
+				part.columns.push_back(col.name);
+			}
 			group.parts.push_back(std::move(part));
 		}
 
