@@ -27,66 +27,97 @@ Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 
 
 | engine | workload | threads | cold | warm |
 |--------|----------|---------|------|------|
-| aligned | p5 | 1 | 0.170 | 0.170 |
-| aligned | p5 | 4 | 0.120 | 0.120 |
+| aligned | p5 | 1 | 0.163 | 0.163 |
+| aligned | p5 | 4 | 0.119 | 0.119 |
 | aligned | p5 | 8 | 0.102 | 0.102 |
-| aligned | p25 | 1 | 0.514 | 0.514 |
-| aligned | p25 | 4 | 0.273 | 0.273 |
-| aligned | p25 | 8 | 0.217 | 0.217 |
-| aligned | p100 | 1 | 2.002 | 2.002 |
-| aligned | p100 | 4 | 0.957 | 0.957 |
-| aligned | p100 | 8 | 0.949 | 0.949 |
+| aligned | p25 | 1 | 0.508 | 0.508 |
+| aligned | p25 | 4 | 0.271 | 0.271 |
+| aligned | p25 | 8 | 0.205 | 0.205 |
+| aligned | p100 | 1 | 1.986 | 1.986 |
+| aligned | p100 | 4 | 0.951 | 0.951 |
+| aligned | p100 | 8 | 0.952 | 0.952 |
 | aligned | s25 | 1 | 0.155 | 0.155 |
 | aligned | s25 | 4 | 0.106 | 0.106 |
 | aligned | s25 | 8 | 0.100 | 0.100 |
-| aligned | s100 | 1 | 0.510 | 0.510 |
-| aligned | s100 | 4 | 0.278 | 0.278 |
-| aligned | s100 | 8 | 0.202 | 0.202 |
+| aligned | s100 | 1 | 0.511 | 0.511 |
+| aligned | s100 | 4 | 0.271 | 0.271 |
+| aligned | s100 | 8 | 0.203 | 0.203 |
 | wide | p5 | 1 | 0.095 | 0.095 |
 | wide | p5 | 4 | 0.065 | 0.065 |
-| wide | p5 | 8 | 0.059 | 0.059 |
-| wide | p25 | 1 | 0.277 | 0.277 |
+| wide | p5 | 8 | 0.062 | 0.062 |
+| wide | p25 | 1 | 0.276 | 0.276 |
 | wide | p25 | 4 | 0.121 | 0.121 |
 | wide | p25 | 8 | 0.099 | 0.099 |
-| wide | p100 | 1 | 1.003 | 1.003 |
-| wide | p100 | 4 | 0.365 | 0.365 |
-| wide | p100 | 8 | 0.306 | 0.306 |
-| wide | s25 | 1 | 0.123 | 0.123 |
-| wide | s25 | 4 | 0.084 | 0.084 |
-| wide | s25 | 8 | 0.087 | 0.087 |
+| wide | p100 | 1 | 1.009 | 1.009 |
+| wide | p100 | 4 | 0.360 | 0.360 |
+| wide | p100 | 8 | 0.316 | 0.316 |
+| wide | s25 | 1 | 0.121 | 0.121 |
+| wide | s25 | 4 | 0.085 | 0.085 |
+| wide | s25 | 8 | 0.085 | 0.085 |
 | wide | s100 | 1 | 0.276 | 0.276 |
-| wide | s100 | 4 | 0.122 | 0.122 |
-| wide | s100 | 8 | 0.098 | 0.098 |
-| join | p5 | 1 | 0.178 | 0.178 |
-| join | p5 | 4 | 0.106 | 0.106 |
-| join | p5 | 8 | 0.094 | 0.094 |
-| join | p25 | 1 | 0.359 | 0.359 |
-| join | p25 | 4 | 0.163 | 0.163 |
+| wide | s100 | 4 | 0.121 | 0.121 |
+| wide | s100 | 8 | 0.100 | 0.100 |
+| join | p5 | 1 | 0.175 | 0.175 |
+| join | p5 | 4 | 0.104 | 0.104 |
+| join | p5 | 8 | 0.095 | 0.095 |
+| join | p25 | 1 | 0.362 | 0.362 |
+| join | p25 | 4 | 0.164 | 0.164 |
 | join | p25 | 8 | 0.134 | 0.134 |
-| join | p100 | 1 | 1.669 | 1.669 |
-| join | p100 | 4 | 0.853 | 0.853 |
-| join | p100 | 8 | 0.787 | 0.787 |
-| join | s25 | 1 | 0.160 | 0.160 |
-| join | s25 | 4 | 0.107 | 0.107 |
-| join | s25 | 8 | 0.108 | 0.108 |
-| join | s100 | 1 | 0.367 | 0.367 |
-| join | s100 | 4 | 0.181 | 0.181 |
+| join | p100 | 1 | 1.677 | 1.677 |
+| join | p100 | 4 | 0.846 | 0.846 |
+| join | p100 | 8 | 0.777 | 0.777 |
+| join | s25 | 1 | 0.161 | 0.161 |
+| join | s25 | 4 | 0.108 | 0.108 |
+| join | s25 | 8 | 0.107 | 0.107 |
+| join | s100 | 1 | 0.364 | 0.364 |
+| join | s100 | 4 | 0.162 | 0.162 |
 | join | s100 | 8 | 0.136 | 0.136 |
-| polars | p5 | 1 | 0.206 | 0.032 |
-| polars | p5 | 4 | 0.021 | 0.014 |
+| polars | p5 | 1 | 0.040 | 0.031 |
+| polars | p5 | 4 | 0.018 | 0.014 |
 | polars | p5 | 8 | 0.015 | 0.011 |
-| polars | p25 | 1 | 0.163 | 0.122 |
-| polars | p25 | 4 | 0.056 | 0.042 |
-| polars | p25 | 8 | 0.043 | 0.034 |
-| polars | p100 | 1 | 0.700 | 0.511 |
-| polars | p100 | 4 | 0.230 | 0.160 |
-| polars | p100 | 8 | 0.149 | 0.123 |
-| polars | s25 | 1 | 0.197 | 0.123 |
-| polars | s25 | 4 | 0.056 | 0.043 |
-| polars | s25 | 8 | 0.043 | 0.033 |
-| polars | s100 | 1 | 0.163 | 0.122 |
-| polars | s100 | 4 | 0.065 | 0.043 |
-| polars | s100 | 8 | 0.042 | 0.032 |
+| polars | p25 | 1 | 0.163 | 0.121 |
+| polars | p25 | 4 | 0.055 | 0.039 |
+| polars | p25 | 8 | 0.041 | 0.035 |
+| polars | p100 | 1 | 0.689 | 0.509 |
+| polars | p100 | 4 | 0.222 | 0.157 |
+| polars | p100 | 8 | 0.147 | 0.135 |
+| polars | s25 | 1 | 0.168 | 0.123 |
+| polars | s25 | 4 | 0.056 | 0.041 |
+| polars | s25 | 8 | 0.040 | 0.037 |
+| polars | s100 | 1 | 0.163 | 0.121 |
+| polars | s100 | 4 | 0.055 | 0.042 |
+| polars | s100 | 8 | 0.042 | 0.034 |
+
+## v2 contract vs v1 (master) — aligned engine only
+
+Same machine, same bench_ixday 1M rows, same script. v1 = master branch (sidecars +
+commit markers + `_group.json` + `day=` dirs), v2 = alpha branch (footer-driven row
+ranges, `_table.json` partitioning, `date=` dirs). Baseline engines (wide/join/polars)
+were measured on the same run and are identical between the two branches (see below),
+so the comparison is valid.
+
+| workload | threads | v1 master (s) | v2 alpha (s) | delta |
+|----------|---------|---------------|--------------|-------|
+| p5  | 1 | 0.176 | 0.163 | -7% |
+| p5  | 4 | 0.130 | 0.119 | -8% |
+| p5  | 8 | 0.113 | 0.102 | -10% |
+| p25 | 1 | 0.528 | 0.508 | -4% |
+| p25 | 4 | 0.287 | 0.271 | -6% |
+| p25 | 8 | 0.215 | 0.205 | -5% |
+| p100 | 1 | 2.008 | 1.986 | -1% |
+| p100 | 4 | 1.005 | 0.951 | -5% |
+| p100 | 8 | 0.999 | 0.952 | -5% |
+| s25 | 1 | 0.165 | 0.155 | -6% |
+| s25 | 4 | 0.116 | 0.106 | -9% |
+| s25 | 8 | 0.108 | 0.100 | -7% |
+| s100 | 1 | 0.522 | 0.511 | -2% |
+| s100 | 4 | 0.285 | 0.271 | -5% |
+| s100 | 8 | 0.215 | 0.203 | -6% |
+
+v2 is 1-10% faster everywhere (plan build drops sidecar/marker reads; footer metadata
+is cached). No regression. Sanity check: wide p5 t1 = 0.097 (v1) vs 0.095 (v2),
+join p100 t1 = 1.679 vs 1.677, polars s100 t8 = 0.032 vs 0.034 — baseline engines are
+unchanged between the two runs.
 
 ## Observations
 

@@ -515,6 +515,22 @@ bash scripts/test_aligned.sh
     随列数(W2 1024)→1.4×收窄；并行小数据~1.6×。
   - **测试驱动又修 4 个 bug**：A-NORMAL 兄弟表重建、`.gen-meta` 规模校验、超宽 SQL
     stdin 绕 ARG_MAX、`$TMPDIR` 未设置秒崩（`${TMPDIR:-/tmp}`）。
+- [x] **master vs alpha（v1 vs v2 契约）同机基准对比（2026-08）**：
+  - 两分支分别编译、同一 `bench_aligned.ps1`、各自格式数据（v1：sidecar/marker/`day=`；
+    v2：footer/`_table.json`/`date=`）各跑一轮；**对照引擎（wide/join/polars）两轮数值几乎
+    完全一致** → 环境稳定、对比可信
+  - **结论：v2 全 workload 无回归且小幅更快（1%~10%）**：p5 t1 0.176→0.163、p100 t1
+    2.008→1.986、s100 t1 0.522→0.511、s100 t8 0.215→0.203；原因 = 计划构建免去
+    sidecar/marker 读取、footer 元数据被 metadata cache 吸收。对比表已写入
+    `docs/BENCHMARK.md`
+  - **关键教训：git checkout 切分支后 ninja 增量重编产物会损坏**（实测症状：扩展查询
+    崩溃，WER 偏移 0x3fa9=PE 头区域 = 跳转到坏地址；`SELECT 1` 正常；旧 exe 读同一数据
+    正常 → 排除数据/源码问题）。**每次切换分支后必须删扩展 obj 全量重编**：
+    `Remove-Item build3/extension/aligned/CMakeFiles/aligned_extension.dir -Recurse -Filter '*.obj'`
+    再 `ninja -C build3 duckdb_al3.exe`（12:50 增量链接连崩 3/3 → 全量重编后 3/3 稳定）
+  - 排查路径备忘：`Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000}` 看崩溃
+    偏移；dumpbin `/headers` 查段表判断偏移属哪个段；obj 内容特征字符串比对（master 版
+    "sidecar declares" vs alpha 版 "last_txid"）确认混编
 
 ### Phase 1 关键经验（必须记住，避免重踩）：`Copy(source, target, source_count, source_offset, target_offset)`
    中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。
