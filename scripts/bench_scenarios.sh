@@ -38,12 +38,12 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$BENCH_OUT"
 
-ENG6="D-WIDE,D-JOIN,A-ALIGNED,A-NORMAL,P-CONCAT,P-JOIN"
-ENG4="D-WIDE,D-JOIN,A-ALIGNED,A-NORMAL"
+ENG5="D-WIDE,D-JOIN,A-ALIGNED,P-CONCAT,P-JOIN"
+ENG3="D-WIDE,D-JOIN,A-ALIGNED"
 
 avail(){ echo "N/A"; }
 
-# gen_data <rows> <width> <sparsity> — regenerate bench_mb (and drop normal sibling).
+# gen_data <rows> <width> <sparsity> — regenerate bench_mb.
 # gen_multi_bench.sh writes a .gen-meta marker (rows/width/sparsity). With
 # --skip-regen we regenerate only if the marker matches ALL of rows/width/sparsity;
 # a stale or foreign dataset otherwise triggers a confusing self-check FAIL.
@@ -61,7 +61,7 @@ gen_data(){ local rows="$1" width="$2" sp="$3" meta
     fi
   fi
   if [ "$need_regen" = 1 ]; then
-    rm -rf "$OUT/bench_mb" "$OUT/bench_baseline_mb" "$OUT/bench_mb_normal"
+    rm -rf "$OUT/bench_mb" "$OUT/bench_baseline_mb"
     echo "  gen: rows=$rows width=$width sparse=$sp ..."
     bash "$ROOT/scripts/gen_multi_bench.sh" --rows "$rows" --width "$width" --sparsity "$sp" \
          --aligned true --out "$OUT" --tag mb >/dev/null
@@ -82,32 +82,32 @@ run_stage(){ local label="$1" rows="$2" width="$3" sp="$4" eng="$5" th="$6" qs="
   echo "  MEM after:  $(avail) available  -> saved $BENCH_OUT/$label.csv"
 }
 
-# g-thread: aligned both modes, thread scaling
+# g-thread: aligned thread scaling
 thread_stage(){ [ -n "$ONLY" ] && [ "$ONLY" != "g-thread" ] && return 0
   echo ""; echo "######### STAGE g-thread : aligned Q2/F1/S0 threads 1/2/4/8 #########"
   echo "  MEM before: $(avail)"
   gen_data 1000000 128 90
   QS_OVERRIDE="Q2" FS_OVERRIDE="F1" SS_OVERRIDE="S0" \
     bash "$ROOT/scripts/run_multi_bench.sh" --tier A --rows 1000000 --width 128 \
-      --sparsity 90 --threads 1,2,4,8 --engines "A-ALIGNED,A-NORMAL" --no-regen
+      --sparsity 90 --threads 1,2,4,8 --engines "A-ALIGNED" --no-regen
   cp "$ROOT/scripts/bench_multi_output.csv" "$BENCH_OUT/g-thread.csv"
   echo "  MEM after:  $(avail)  -> saved $BENCH_OUT/g-thread.csv"
 }
 
-run_stage g-250k 250000 128 90   "$ENG6" "1,4" "Q2,Q5" "F1,F2" "S0"
-# g-1m 6-engine uses Q2 (35 cols) but keeps to probe-only workload (t=1, F2 only)
+run_stage g-250k 250000 128 90   "$ENG5" "1,4" "Q2,Q5" "F1,F2" "S0"
+# g-1m 5-engine uses Q2 (35 cols) but keeps to probe-only workload (t=1, F2 only)
 # so the slow polars P-JOIN baseline stays tractable at 1M.
-run_stage g-1m   1000000 128 90  "$ENG6" "1" "Q2" "F2" "S0"
-run_stage g-1m-q 1000000 128 90  "$ENG4" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S0,S1"
+run_stage g-1m   1000000 128 90  "$ENG5" "1" "Q2" "F2" "S0"
+run_stage g-1m-q 1000000 128 90  "$ENG3" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S0,S1"
 # g-10m: next scale step — 10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
 # expensive D-JOIN / P-JOIN baselines stay tractable (they are ~40-150x slower).
-run_stage g-10m 10000000 128 90 "$ENG6" "1" "Q2" "F1,F2" "S0"
+run_stage g-10m 10000000 128 90 "$ENG5" "1" "Q2" "F1,F2" "S0"
 # g-w2: width direction — 500K x 1024 (W2) x 90%, heavy projections Q3/Q5, 4 DDB
 # engines, t=1. Verifies aligned's gap to D-WIDE narrows as columns/row-groups grow.
-run_stage g-w2 500000 1024 90 "$ENG4" "1" "Q3,Q5" "F1,F2" "S0"
+run_stage g-w2 500000 1024 90 "$ENG3" "1" "Q3,Q5" "F1,F2" "S0"
 # sparsity sweep (reuse 1M x 128)
 for sp in dense 90 99; do
-  run_stage "g-sparse-$sp" 1000000 128 "$sp" "$ENG4" "1,4" "Q2" "F2" "S1"
+  run_stage "g-sparse-$sp" 1000000 128 "$sp" "$ENG3" "1,4" "Q2" "F2" "S1"
 done
 thread_stage
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # gen_bench.sh — Linux equivalent of gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
-# and Phase 6 (benchmark). Contract-compliant: index mandatory, two-level
-# non-index groups, no sidecars, no commit markers, no _group.json, _tmp
-# ignored. Partition names: year= / month= / date= only.
+# and Phase 6 (benchmark). v3 contract: index mandatory, two-level
+# non-index groups, only the footer is authoritative (no sidecars, no commit
+# markers, no _group.json), _tmp ignored. Partition names: year= / month= / date=.
 #
 # Layout (mirrors gen_bench.ps1):
 #   bench_ixday/
-#     _table.json                     row_count = TOTAL
+#     _table.json                     (optional; here with part_rows + groups)
 #     index/   date=2026-09-01..04/   4 parts per day (PART_ROWS each), RGS 32768
 #     factor/alpha101/ year=2026/month=2026-09/date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
 #     fieldset/ma/     year=2026/month=2026-09/                      4 parts (one per day), RGS 65536, 20 cols
@@ -28,11 +28,11 @@ if ! [[ "$TOTAL" =~ ^[0-9]+$ ]] || [ $((TOTAL % 4)) -ne 0 ]; then
   exit 1
 fi
 
-PART_ROWS=65536
+PART_ROWS=$((TOTAL / ${#DAYS[@]}))
 RGS_INDEX=32768
 RGS_BIG=65536
 DAYS=(2026-09-01 2026-09-02 2026-09-03 2026-09-04)
-ROWS_PER_DAY=$((TOTAL / ${#DAYS[@]}))
+ROWS_PER_DAY=$PART_ROWS
 if [ $ROWS_PER_DAY -le 0 ]; then
   echo "TOTAL_ROWS too small (each day needs >0 rows)" >&2
   exit 1
@@ -48,7 +48,7 @@ run_duck() { "$DUCKDB" -light-mode -c "$1" >/dev/null; }
 rm -rf "$TABLE_DIR"
 mkdir -p "$TABLE_DIR"
 
-rj "$TABLE_DIR/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"schema_version\":1,\"key\":[\"date\",\"symbol\"],\"canonical_order\":\"fixed\",\"row_count\":$TOTAL,\"row_group_size\":131072,\"groups\":[\"index\",\"factor/alpha101\",\"fieldset/ma\"]}"
+rj "$TABLE_DIR/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"part_rows\":$PART_ROWS,\"groups\":[\"index\",\"factor/alpha101\",\"fieldset/ma\"]}"
 
 txid=0
 day_start=0
@@ -57,17 +57,10 @@ for date in "${DAYS[@]}"; do
   start=$day_start
   end=$((start + ROWS_PER_DAY))
 
-  # ---- index group: day-level partition, PART_ROWS rows per part ------------
+  # ---- index group: day-level partition, 1 part per day (fully aligned) ----
   index_dir="$TABLE_DIR/index/date=$date"
   mkdir -p "$index_dir"
-  ps=0
-  while [ $ps -lt $ROWS_PER_DAY ]; do
-    pc=$((PART_ROWS < ROWS_PER_DAY - ps ? PART_ROWS : ROWS_PER_DAY - ps))
-    g_start=$((start + ps))
-    pn=$(partn $((ps / PART_ROWS)))
-    run_duck "COPY (WITH r AS (SELECT range AS r FROM range($g_start,$((g_start + pc)))) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid FROM r) TO '$index_dir/$pn.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
-    ps=$((ps + pc))
-  done
+  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid FROM r) TO '$index_dir/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
 
   # ---- alpha101: 1 part per day, 100 sparse columns --------------------------
   alpha_dir="$TABLE_DIR/factor/alpha101/year=2026/month=2026-09/date=$date"

@@ -120,7 +120,7 @@ if printf '%s' "$out" | grep -qE '^100,0\.0$'; then echo 'PASS: e3 bare non-dupl
 # 搂2.1b: a table without the mandatory index group must fail
 BADIDX="$DATA_ROOT/badidx/_table.json"
 mkdir -p "$(dirname "$BADIDX")"
-printf '%s\n' '{"name":"badidx","version":1,"key":["date","symbol"],"canonical_order":"fixed","row_count":10,"groups":["factor/alpha101"]}' > "$BADIDX"
+printf '%s\n' '{"name":"badidx","version":1,"groups":["factor/alpha101"]}' > "$BADIDX"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('badidx');" "mandatory group 'index'"; then
   echo 'PASS: 搂2.1b missing index group rejected'
 else echo 'FAIL: 搂2.1b missing index'; failures=$((failures+1)); fi
@@ -128,11 +128,30 @@ rm -rf "$DATA_ROOT/badidx"
 # 搂2.1c: a one-level non-index group must fail
 BADLVL="$DATA_ROOT/badlvl/_table.json"
 mkdir -p "$(dirname "$BADLVL")"
-printf '%s\n' '{"name":"badlvl","version":1,"key":["date"],"canonical_order":"fixed","row_count":10,"groups":["single","index"]}' > "$BADLVL"
+printf '%s\n' '{"name":"badlvl","version":1,"groups":["single","index"]}' > "$BADLVL"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('badlvl');" "two-level path"; then
   echo 'PASS: 搂2.1c one-level group rejected'
 else echo 'FAIL: 搂2.1c one-level group'; failures=$((failures+1)); fi
 rm -rf "$DATA_ROOT/badlvl"
+
+# --- optional _table.json + full-alignment contract ---------------------------
+# No manifest: groups are discovered from the file layout and FULL alignment is
+# enforced (the only supported contract). The testdata layout (every group 2
+# parts x 3000 rows) satisfies it.
+V3TABLE="$DATA_ROOT/v3_notable"
+cp -r "$DATA_ROOT/cnstk_ixday" "$V3TABLE"
+rm -f "$V3TABLE/_table.json"
+out=$(run_duckdb "SET aligned_data_root='$DATA_ROOT'; WITH t AS (SELECT * FROM aligned_table('v3_notable')) SELECT count(*), sum(CASE WHEN rowid != rowid_alpha OR rowid != rowid_ma THEN 1 ELSE 0 END) FROM t;")
+if printf '%s' "$out" | grep -qE '^6000,0$'; then echo 'PASS: no-manifest rows (defaults + full alignment)'; else echo "FAIL: no-manifest rows ($out)"; failures=$((failures+1)); fi
+# A non-aligned table must fail fast (never silently degrade): drop one alpha
+# part so the group part counts diverge (index 2 vs alpha 1).
+V3BAD="$DATA_ROOT/v3_bad"
+cp -r "$DATA_ROOT/cnstk_ixday" "$V3BAD"
+rm -f "$V3BAD/factor/alpha101/year=2026/month=08/date=2026-08-17/part-000000.parquet"
+if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('v3_bad');" "full alignment required"; then
+  echo 'PASS: non-aligned table rejected fail-fast'
+else echo 'FAIL: non-aligned table'; failures=$((failures+1)); fi
+rm -rf "$V3TABLE" "$V3BAD"
 
 # --- error cases (expected failures 鈥?must not terminate the script) ---------
 if run_duckdb_expect_error "SELECT * FROM aligned_table('no_such_table');" "no data root configured"; then

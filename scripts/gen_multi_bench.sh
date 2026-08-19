@@ -58,7 +58,7 @@ if [ $TOTAL_COLS -ne "$WIDTH" ]; then echo "width split mismatch ($TOTAL_COLS !=
 
 TABLE="bench_${TAG}"
 tableDir="$OUT/$TABLE"
-PART_ROWS=65536
+PART_ROWS=$((ROWS / 4))
 RGS_INDEX=32768
 RGS_BIG=65536
 Days=(2026-09-01 2026-09-02 2026-09-03 2026-09-04)
@@ -74,7 +74,7 @@ echo "== gen $TABLE: rows=$ROWS width=$WIDTH (idx=$INDEX_COLS alpha=$ALPHA_COLS 
 
 # ---------------- aligned table manifest ----------------
 rm -rf "$tableDir"; mkdir -p "$tableDir"
-rj "$tableDir/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"schema_version\":1,\"key\":[\"date\",\"symbol\"],\"canonical_order\":\"fixed\",\"row_count\":$ROWS,\"row_group_size\":131072,\"groups\":[\"index\",\"factor/alpha\",\"fieldset/fs\"]}"
+rj "$tableDir/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"part_rows\":$PART_ROWS,\"groups\":[\"index\",\"factor/alpha\",\"fieldset/fs\"]}"
 
 # ---------------- column definition helpers ----------------
 # index_cols returns a SQL select list for the given global row range [g0,g1)
@@ -108,15 +108,10 @@ txid=0; dayStart=0
 for date in "${Days[@]}"; do
   txid=$((txid+1)); start=$dayStart; end=$((start+rowsPerDay))
 
-  # index group: day-level partition, parts of PART_ROWS, RGS 32768
+  # index group: day-level partition, 1 part per day (fully aligned with
+  # alpha/fieldset), RGS 32768
   indexDir="$tableDir/index/date=$date"; mkdir -p "$indexDir"
-  ps=0
-  while [ $ps -lt $rowsPerDay ]; do
-    pc=$((PART_ROWS < rowsPerDay-ps ? PART_ROWS : rowsPerDay-ps))
-    gStart=$((start+ps)); pn=$(partn $((ps / PART_ROWS)))
-    run_duck "COPY (WITH r AS (SELECT range AS r FROM range($gStart,$((gStart+pc)))) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid $([ -n "$IX_SEL" ] && echo ", $IX_SEL") FROM r) TO '$indexDir/$pn.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
-    ps=$((ps+pc))
-  done
+  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid $([ -n "$IX_SEL" ] && echo ", $IX_SEL") FROM r) TO '$indexDir/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
 
   # alpha group: year/month/date, 1 part, ALPHA_COLS sparse cols
   alphaDir="$tableDir/factor/alpha/year=2026/month=2026-09/date=$date"; mkdir -p "$alphaDir"

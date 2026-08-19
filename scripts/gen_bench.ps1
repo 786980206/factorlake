@@ -1,13 +1,14 @@
 # gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
-# and Phase 6 (benchmark). Contract-compliant: index mandatory, two-level
-# non-index groups, no sidecars, no commit markers, no _group.json, _tmp
-# ignored. Partition names: year= / month= / date= only.
+# and Phase 6 (benchmark). v3 contract: index mandatory, two-level
+# non-index groups, only the footer is authoritative (no sidecars, no commit
+# markers, no _group.json), _tmp ignored. Partition names: year= / month= / date=.
 #
-# Layout:
+# Layout (fully aligned — every group has the same part count / part size /
+# last-part size, the only supported contract):
 #   bench_ixday/
-#     _table.json                     row_count = $TotalRows
-#     index/   date=2026-09-01..04/   4 parts per day (PART_ROWS each), RGS 32768
+#     _table.json                     (optional; here with part_rows + groups)
+#     index/   date=2026-09-01..04/   1 part per day (rowsPerDay), RGS 32768
 #     factor/alpha101/ year=2026/month=2026-09/date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
 #     fieldset/ma/     year=2026/month=2026-09/                      4 parts (one per day), RGS 65536, 20 cols
 #
@@ -35,6 +36,7 @@ $Days = @(
     @{ date = '2026-09-04' }
 )
 $rowsPerDay = [long]($TotalRows / $Days.Count)
+$PART_ROWS = $rowsPerDay
 
 function Write-JsonFile([string]$path, $obj) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
@@ -49,11 +51,7 @@ function Run-DuckDB([string]$sql) {
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
     name            = $table
     version         = 1
-    schema_version  = 1
-    key             = @('date', 'symbol')
-    canonical_order = 'fixed'
-    row_count       = $TotalRows
-    row_group_size  = 131072
+    part_rows       = $PART_ROWS
     groups          = @('index', 'factor/alpha101', 'fieldset/ma')
 }
 
@@ -73,25 +71,18 @@ foreach ($d in $Days) {
     $rows = $rowsPerDay
     $end = $start + $rows
 
-    # ---- index: 4 parts per day (PART_ROWS each), RGS 32768 -----------------
+    # ---- index: 1 part per day (fully aligned with alpha/ma), RGS 32768 -----
     $indexDir = Join-Path $tableDir "index\date=$date"
     New-Item -ItemType Directory -Force -Path $indexDir | Out-Null
-    $ps = 0
-    while ($ps -lt $rows) {
-        $pc = [Math]::Min($PART_ROWS, $rows - $ps)
-        $gStart = $start + $ps
-        $partName = Part-Name ($ps / $PART_ROWS)
-        $sql = "COPY (
-  WITH r AS (SELECT range AS r FROM range($gStart, $($gStart + $pc)))
+    $sql = "COPY (
+  WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT DATE '$date' AS date, printf('%06d', r + 1) AS symbol,
          CAST((r + 1) * 0.5 AS DOUBLE) AS close,
          CAST((r + 1) * 100 AS BIGINT) AS volume,
          CAST(r AS BIGINT) AS rowid
   FROM r
-) TO '$($indexDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
-        Run-DuckDB $sql
-        $ps += $pc
-    }
+) TO '$($indexDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
+    Run-DuckDB $sql
 
     # ---- alpha101: 1 part per day (RGS 65536), 100 sparse cols --------------
     $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=2026-09\date=$date"

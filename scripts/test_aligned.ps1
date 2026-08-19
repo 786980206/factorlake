@@ -53,7 +53,7 @@ if ($out -match '^$' -or $out -match 'NULL|^\s*$') {
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT alpha099 FROM aligned_table('cnstk_ixday') WHERE rowid = 3000;"
 if ($out -match '3\.001') { Write-Host 'PASS: alpha099 value in new partition' } else { Write-Host "FAIL: alpha099 value ($out)"; $script:failures++ }
 
-# --- boundary rows (part boundary 2047/2048, RG boundary 4095/4096) ----------
+# --- boundary rows (RG boundary 2047/2048 within a part, day boundary 4095/4096) ---
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT symbol FROM aligned_table('cnstk_ixday') WHERE rowid IN (2047, 2048) ORDER BY rowid;"
 if ($out -match '002048' -and $out -match '002049') { Write-Host 'PASS: part boundary rows' } else { Write-Host "FAIL: part boundary ($out)"; $script:failures++ }
 
@@ -125,7 +125,7 @@ if ($out -match '(?m)^100,0\.0\r?$') { Write-Host 'PASS: e3 bare non-duplicated 
 # 搂2.1b: a table without the mandatory index group must fail
 $badIdx = Join-Path $dataRoot 'badidx\_table.json'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badIdx) | Out-Null
-'{"name":"badidx","version":1,"key":["date","symbol"],"canonical_order":"fixed","row_count":10,"groups":["factor/alpha101"]}' | Set-Content -Path $badIdx -Encoding Ascii
+'{"name":"badidx","version":1,"groups":["factor/alpha101"]}' | Set-Content -Path $badIdx -Encoding Ascii
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badidx');" 2>&1 | Out-String
@@ -136,7 +136,7 @@ Remove-Item (Join-Path $dataRoot 'badidx') -Recurse -Force
 # list so the check fires before any group dir is accessed)
 $badLvl = Join-Path $dataRoot 'badlvl\_table.json'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badLvl) | Out-Null
-'{"name":"badlvl","version":1,"key":["date"],"canonical_order":"fixed","row_count":10,"groups":["single","index"]}' | Set-Content -Path $badLvl -Encoding Ascii
+'{"name":"badlvl","version":1,"groups":["single","index"]}' | Set-Content -Path $badLvl -Encoding Ascii
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badlvl');" 2>&1 | Out-String
@@ -144,30 +144,29 @@ $ErrorActionPreference = $prevEAP
 if ($LASTEXITCODE -ne 0 -and $out -match "two-level path") { Write-Host 'PASS: 搂2.1c one-level group rejected' } else { Write-Host "FAIL: 搂2.1c one-level group ($out)"; $script:failures++ }
 Remove-Item (Join-Path $dataRoot 'badlvl') -Recurse -Force
 
-# --- v3 contract: optional _table.json + aligned mode probing ----------------
+# --- optional _table.json + full-alignment contract ---------------------------
 # A table without _table.json: groups are discovered from the file layout and
-# the aligned mode degrades automatically (cnstk_ixday's 2048/952 parts are
-# not regular -> "none" -> footer accumulation).
+# the reader enforces FULL alignment (the only supported contract). The
+# testdata layout (every group 2 parts x 3000 rows) satisfies it.
 $v3Table = Join-Path $dataRoot 'v3_notable'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $v3Table -Recurse -Force
 Remove-Item (Join-Path $v3Table '_table.json') -Force
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; WITH t AS (SELECT * FROM aligned_table('v3_notable')) SELECT count(*), sum(CASE WHEN rowid != rowid_alpha OR rowid != rowid_ma THEN 1 ELSE 0 END) FROM t;"
 $vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','
-Expect-Equal 'v3 no-manifest rows (probe->none)' ([long]$vals[0]) 6000
-Expect-Equal 'v3 no-manifest misaligned' ([long]$vals[1]) 0
-# Declared "all" on irregular data must fail fast (never silently degrade)
-'{"name":"v3_notable","version":1,"aligned":"all","rg_rows":16384,"part_rows":4194304}' | Set-Content -Path (Join-Path $v3Table '_table.json') -Encoding Ascii
+Expect-Equal 'no-manifest rows (defaults + full alignment)' ([long]$vals[0]) 6000
+Expect-Equal 'no-manifest misaligned' ([long]$vals[1]) 0
+# A non-aligned table must fail fast (never silently degrade): drop one alpha
+# part so the group part counts diverge (index 2 vs alpha 1).
+$v3Bad = Join-Path $dataRoot 'v3_bad'
+Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $v3Bad -Recurse -Force
+Remove-Item (Join-Path $v3Bad '_table.json') -Force
+Remove-Item (Join-Path $v3Bad 'factor\alpha101\year=2026\month=08\date=2026-08-17\part-000000.parquet') -Force
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-$out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('v3_notable');" 2>&1 | Out-String
+$out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('v3_bad');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match "aligned mode 'all' declared") { Write-Host 'PASS: v3 declared-all on irregular data rejected' } else { Write-Host "FAIL: v3 declared-all ($out)"; $script:failures++ }
-# Declared "none" reads the same irregular data fine
-'{"name":"v3_notable","version":1,"aligned":"none","rg_rows":16384,"part_rows":4194304}' | Set-Content -Path (Join-Path $v3Table '_table.json') -Encoding Ascii
-$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; WITH t AS (SELECT * FROM aligned_table('v3_notable')) SELECT count(*), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM t;"
-$vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','
-Expect-Equal 'v3 declared-none rows' ([long]$vals[0]) 6000
-Expect-Equal 'v3 declared-none misaligned' ([long]$vals[1]) 0
+if ($LASTEXITCODE -ne 0 -and $out -match 'full\s*alignment required') { Write-Host 'PASS: non-aligned table rejected fail-fast' } else { Write-Host "FAIL: non-aligned table ($out)"; $script:failures++ }
+Remove-Item $v3Bad -Recurse -Force
 Remove-Item $v3Table -Recurse -Force
 
 # --- error cases (expected failures 鈥?must not terminate the script) ---------

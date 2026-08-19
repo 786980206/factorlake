@@ -25,7 +25,6 @@ namespace duckdb {
 
 struct AlignedCompactBindData : public TableFunctionData {
 	TablePlan plan;
-	idx_t group_idx = DConstants::INVALID_INDEX;
 	vector<LogicalType> types;
 	vector<string> names;
 };
@@ -163,13 +162,20 @@ unique_ptr<FunctionData> AlignedCompactBind(ClientContext &context, TableFunctio
 	}
 
 	BuildTablePlan(context, root, table, result->plan);
-	for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
-		if (StringUtil::CIEquals(result->plan.groups[gi].manifest.group, group_name)) {
-			result->group_idx = gi;
-			break;
+	// Group argument: 'all' or any existing group name. Compaction ALWAYS
+	// processes every group: the full-alignment contract requires all groups
+	// to keep the same part count, so a per-group compaction would leave the
+	// table in a divergent state that the reader rejects fail-fast.
+	bool found = StringUtil::CIEquals(group_name, "all");
+	if (!found) {
+		for (auto &g : result->plan.groups) {
+			if (StringUtil::CIEquals(g.manifest.group, group_name)) {
+				found = true;
+				break;
+			}
 		}
 	}
-	if (result->group_idx == DConstants::INVALID_INDEX) {
+	if (!found) {
 		throw BinderException("aligned_compact: unknown group '%s'", group_name);
 	}
 
@@ -198,15 +204,6 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 	gstate.done = true;
 
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto &group = bind.plan.groups[bind.group_idx];
-
-	// Group the parts by partition directory
-	std::map<string, vector<const PartInfo *>> by_dir;
-	for (auto &part : group.parts) {
-		auto slash = part.path.find_last_of("/\\");
-		string dir = slash == string::npos ? "" : part.path.substr(0, slash);
-		by_dir[dir].push_back(&part);
-	}
 
 	// txid = last committed txid + 1 (markers are gone)
 	idx_t txid = NextTransactionId(bind.plan);
@@ -217,14 +214,27 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 		idx_t parts_before = 0;
 		idx_t parts_after = 0;
 
-		for (auto &kv : by_dir) {
-			auto &dir = kv.first;
-			auto &parts = kv.second;
-			parts_before += parts.size();
-			parts_after += parts.size();
-			if (parts.size() < 2) {
-				continue; // nothing to merge
+		// Compaction processes EVERY group in one atomic transaction so the
+		// full-alignment contract (same part count across groups) is
+		// preserved; the parts are grouped by partition directory and merged
+		// per directory.
+		for (auto &group : bind.plan.groups) {
+			// Group the parts by partition directory
+			std::map<string, vector<const PartInfo *>> by_dir;
+			for (auto &part : group.parts) {
+				auto slash = part.path.find_last_of("/\\");
+				string dir = slash == string::npos ? "" : part.path.substr(0, slash);
+				by_dir[dir].push_back(&part);
 			}
+
+			for (auto &kv : by_dir) {
+				auto &dir = kv.first;
+				auto &parts = kv.second;
+				parts_before += parts.size();
+				parts_after += parts.size();
+				if (parts.size() < 2) {
+					continue; // nothing to merge
+				}
 
 			// All parts must share the same column set (schema evolution
 			// within a directory cannot be compacted in v1)
@@ -343,8 +353,9 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			}
 
 			dirs_compacted++;
-			parts_after -= parts.size();
-			parts_after += 1;
+				parts_after -= parts.size();
+				parts_after += 1;
+			}
 		}
 
 		// Bump last_txid in _table.json (row counts unchanged — compaction

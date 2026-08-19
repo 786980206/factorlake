@@ -17,3 +17,5 @@ Engines: D-WIDE D-JOIN A-ALIGNED A-NORMAL P-CONCAT P-JOIN; threads: 1
 > alpha81 sparse (90% NULL), fs27. Q1~3 Q2~35 Q3~500 Q4~5000 Q5=ALL.
 > warm = fresh-process 2nd run (page cache warmed); cold = 1st touch in fresh process.
 > A-NORMAL is the plugin's aligned=false (union-interval per-leaf pruning), not a key join.
+> (Historical snapshot — A-NORMAL was removed in the v4 contract; see
+> `BENCHMARK_MULTI_ANALYSIS.md` for the authoritative analysis.)

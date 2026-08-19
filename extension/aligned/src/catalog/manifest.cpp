@@ -203,18 +203,9 @@ bool TryReadTableManifest(FileSystem &fs, const string &manifest_path, TableMani
 		if (GetUIntField(root, "version", version)) {
 			manifest.version = version;
 		}
-		string aligned_mode;
-		if (GetStringField(root, "aligned", aligned_mode)) {
-			if (aligned_mode != "all" && aligned_mode != "group" && aligned_mode != "none") {
-				throw IOException("Aligned table: manifest '%s' has unsupported aligned mode '%s' (expected "
-				                  "'all', 'group' or 'none')",
-				                  manifest_path, aligned_mode);
-			}
-			manifest.aligned_mode = aligned_mode;
-			manifest.aligned_declared = true;
-		}
-		// Legacy fields (key, canonical_order, row_count, row_group_size) are
-		// ignored for backwards compatibility.
+		// Legacy fields (aligned, key, canonical_order, row_count,
+		// row_group_size) are ignored for backwards compatibility: the reader
+		// always enforces full alignment.
 		GetUIntField(root, "rg_rows", manifest.rg_rows);
 		GetUIntField(root, "part_rows", manifest.part_rows);
 		GetUIntField(root, "last_txid", manifest.last_txid);
@@ -240,34 +231,6 @@ static PartInfo ReadPartFooter(ClientContext &context, const string &path) {
 		part.types.push_back(col.type);
 	}
 	return part;
-}
-
-//! Row-group size of the first row group of a part file (0 when unavailable).
-static idx_t FirstRowGroupSize(ClientContext &context, const string &path) {
-	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
-	if (reader->metadata && reader->metadata->metadata && !reader->metadata->metadata->row_groups.empty()) {
-		return reader->metadata->metadata->row_groups[0].num_rows;
-	}
-	return 0;
-}
-
-//! Probe pass: reads the first and the last part of every group and records
-//! their row counts (and the first row-group size of the first part).
-struct ProbeInfo {
-	idx_t part_rows = 0; // rows of the first part
-	idx_t last_rows = 0; // rows of the last part
-	idx_t rg_rows = 0;   // first row-group size of the first part
-};
-
-static ProbeInfo ProbeGroup(ClientContext &context, GroupPlan &group) {
-	ProbeInfo info;
-	if (group.parts.empty()) {
-		return info;
-	}
-	info.part_rows = group.parts[0].row_count;
-	info.last_rows = group.parts.back().row_count;
-	// info.rg_rows = FirstRowGroupSize(context, group.parts[0].path);
-	return info;
 }
 
 //! Validates the group-level formula precondition against the ACTUAL footer
@@ -306,9 +269,8 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			throw IOException("Aligned table '%s': table directory does not exist at '%s'", table_name,
 			                  plan.table_path);
 		}
-		plan.table = TableManifest(); // defaults: aligned=all, rg_rows=16384, part_rows=4194304
+		plan.table = TableManifest(); // defaults: rg_rows=16384, part_rows=4194304
 	}
-	plan.aligned_mode = plan.table.aligned_mode;
 	string table_prefix = NormalizePath(plan.table_path);
 
 	// Group discovery: explicit list from the manifest wins; otherwise every
@@ -416,13 +378,11 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		plan.groups.push_back(std::move(group));
 	}
 
-	// Probe the alignment mode. "all" needs every group to agree on the part
-	// count, the first-part row count and the last-part row count; "group"
-	// only needs each group's internal regularity (every part except the last
-	// holds the same row count). When a mode is declared explicitly in
-	// _table.json its precondition is enforced fail-fast; when absent, the
-	// probe degrades silently ("all" -> "group" -> "none"). "none" derives
-	// every part's interval from the footer row counts directly.
+	// Full alignment is the only supported contract (no modes): every group
+	// must have the same part count, part size and last-part size. part_rows
+	// is taken from the index group's first part; every group is validated
+	// against it fail-fast (no degradation). A table that is not fully
+	// aligned is rejected — the reader never silently degrades.
 	idx_t index_gi = DConstants::INVALID_INDEX;
 	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
 		if (StringUtil::CIEquals(plan.groups[gi].manifest.group, "index")) {
@@ -430,103 +390,53 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			break;
 		}
 	}
-	vector<ProbeInfo> probes(plan.groups.size());
-	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
-		probes[gi] = ProbeGroup(context, plan.groups[gi]);
+	idx_t part_rows = 0;
+	idx_t index_part_count = 0;
+	if (index_gi != DConstants::INVALID_INDEX && !plan.groups[index_gi].parts.empty()) {
+		part_rows = plan.groups[index_gi].parts[0].row_count;
+		index_part_count = plan.groups[index_gi].parts.size();
 	}
-
-	// Group-level precondition: within every group every part except the last
-	// holds exactly the first part's row count. This is the formula's
-	// precondition, verified against the actual footer counts of ALL parts.
-	bool group_ok = true;
-	idx_t violating_gi = DConstants::INVALID_INDEX;
-	idx_t violating_pi = DConstants::INVALID_INDEX;
-	idx_t violating_rows = 0;
 	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
 		auto &g = plan.groups[gi];
 		if (g.parts.empty()) {
 			continue;
 		}
-		violating_pi = FindAlignedViolation(g, probes[gi].part_rows);
+		if (index_part_count == 0) {
+			throw IOException("Aligned table '%s': group '%s' has %llu parts but the index group has none "
+			                  "(full alignment required)",
+			                  plan.table.name.empty() ? table_name : plan.table.name, g.manifest.group,
+			                  g.parts.size());
+		}
+		if (g.parts.size() != index_part_count) {
+			throw IOException("Aligned table '%s': group '%s' has %llu parts but the index group has %llu "
+			                  "(full alignment required: every group must have the same part count)",
+			                  plan.table.name.empty() ? table_name : plan.table.name, g.manifest.group, g.parts.size(),
+			                  index_part_count);
+		}
+		auto violating_pi = FindAlignedViolation(g, part_rows);
 		if (violating_pi != DConstants::INVALID_INDEX) {
-			group_ok = false;
-			violating_gi = gi;
-			violating_rows = g.parts[violating_pi].row_count;
-			break;
+			throw IOException("Aligned table '%s': group '%s' part '%s' holds %llu rows; every part except the "
+			                  "last must hold exactly %llu rows (full alignment required)",
+			                  plan.table.name.empty() ? table_name : plan.table.name, g.manifest.group,
+			                  g.parts[violating_pi].part_name, g.parts[violating_pi].row_count, part_rows);
 		}
-		g.part_rows = probes[gi].part_rows;
-		g.last_rows = probes[gi].last_rows;
-		g.rg_rows = probes[gi].rg_rows;
+		g.part_rows = part_rows;
 	}
 
-	// Cross-group agreement (only relevant for "all")
-	bool all_ok = group_ok;
-	if (all_ok) {
-		for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
-			auto &p = probes[gi];
-			auto &ref = probes[index_gi];
-			if (p.part_rows != ref.part_rows || p.last_rows != ref.last_rows ||
-			    plan.groups[gi].parts.size() != plan.groups[index_gi].parts.size()) {
-				all_ok = false;
-				break;
-			}
-		}
-	}
-
-	if (plan.table.aligned_declared) {
-		// Declared explicitly: enforce fail-fast, never degrade.
-		if (plan.table.aligned_mode == "all" || plan.table.aligned_mode == "group") {
-			if (!group_ok) {
-				throw IOException("Aligned table '%s': aligned mode '%s' declared, but group '%s' part '%s' holds "
-				                  "%llu rows; all parts except the last must hold exactly %llu rows",
-				                  plan.table.name.empty() ? table_name : plan.table.name, plan.table.aligned_mode,
-				                  plan.groups[violating_gi].manifest.group,
-				                  plan.groups[violating_gi].parts[violating_pi].part_name, violating_rows,
-				                  probes[violating_gi].part_rows);
-			}
-			if (plan.table.aligned_mode == "all" && !all_ok) {
-				throw IOException("Aligned table '%s': aligned mode 'all' declared, but the groups disagree on "
-				                  "part count / part size (index has %llu parts, %llu rows per part; another group "
-				                  "diverges)",
-				                  plan.table.name.empty() ? table_name : plan.table.name,
-				                  plan.groups[index_gi].parts.size(), probes[index_gi].part_rows);
-			}
-			plan.aligned_mode = plan.table.aligned_mode;
-		} else {
-			// "none" declared
-			plan.aligned_mode = "none";
-		}
-	} else {
-		// Default (no declaration): probe the degradation chain.
-		plan.aligned_mode = all_ok ? "all" : (group_ok ? "group" : "none");
-	}
-
-	// Row intervals:
-	//   "all"   - start_row(i) = i * part_rows          (identical across groups)
-	//   "group" - start_row(i) = i * group_part_rows    (per group)
-	//   "none"  - start_row accumulates footer row counts per file
-	// The formula preconditions were already verified above against the actual
-	// footer row counts.
-	if (plan.aligned_mode == "all" || plan.aligned_mode == "group") {
-		for (auto &group : plan.groups) {
-			idx_t start = 0;
-			for (auto &part : group.parts) {
-				part.start_row = start;
-				start += group.part_rows;
-			}
-		}
-	} else {
-		for (auto &group : plan.groups) {
-			idx_t start = 0;
-			for (auto &part : group.parts) {
-				part.start_row = start;
-				start += part.row_count;
-			}
+	// Row intervals: start_row(i) = i * part_rows (identical across groups).
+	// The formula preconditions were verified above against the actual footer
+	// row counts; the last part may hold fewer rows (the cross-group total
+	// check below covers the last-part agreement).
+	for (auto &group : plan.groups) {
+		idx_t start = 0;
+		for (auto &part : group.parts) {
+			part.start_row = start;
+			start += part_rows;
 		}
 	}
 
 	// Validate each group's row space and cross-group agreement on the total
-	// row count (the alignment contract — required in every mode, because the
+	// row count (the alignment contract — required always, because the
 	// DataChunk assembly needs the same Logical Row Space).
 	idx_t total = 0;
 	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {

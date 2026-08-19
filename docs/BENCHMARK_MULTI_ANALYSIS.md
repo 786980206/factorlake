@@ -10,6 +10,11 @@
 > - `docs/BENCH_MULTI.md` — **临时快速报告**，每次 `run_multi_bench.sh` /
 >   `bench_scenarios.sh` 运行都会覆盖，只作最近一次原始数字快照，不作权威依据。
 > - `bench/out/SUMMARY.csv` + `bench/out/g-*.csv` — 各阶段原始结果（已提交）。
+>
+> **v4 更新（2026-08）**：A-NORMAL 引擎已随 v4 契约删除（aligned 字段不存在，
+> 全对齐是唯一模式）。下文涉及 A-NORMAL 的结论均为历史记录，保留供参考：
+> A-ALIGNED 与 A-NORMAL 行为相同（差异是测量噪声）这一结论仍然成立——A-NORMAL
+> 现在等价于 A-ALIGNED。
 
 ---
 
@@ -19,7 +24,7 @@
 
 | 类 | 内容 |
 |----|------|
-| 引擎组 | `D-WIDE`(DuckDB 单宽表) `D-JOIN`(DuckDB key JOIN) `P-CONCAT`(polars hstack) `P-JOIN`(polars hash join) `A-ALIGNED`(插件 aligned=true) `A-NORMAL`(插件 aligned=false) |
+| 引擎组 | `D-WIDE`(DuckDB 单宽表) `D-JOIN`(DuckDB key JOIN) `P-CONCAT`(polars hstack) `P-JOIN`(polars hash join) `A-ALIGNED`(插件，全对齐 position 组装) |
 | 规模 | R1..R4（1M/10M/100M/1B 行）× W1..W3（128/1024/10240 列） |
 | 稀疏 | DENSE(0%) / SPARSE-90 / SPARSE-99 |
 | 查询 | Q1(~3) Q2(~35) Q3(~500) Q4(~5000) Q5(ALL) |

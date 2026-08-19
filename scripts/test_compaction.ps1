@@ -44,8 +44,7 @@ function Make-Staging([string]$path, [int]$from, [int]$to, [string]$date) {
 if (Test-Path $tableDir) { Remove-Item $tableDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $tableDir | Out-Null
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    name = $table; version = 1; schema_version = 1; key = @('date', 'symbol')
-    canonical_order = 'fixed'; row_count = 0; row_group_size = 131072
+    name = $table; version = 1
     groups = @('index', 'factor/alpha101')
     partitioning = @{
         'index' = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })
@@ -80,16 +79,23 @@ Expect-Equal 'total rows (4000)' $vals[0] '4000'
 Expect-Equal 'alpha001 non-null (r%5==0)' $vals[1] '800'
 Expect-Equal 'static misalign' $vals[3] '0'
 
-# ---- compact the alpha group -------------------------------------------------
-$o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT dirs_compacted, parts_before, parts_after FROM aligned_compact('$table', 'factor/alpha101');"
+# ---- compact ALL groups (one atomic transaction) ------------------------------
+# Full alignment (the only supported contract): every group must have the same
+# part count, so compaction always processes every group together. A per-group
+# compaction would leave the table in a divergent part-count state that the
+# reader rejects fail-fast.
+$o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT dirs_compacted, parts_before, parts_after FROM aligned_compact('$table', 'all');"
 $vals = $o.Trim() -split ','
-Expect-Equal 'dirs compacted' $vals[0] '1'
-Expect-Equal 'parts before' $vals[1] '2'
-Expect-Equal 'parts after' $vals[2] '1'
+Expect-Equal 'dirs compacted (index + alpha)' $vals[0] '2'
+Expect-Equal 'parts before' $vals[1] '4'
+Expect-Equal 'parts after' $vals[2] '2'
 
-# ---- alpha dir should now have 1 part ----------------------------------------
+# ---- both dirs should now have 1 part -----------------------------------------
 $after = (Get-ChildItem $alphaDir -Filter 'part-*.parquet').Count
 Expect-Equal 'alpha parts after compact' $after 1
+$idxDir = Join-Path $tableDir 'index\date=2026-07-01'
+$idxParts = (Get-ChildItem $idxDir -Filter 'part-*.parquet').Count
+Expect-Equal 'index parts after compact' $idxParts 1
 
 # ---- verify read-back correctness AFTER compaction ---------------------------
 $o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*), count(alpha001), count(alpha002), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('$table');"
@@ -99,11 +105,6 @@ Expect-Equal 'alpha001 non-null' $vals[1] '800'
 Expect-Equal 'alpha002 non-null (r%11==0)' $vals[2] '364'
 Expect-Equal 'sum(rowid) 0..3999' $vals[3] '7998000'
 Expect-Equal 'misalign after compact' $vals[4] '0'
-
-# ---- index still has 2 parts (only alpha was compacted) ----------------------
-$idxDir = Join-Path $tableDir 'index\date=2026-07-01'
-$idxParts = (Get-ChildItem $idxDir -Filter 'part-*.parquet').Count
-Expect-Equal 'index parts unchanged' $idxParts 2
 
 # ---- cleanup -----------------------------------------------------------------
 Remove-Item $s1, $s2 -Force -ErrorAction SilentlyContinue

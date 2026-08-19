@@ -104,16 +104,15 @@ fieldset/ma/      year=2026/month=08/
 
 ## 5. Manifest（轻量，不做 Catalog DB）
 
-目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**（v3 契约；
-**没有 `_group.json`、没有 part sidecar、没有 commit marker**）：缺失时全部用
-默认值（aligned 探测、rg_rows=16384、part_rows=4194304），Group 列表从文件布局
+目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**（v4 契约；
+**没有 `_group.json`、没有 part sidecar、没有 commit marker、没有 aligned 模式字段**）：
+缺失时全部用默认值（rg_rows=16384、part_rows=4194304），Group 列表从文件布局
 发现（glob `**/*.parquet` → 跳过 `name=value` 分区段 → 最长非分区段后缀即 Group）：
 
 ```json
 {
   "name": "cnstk_ixday",
   "version": 1,
-  "aligned": "all",
   "rg_rows": 16384,
   "part_rows": 4194304,
   "last_txid": 42,
@@ -129,23 +128,24 @@ fieldset/ma/      year=2026/month=08/
 }
 ```
 
-- `aligned`（可选，三模式）：`"all"`（组间同构，全局公式）/ `"group"`（组内规则，
-  按组公式）/ `"none"`（footer 累加）。**显式声明 → 校验失败即 fail-fast，不降级**；
-  **未声明 → 探测降级链 all→group→none**（探测用 plan 阶段已读的 footer 行数，
-  无额外 IO）。**Writer 不写 aligned 字段**（数据由读端探测判定）。
+- **全对齐（Full Alignment）是唯一契约**：所有 Group 必须同构——part 数 == index
+  的 part 数、组内非最后 part 行数 == index 首 part 行数（`part_rows`）、总行数
+  一致。违反即 fail-fast（"full alignment required"）。**无 group/none 模式、
+  无探测降级链**；`aligned` 字段（v3 三模式）读端忽略。
 - `rg_rows`（可选，默认 16384）：Writer flush 的 Row Group 大小。
-- `part_rows`（可选，默认 4194304）：目标 part 大小提示。
+- `part_rows`（可选，默认 4194304）：目标 part 大小提示。**读端不用该值**——part
+  大小由 index 首 part 的 footer 行数决定。
 - `last_txid`：最近成功提交的事务号（Writer/Compactor 每次 commit +1；无 marker 文件）。
 - `partitioning`（可选）：`group → 有序目录模板`，模板只允许 `year=%Y` / `month=%Y-%m` /
   `date=%Y-%m-%d`，source 固定 `date`。**空表起步必须显式给出**；否则从目录结构推导
   （仅识别这三种段，未知 `name=value` 段忽略）；Writer 重写 manifest 必须原样写回。
-- **Canonical Key = index Group 的 schema 列**（v3，不再写进 manifest）。
-- **旧字段向后兼容忽略**：v2 的 `key` / `schema_version` / `canonical_order` /
-  `row_count` / `row_group_size` 读端忽略，不参与计算。
-- 行区间契约（v3）：part 顺序 = **组内相对路径字符串排序，索引即 part_id**（不再
-  要求 `part-%06llu` 命名）；`all`/`group` 用公式 `start_row(i) = i*part_rows`
-  （组内非最后 part 必须恰好 part_rows 行，对照 footer 校验，违反 fail-fast）；
-  `none` 由 footer 行数累加。跨 Group 总行数必须完全一致（否则 fail-fast）。
+- **Canonical Key = index Group 的 schema 列**（v4，不再写进 manifest）。
+- **旧字段向后兼容忽略**：v3 的 `aligned`、v2 的 `key` / `schema_version` /
+  `canonical_order` / `row_count` / `row_group_size` 读端忽略，不参与计算。
+- 行区间契约（v4）：part 顺序 = **组内相对路径字符串排序，索引即 part_id**（不再
+  要求 `part-%06llu` 命名）；行区间一律公式 `start_row(i) = i*part_rows`（组内非
+  最后 part 必须恰好 part_rows 行，对照 footer 校验，违反 fail-fast）。跨 Group
+  总行数必须完全一致（否则 fail-fast）。
 
 ---
 
@@ -626,6 +626,38 @@ bash scripts/test_aligned.sh
     （last_txid CAS）、W-4 写后校验（validate=true）、W-5 group 间并行、
     W-6 UPDATE/DELETE 明确不做、W-7 公共 JSON helper + rg_rows 默认值 131072；
     实施顺序 W-S1~W-S6
+- [x] **v4 契约：all-only（全对齐唯一契约），删除三模式与探测降级链（2026-08）**：
+  - **契约**（docs/STORAGE_CONTRACT.md v4）：`_table.json` 缺失时全部默认值 +
+    全对齐校验（rg_rows=16384、part_rows=4194304）+ glob 组发现；**只有一种对齐
+    模式 all**：所有 Group 必须同构——part 数 == index、组内非最后 part 行数 ==
+    index 首 part 行数、总行数一致，违反即 fail-fast（"full alignment required"）；
+    **无 group/none 模式、无探测降级链**；行区间一律公式 `start_row(i)=i*part_rows`
+    （`part_rows` = index 首 part footer 行数）；`aligned` 字段（v3 三模式）读端
+    忽略；旧字段（key/schema_version/canonical_order/row_count/row_group_size）
+    向后兼容忽略
+  - **代码**：manifest.hpp 删 `TableManifest.aligned_mode/aligned_declared`、
+    `GroupPlan.last_rows/rg_rows`、`TablePlan.aligned_mode`；manifest.cpp 删
+    `aligned` 字段解析、`ProbeInfo/ProbeGroup/FirstRowGroupSize`（保留
+    `ReadPartFooter` 与 `FindAlignedViolation`），`BuildTablePlan` 重写为固定
+    全对齐校验；scan 只改 total_rows 来源
+  - **Compactor 同步化（超出"写入侧不动"原计划，但必要）**：per-group compact 在
+    all-only 下会先造成组间 part 数不一致（alpha 1 part vs index 2 parts），随后
+    compactor 自身的 `BuildTablePlan` 全对齐校验 fail-fast → 中间态死锁。已改
+    `aligned_compactor.cpp`：`AlignedCompactFunction` 一次原子处理**所有组**（按
+    分区目录逐组合并），group 参数（`'all'` 或任意已存在组名）仅作校验、不限制
+    范围。**API 语义变更：`aligned_compact(table, group)` 实际总是合并所有组**
+  - **数据/测试**：gen_testdata/gen_bench/gen_multi_bench 的 index 全部改 1 part/day
+    （全对齐布局）；test_aligned 新增 no-manifest 默认全对齐 + v3_bad fail-fast
+    （删一个 alpha part → "full alignment required"）；test_compaction 重写为
+    `aligned_compact('$table','all')`；A-NORMAL 引擎从 run_multi_bench.sh/
+    bench_scenarios.sh 删除（ENG6→ENG5、ENG4→ENG3）
+  - **删除**：scripts/gen_bench_modes.ps1、scripts/bench_modes.ps1、
+    docs/BENCHMARK_MODES.md、testdata/bench_all|bench_group|bench_none
+  - **验收**：test_aligned 28/28、test_writer 17/17、test_compaction 16/16、
+    test_parallel 全 PASS（1M 行 8 线程 0.055s）
+  - **PS 5.1 经验**：stderr 消息在 78 列折行（"full \nalignment required"），错误
+    正则须容错空白 `full\s*alignment required`；bash 工具里 `cmd /c "..."` 引号
+    失效 → 写 .bat（vcvars64 + ninja）用 `cmd //c "path.bat"` 执行
 
 ### Phase 1 关键经验（必须记住，避免重踩）：`Copy(source, target, source_count, source_offset, target_offset)`
    中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。

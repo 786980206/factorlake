@@ -53,7 +53,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha101', root='/data');
 ```
 <data_root>/
 ├── cnstk_ixday/            ← Logical Table
-│   ├── _table.json         ← 可选 manifest（缺失时自动探测）
+│   ├── _table.json         ← 可选 manifest（缺失时用默认值，见契约 v4）
 │   ├── index/              ← Column Group（Key + 基础行情，必须存在）
 │   │   └── date=2026-08-17/
 │   ├── factor/alpha101/    ← Column Group（lv1/lv2 两级路径）
@@ -61,7 +61,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha101', root='/data');
 └── cnstk_klm01/            ← 另一张 Logical Table
 ```
 
-7 条核心 Invariant（详见 `docs/STORAGE_CONTRACT.md` v3）：
+7 条核心 Invariant（详见 `docs/STORAGE_CONTRACT.md` v4）：
 
 | # | Invariant |
 |---|-----------|
@@ -73,9 +73,10 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha101', root='/data');
 | 6 | Physical Files 可以完全不同 |
 | 7 | 查询阶段绝不通过 Key 做 JOIN |
 
-对齐模式三选一（`_table.json` 的 `aligned` 字段，可选）：`all` / `group` / `none`。
-**未声明时自动探测**（all → group → none 降级链，探测用 plan 阶段已读的 footer
-行数，零额外 IO）；**显式声明则 fail-fast 校验，不降级**。
+**对齐契约（唯一，无模式选择）**：所有 Group 必须全对齐（full alignment）——part 数、
+part 大小、末 part 大小一致，行区间由公式 `start_row(i) = i * part_rows` 推导
+（`part_rows` = index 首 part 行数）。违反即 fail-fast（"full alignment required"）。
+`_table.json` 的 `aligned` 字段（v3 三模式）已被删除：读端忽略，不存在探测降级链。
 
 ## 已实现功能
 
@@ -87,7 +88,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha101', root='/data');
 | 并行扫描 | ✅ | Aligned Row Group 为任务单元，8 线程实测 ≈4.2× 加速 |
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
 | 写入 | ✅ | `aligned_write()`：append-only、按分区切 part、`_tmp` 暂存 + 原子提交（last_txid+1） |
-| 合并 | ✅ | `aligned_compact()`：按分区目录合并 part，原子切换 |
+| 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**（保持组间 part 数一致），按分区目录合并 part，原子切换 |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
 
 不支持（第一版明确不做）：UPDATE/DELETE、Tombstone/Delta、事务并发写。
@@ -115,7 +116,7 @@ ninja -C build-rel aligned_loadable_extension
 
 ```bash
 bash scripts/gen_testdata.sh   # 生成 testdata/（6000 行 × 3 组）
-bash scripts/test_aligned.sh   # 读取/投影/分区剪枝/并行/v3 契约
+bash scripts/test_aligned.sh   # 读取/投影/分区剪枝/并行/契约校验
 ```
 
 ## 性能结论（详见 docs/）
@@ -125,15 +126,15 @@ bash scripts/test_aligned.sh   # 读取/投影/分区剪枝/并行/v3 契约
 - **`docs/BENCHMARK_MULTI_ANALYSIS.md`**：6 引擎对比（DuckDB 宽表/JOIN、polars
   横向 concat/JOIN、aligned）。A-ALIGNED vs D-JOIN 在 10M 行 ≈ **40×**、vs polars
   JOIN ≈ **152×**（position 组装近似线性 vs JOIN/hstack 超线性）。
-- **`docs/BENCHMARK_MODES.md`**：aligned 三模式（all/group/none）扫描性能无实质差异；
-  part 粒度影响固定开销（writer 应尽量大 part）；v3 相对 v2 无回归。
+- **三模式基准（all/group/none）已随 v4 删除**：全对齐契约固定为 all，无性能差异
+  可比较；part 粒度影响固定开销的结论仍在（writer 应尽量大 part）。
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
 | `AGENTS.md` | 项目权威记忆文件（架构决策、进度、关键经验，agent 必读） |
-| `docs/STORAGE_CONTRACT.md` | 存储契约 v3（目录规则、列名规则、对齐模式、行区间、Manifest） |
+| `docs/STORAGE_CONTRACT.md` | 存储契约 v4（目录规则、列名规则、全对齐契约、行区间、Manifest） |
 | `docs/BENCHMARK*.md` | 各轮基准测试方法与结论 |
 | `docs/EXTENSION_RELEASE.md` | 扩展发布机制（INSTALL/LOAD、签名、GitHub Release） |
 | `docs/READ_OPTIMIZATIONS.md` | 读取链路现状分析与优化计划 |

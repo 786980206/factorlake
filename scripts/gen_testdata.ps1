@@ -1,22 +1,23 @@
 # gen_testdata.ps1
-# Generates an AlignedTable test dataset under testdata/ (new contract, no sidecars).
+# Generates an AlignedTable test dataset under testdata/ (v3 contract).
 #
-# Layout exercised by this script:
+# Layout exercised by this script (fully aligned — every group has the same
+# part count / part size / last-part size, the only supported contract):
 #   cnstk_ixday/
 #     _table.json                              (includes optional part_rows override)
-#     index/        date=2026-08-17/  (2 parts, RGS 2048)
-#                   date=2026-08-18/  (2 parts, RGS 2048)
-#     factor/alpha101/ year=2026/month=08/date=17/  (1 part, RGS 1000)
-#                      year=2026/month=08/date=18/  (1 part, RGS 1000, +alpha099 schema evolution)
+#     index/        date=2026-08-17/  (1 part, 3000 rows, RGS 2048)
+#                   date=2026-08-18/  (1 part, 3000 rows, RGS 2048)
+#     factor/alpha101/ year=2026/month=08/date=17/  (1 part, 3000 rows, RGS 1000)
+#                      year=2026/month=08/date=18/  (1 part, 3000 rows, RGS 1000, +alpha099 schema evolution)
 #     fieldset/ma/  year=2026/month=08/           (2 parts from 2 transactions — coarse partitioning)
 #
 # Global row space: [0,3000) = 2026-08-17, [3000,6000) = 2026-08-18.
 # Every group carries a `rowid` BIGINT column (test-only oracle) equal to the
 # global row number, so alignment can be verified by cross-group comparison.
 #
-# New contract (alpha branch, 2026-08):
-#   * Metadata is read from _table.json + per-directory layout + Parquet footer.
-#     No *.aligned.json sidecars. No .aligned-commit.json markers.
+# v3 contract (2026-08):
+#   * Metadata is read from _table.json + per-directory layout + Parquet footer
+#     (only the footer is authoritative; no sidecars, no commit markers).
 #   * Partition names must be one of: year=, month=, date= (no day=).
 #   * PART_ROWS defaults to 4_194_304; optional override in _table.json's part_rows.
 
@@ -51,11 +52,6 @@ function Part-Name([int]$i) { 'part-{0:D6}' -f $i }
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
     name            = $table
     version         = 1
-    schema_version  = 1
-    key             = @('date', 'symbol')
-    canonical_order = 'fixed'
-    row_count       = 6000
-    row_group_size  = 131072
     part_rows       = 4194304
     groups          = @('index', 'factor/alpha101', 'fieldset/ma')
 }
@@ -72,27 +68,19 @@ foreach ($p in $Partitions) {
     $rows = [int]$p.rows
     $end = $start + $rows
 
-    # ---- index group: date-level partition, 2 parts per day (RGS 2048) -------
+    # ---- index group: date-level partition, 1 part per day (RGS 2048) -------
     $indexDir = Join-Path $tableDir "index\date=$date"
     New-Item -ItemType Directory -Force -Path $indexDir | Out-Null
-    $partStarts = @(0, 2048)
-    for ($i = 0; $i -lt $partStarts.Count; $i++) {
-        $ps = $partStarts[$i]
-        $pc = [Math]::Min(2048, $rows - $ps)
-        $gStart = $start + $ps
-        $gEnd = $gStart + $pc
-        $partName = Part-Name $i
-        $sql = "COPY (
-  WITH r AS (SELECT range AS r FROM range($gStart, $gEnd))
+    $sql = "COPY (
+  WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT DATE '$date' AS date,
          printf('%06d', r + 1) AS symbol,
          CAST((r + 1) * 0.5 AS DOUBLE) AS close,
          CAST((r + 1) * 100 AS BIGINT) AS volume,
          CAST(r AS BIGINT) AS rowid
   FROM r
-) TO '$($indexDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, COMPRESSION ZSTD);"
-        Run-DuckDB $sql
-    }
+) TO '$($indexDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, COMPRESSION ZSTD);"
+    Run-DuckDB $sql
 
     # ---- alpha101 group: year/month/date partition, 1 part (RGS 1000) --------
     $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=08\date=$date"

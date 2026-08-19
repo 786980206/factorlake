@@ -34,10 +34,10 @@ function Run-DuckDB-ExpectError([string]$sql, [string]$pattern) {
     return $false
 }
 
-# ---- fresh table (manifest only, row_count 0) ------------------------------
+# ---- fresh table (manifest only, empty table) -------------------------------
 # Partitioning lives in _table.json (explicit: required for an empty table;
-# derived from the directory layout otherwise). There are no _group.json
-# files, no sidecars and no commit markers.
+# derived from the directory layout otherwise). v3: only _table.json exists —
+# no _group.json files, no sidecars and no commit markers.
 if (Test-Path $tableDir) { Remove-Item $tableDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $tableDir | Out-Null
 function Write-JsonFile([string]$path, $obj) {
@@ -45,8 +45,7 @@ function Write-JsonFile([string]$path, $obj) {
     ($obj | ConvertTo-Json -Depth 8) | Set-Content -Path $path -Encoding Ascii
 }
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    name = $table; version = 1; schema_version = 1; key = @('date', 'symbol')
-    canonical_order = 'fixed'; row_count = 0; row_group_size = 131072
+    name = $table; version = 1
     groups = @('index', 'factor/alpha101', 'fieldset/ma')
     partitioning = @{
         'index' = @(@{ template = 'date=%Y-%m-%d'; source = 'date' })

@@ -24,8 +24,10 @@ aligned_write(table, source_path, mapping, root=..., start_row=...)
   成功后逐 part move 到目标目录 → 重写 `_table.json`
   （last_txid+1，partitioning 原样写回）→ 清理 `_tmp`；失败删除暂存树
   （`_tmp` 对 Reader 永不可见，`HasIgnoredPathSegment` 过滤 `.`/`_` 段）
-- `aligned_compact(table, group)`：按分区目录合并多 part → 单 part
-  （同目录必须同列集，拒绝 schema-evolution 合并），原子切换 + 删旧文件
+- `aligned_compact(table, group)`：**单事务合并所有组**（保持组间 part 数一致，
+  v4 全对齐契约要求）；group 参数（`'all'` 或任意已存在组名）仅作校验、不限制
+  范围。按分区目录合并多 part → 单 part（同目录必须同列集，拒绝 schema-evolution
+  合并），原子切换 + 删旧文件
 
 ## 2. 已知问题与缺口（按优先级）
 
@@ -44,7 +46,7 @@ part：一个分区数据量超过 part_rows 时**一个 part 无限增长**。b
 **需求**：同分区内按 `part_rows` 切多个 part（part 名递增 `part-000000`、
 `part-000001`…，保持 RG 边界、part 间行连续）。注意与读端公式行区间的
 兼容：`part_rows` 切分后组内 part 大小仍规则（除最后 part），不破坏
-all/group 探测。
+全对齐契约（组间 part 数必须一致）。
 
 ### W-3. 无并发写互斥（last_txid 竞争）
 
@@ -96,9 +98,9 @@ BuildTablePlan 的 ValidateRowSpace）。
 | W-S5 | **W-7 公共 JSON helper + rg_rows 默认值 131072** | 小 | 回归全 PASS |
 | W-S6 | **Compaction 增强**：跨分区合并（按时间范围把多个分区目录合并成少分区目录——可选，低优先级） | 中 | 分区粒度变化后读端探测正常 |
 
-> 约束：写入产物必须保持 v3 契约（footer 权威、无 sidecar、part 相对路径
-> 排序 = part 序）；`part_rows` 切分不得破坏 all/group 探测公式（非最后
-> part 等大）。每步完成更新 AGENTS.md 进度与经验，跑 test_writer.ps1 /
+> 约束：写入产物必须保持 v4 契约（footer 权威、无 sidecar、part 相对路径
+> 排序 = part 序）；`part_rows` 切分不得破坏全对齐公式（非最后 part 等大、
+> 组间 part 数一致）。每步完成更新 AGENTS.md 进度与经验，跑 test_writer.ps1 /
 > test_compaction.ps1 / test_aligned.ps1 全量回归。
 
 ## 4. 与读取链路的依赖
@@ -106,6 +108,5 @@ BuildTablePlan 的 ValidateRowSpace）。
 - W-S1 的多文件行序规则 = 读端 part 排序规则（相对路径字符串序），实现时
   复用 `DeriveGroupFromPath` 的排序思路；
 - W-S3 的校验可复用读端 `ValidateRowSpace` 与 footer 读取（已存在）；
-- W-2 的 part_rows 切分影响探测模式（group 判据），基准结论
-  （`docs/BENCHMARK_MODES.md`）已确认大 part 更优——默认配置应保持
-  `part_rows=4194304` 级别。
+- W-2 的 part_rows 切分要求组内非最后 part 等大且组间 part 数一致（全对齐），
+  基准结论已确认大 part 更优——默认配置应保持 `part_rows=4194304` 级别。

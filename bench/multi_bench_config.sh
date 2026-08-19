@@ -4,7 +4,7 @@
 # every test variable. Source it from run_multi_bench.sh (do NOT execute).
 #
 # Grouping (per the spec):
-#   1. Engine Groups      D-WIDE D-JOIN P-CONCAT P-JOIN A-ALIGNED A-NORMAL
+#   1. Engine Groups      D-WIDE D-JOIN P-CONCAT P-JOIN A-ALIGNED
 #   2. Scale & Width      R1..R4 x W1..W3
 #   3. Sparsity           DENSE SPARSE-90 SPARSE-99
 #   4. Query Projection   Q1..Q5
@@ -16,11 +16,11 @@ set -u
 # ---------------------------------------------------------------------------
 # 1. Engine Groups
 # ---------------------------------------------------------------------------
-# A-ALIGNED / A-NORMAL are the plugin (aligned=true / aligned=false).
+# A-ALIGNED is the plugin (full-alignment position assembly).
 # P-CONCAT / P-JOIN need polars; they are added to ENGINES only if polars is
 # importable (see run_multi_bench.sh).
 DDB_ENGINES=(D-WIDE D-JOIN)        # DuckDB baselines
-ALIGNED_ENGINES=(A-ALIGNED A-NORMAL) # plugin, aligned flag differs
+ALIGNED_ENGINES=(A-ALIGNED)        # plugin (A-NORMAL removed in v4: no aligned flag)
 POLARS_ENGINES=(P-CONCAT P-JOIN)   # require the polars package
 
 # ---------------------------------------------------------------------------
@@ -91,14 +91,14 @@ TIER_B_QUERIES=(Q1 Q2 Q3 Q5)
 TIER_B_FILTERS=(F1 F2 F3)
 TIER_B_SEL=(S0 S1 S2)
 
-# Tier C — Stress. engines = A-ALIGNED A-NORMAL D-WIDE D-JOIN, R4xW3,
+# Tier C — Stress. engines = A-ALIGNED D-WIDE D-JOIN, R4xW3,
 # Q1+Q2+Q5, F1+F2, S0+S1.
 TIER_C_ROWS=R4
 TIER_C_WIDTH=W3
 TIER_C_QUERIES=(Q1 Q2 Q5)
 TIER_C_FILTERS=(F1 F2)
 TIER_C_SEL=(S0 S1)
-TIER_C_ENGINES=(A-ALIGNED A-NORMAL D-WIDE D-JOIN)
+TIER_C_ENGINES=(A-ALIGNED D-WIDE D-JOIN)
 
 # Special single-run groups (run separately, not part of Tier A/B/C):
 #  - Sparsity:     R3 x W3 x Q2 x F2 x S1 over DENSE/SPARSE-90/SPARSE-99

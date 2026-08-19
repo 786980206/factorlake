@@ -1,4 +1,4 @@
-﻿# AlignedTable Benchmark (Phase 6)
+# AlignedTable Benchmark (Phase 6)
 
 Date: 2026-08-19  Machine: local Windows (see AGENTS.md 16)
 Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 + ma 21),
@@ -16,9 +16,9 @@ Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 
 
 ## Engines
 
-- **aligned** - ligned_table('bench_ixday'): 3 groups assembled into one DataChunk,
+- **aligned** - aligned_table('bench_ixday'): 3 groups assembled into one DataChunk,
   no JOIN, projection pushdown, partition pruning, parallel range scan, metadata cache, window carry reuse.
-- **wide** - single wide Parquet (127 columns, 1M rows), DuckDB ead_parquet.
+- **wide** - single wide Parquet (127 columns, 1M rows), DuckDB read_parquet.
 - **join** - three separate Parquet files (index/alpha/ma) joined on rowid (keyed layout).
 - **polars** - the same three files read separately (projection per file) and horizontally
   concatenated (position-aligned) - the classic wide-table assembly path we eliminate.
@@ -88,16 +88,14 @@ Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 
 | polars | s100 | 4 | 0.055 | 0.042 |
 | polars | s100 | 8 | 0.042 | 0.034 |
 
-## v2 contract vs v1 (master) — aligned engine only
+## Historical note: v2 contract vs v1 (archived v1.0 branch)
 
-Same machine, same bench_ixday 1M rows, same script. v1 = master branch (sidecars +
-commit markers + `_group.json` + `day=` dirs), v2 = alpha branch (footer-driven row
-ranges, `_table.json` partitioning, `date=` dirs). Baseline engines (wide/join/polars)
-were measured on the same run and are identical between the two branches (see below),
-so the comparison is valid.
+Same machine, same bench_ixday 1M rows, same script. v1 (old contract, archived to
+the `v1.0` branch) vs v2 (footer-driven row ranges). Baseline engines (wide/join/polars)
+were identical between the two runs, so the comparison is valid.
 
-| workload | threads | v1 master (s) | v2 alpha (s) | delta |
-|----------|---------|---------------|--------------|-------|
+| workload | threads | v1 (s) | v2 (s) | delta |
+|----------|---------|--------|--------|-------|
 | p5  | 1 | 0.176 | 0.163 | -7% |
 | p5  | 4 | 0.130 | 0.119 | -8% |
 | p5  | 8 | 0.113 | 0.102 | -10% |
@@ -115,9 +113,9 @@ so the comparison is valid.
 | s100 | 8 | 0.215 | 0.203 | -6% |
 
 v2 is 1-10% faster everywhere (plan build drops sidecar/marker reads; footer metadata
-is cached). No regression. Sanity check: wide p5 t1 = 0.097 (v1) vs 0.095 (v2),
-join p100 t1 = 1.679 vs 1.677, polars s100 t8 = 0.032 vs 0.034 — baseline engines are
-unchanged between the two runs.
+is cached). No regression. This comparison is historical — v3/v4 keep the same
+footer-based plan build; the three-mode benchmark (all/group/none) was deleted with
+the v4 contract (full alignment is the only mode).
 
 ## Observations
 

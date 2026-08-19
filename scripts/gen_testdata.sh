@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gen_testdata.sh — Linux equivalent of gen_testdata.ps1 (new contract, no sidecars).
+# gen_testdata.sh — Linux equivalent of gen_testdata.ps1 (v3 contract).
 # Generates an AlignedTable test dataset under testdata/.
 #
 # Layout exercised by this script:
@@ -15,9 +15,9 @@
 # Every group carries a `rowid` BIGINT column (test-only oracle) equal to the
 # global row number, so alignment can be verified by cross-group comparison.
 #
-# New contract (alpha branch, 2026-08):
-#   * Metadata is read from _table.json + per-directory layout + Parquet footer.
-#     No *.aligned.json sidecars. No .aligned-commit.json markers.
+# v3 contract (2026-08):
+#   * Metadata is read from _table.json + per-directory layout + Parquet footer
+#     (only the footer is authoritative; no sidecars, no commit markers).
 #   * Partition names must be one of: year=, month=, date= (no day=).
 #   * PART_ROWS defaults to 4_194_304; optional override in _table.json's part_rows.
 set -euo pipefail
@@ -52,11 +52,6 @@ part_name() { printf 'part-%06d' "$1"; }
 write_json "$TABLE_DIR/_table.json" '{
   "name": "cnstk_ixday",
   "version": 1,
-  "schema_version": 1,
-  "key": ["date", "symbol"],
-  "canonical_order": "fixed",
-  "row_count": 6000,
-  "row_group_size": 131072,
   "part_rows": 4194304,
   "groups": ["index", "factor/alpha101", "fieldset/ma"]
 }'
@@ -70,25 +65,18 @@ for idx in 0 1; do
   ROWS=3000
   END=$(( START + ROWS ))
 
-  # ---- index group: date-level partition, 2 parts per day (RGS 2048) --------
+  # ---- index group: date-level partition, 1 part per day (RGS 2048) --------
   INDEX_DIR="$TABLE_DIR/index/date=$DATE"
   mkdir -p "$INDEX_DIR"
-  for i in 0 1; do
-    ps=$(( i * 2048 ))
-    pc=$(( ROWS - ps < 2048 ? ROWS - ps : 2048 ))
-    gstart=$(( START + ps ))
-    gend=$(( gstart + pc ))
-    pn=$(part_name "$i")
-    run_duckdb "COPY (
-      WITH r AS (SELECT range AS r FROM range($gstart, $gend))
-      SELECT DATE '$DATE' AS date,
-             printf('%06d', r + 1) AS symbol,
-             CAST((r + 1) * 0.5 AS DOUBLE) AS close,
-             CAST((r + 1) * 100 AS BIGINT) AS volume,
-             CAST(r AS BIGINT) AS rowid
-      FROM r
-    ) TO '$INDEX_DIR/$pn.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, COMPRESSION ZSTD);"
-  done
+  run_duckdb "COPY (
+    WITH r AS (SELECT range AS r FROM range($START, $END))
+    SELECT DATE '$DATE' AS date,
+           printf('%06d', r + 1) AS symbol,
+           CAST((r + 1) * 0.5 AS DOUBLE) AS close,
+           CAST((r + 1) * 100 AS BIGINT) AS volume,
+           CAST(r AS BIGINT) AS rowid
+    FROM r
+  ) TO '$INDEX_DIR/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, COMPRESSION ZSTD);"
 
   # ---- alpha101 group: year/month/date partition, 1 part (RGS 1000) ---------
   ALPHA_DIR="$TABLE_DIR/factor/alpha101/year=2026/month=08/date=$DATE"

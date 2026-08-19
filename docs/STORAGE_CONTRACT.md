@@ -2,14 +2,13 @@
 
 > 本文件是**存储层唯一权威规格**。Reader / Writer / Compaction 的一切实现
 > 必须与本文件一致；任何修改必须先改本文件再改代码。
-> 状态：**v3**（2026-08）。v3 相对 v2 的核心变更：
-> `_table.json` 变为**可选**（缺失时全部默认值 + 自动探测）；`aligned` 字段
-> 重新启用为三模式声明（`all`/`group`/`none`，未声明时按探测降级链自动判定）；
-> Canonical Key = index Group 的 schema（不再写入 manifest）；part 顺序与
-> part_id = 组内合法 parquet 按相对路径字符串排序的索引（不再要求
-> `part-<6位序号>` 命名）；行区间在 aligned 模式下由公式推导（`i*part_rows`）、
-> 探测不满足时退化为 footer 逐文件累加；旧字段（`key`、`canonical_order`、
-> `row_count`、`row_group_size`）向后兼容忽略。
+> 状态：**v4**（2026-08）。要点：`_table.json` **可选**（缺失时全部默认值）；
+> **只有一种对齐模式：`all`（全对齐）**——所有 Group 必须同构（part 数、
+> part 大小、末 part 大小一致），违反即 fail-fast，**无 group/none 模式、
+> 无探测降级链**；Canonical Key = index Group 的 schema（不写入 manifest）；part 顺序
+> 与 part_id = 组内合法 parquet 按相对路径字符串排序的索引（不要求 `part-<6位序号>`
+> 命名）；行区间一律由公式推导（`i*part_rows`）；旧字段（`aligned`、`key`、
+> `canonical_order`、`row_count`、`row_group_size`）向后兼容忽略。
 
 ---
 
@@ -20,13 +19,13 @@
 | Logical Table | 一张逻辑宽表，如 `cnstk_ixday`，对应 `<data_root>/<table_name>/` |
 | Column Group | Logical Table 的一个物理列子集，如 `index`、`factor/alpha101`，对应表内一个目录 |
 | Canonical Row Space | 该表的逻辑行坐标集合 `{0, 1, ..., R-1}`，R = 表行数 |
-| Canonical Key | 定义行语义的列集合（v3：**= index Group 的 schema 列**，不再写入 manifest） |
+| Canonical Key | 定义行语义的列集合（v4：**= index Group 的 schema 列**，不再写入 manifest） |
 | Logical Partition | 按 Key 值划分的互斥行子集（如 `date = 2026-08-17` 的所有行） |
 | Physical Partition | 某个 Group 内一个 Hive 风格目录（如 `date=2026-08-17/` 或 `year=2026/month=2026-08/date=2026-08-17/`），含一组 part 文件 |
 | Part File | 一个 Parquet 文件（任意合法文件名），是 Group 内最小读取单元 |
 | Row Group | Parquet 内 Row Group；本契约约定统一大小 `rg_rows`（默认 16384） |
 | Aligned Scan | 按行坐标直接组装多 Group 向量的扫描，绝不 JOIN |
-| Aligned Mode | 行区间推导模式：`all`（全局公式）/ `group`（组内公式）/ `none`（footer 累加） |
+| Full Alignment | 唯一支持的对齐契约：所有 Group 同构（part 数、part 大小、末 part 大小一致），行区间由公式 `start_row(i) = i * part_rows` 推导 |
 
 ---
 
@@ -35,7 +34,7 @@
 ```
 <data_root>/
 └── <table_name>/                  ← Logical Table
-    ├── _table.json                ← 表级 Manifest（可选，缺失时自动探测，见 §5.1）
+    ├── _table.json                ← 表级 Manifest（可选，缺失时用默认值，见 §5.1）
     ├── index/                     ← Column Group 目录（必选，见 §2.1b）
     │   └── date=2026-08-17/       ← Physical Partition 目录（Hive 风格）
     │       └── part-000000.parquet
@@ -46,8 +45,9 @@
 ```
 
 **硬性规则**：
-1. `_table.json` **可选**：缺失时使用全部默认值（aligned 探测、rg_rows=16384、
-   part_rows=4194304），Group 列表从文件布局发现（§5.2）。
+1. `_table.json` **可选**：缺失时使用全部默认值（rg_rows=16384、
+   part_rows=4194304），Group 列表从文件布局发现（§5.2）。**对齐模式只有一种
+   （all，全对齐）**：缺失/显式声明与否均无差别——数据不满足全对齐即 fail-fast。
 2. `_tmp/` 是唯一临时区（交易目录），**Reader 永不扫描 `_tmp/`**（见 §2.1d）。
 3. 保留前缀/后缀：`_table.json`、`_tmp/`。数据列名、目录名不得与保留名冲突。
    不再保留 `part-` 前缀：part 文件可任意命名。
@@ -99,15 +99,17 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 - **Writer 必须构造式保证**：一个提交事务内，所有 Group 写入**完全相同的行区间
   （相同 start_row + row_count）**；提交原子化（§9）；未完成的交易对 Reader 不可见。
 - **Reader 必须盲信**：Aligned Scan **永不**通过 Key 比较 / JOIN / 查表验证对齐。
-  对齐验证只允许在显式校验模式与测试中使用。
-- 行区间来源（v3）：§3.3 的 part 顺序确定后，行区间按**生效的 Aligned Mode**
-  （§5.1）推导：`all`/`group` 用公式 `start_row(i) = i * part_rows`（组内除最后
-  一个 part 外必须恰好 `part_rows` 行，**对照实际 footer 行数校验，违反即
-   fail-fast**）；`none` 按 footer 行数逐文件累加。
+  对齐验证只允许在显式校验与测试中使用（扫描只做契约校验，见本行区间来源）。
+- 行区间来源（v4）：§3.3 的 part 顺序确定后，行区间**一律**按公式
+  `start_row(i) = i * part_rows` 推导，其中 `part_rows` = index Group 首个 part 的
+  footer 行数。**全对齐契约（无任何模式）**：所有 Group 必须满足
+  a) part 数 == index Group 的 part 数；b) 组内除最后一个 part 外全部恰好
+  `part_rows` 行（对照实际 footer 行数校验，违反即 fail-fast）；c) 总行数一致
+  （隐式保证末 part 大小一致）。不存在 group/none 模式，不存在探测降级。
 - Reader 校验所有已打开 Group 的**总行数完全一致**（== footer 汇总），不一致
   立即报错（fail-fast）。
 
-### 3.3 全局行序（v3 精确定义）
+### 3.3 全局行序（v4 精确定义）
 
 同一 Group 内的 part 按**规范化相对路径（group 根之下，含文件名）的字符串
 字典序**排列（= 该 Group 的行顺序）：
@@ -117,8 +119,8 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 2. **该排序列表中的索引即 part_id**（0, 1, 2, ...）。不再要求 `part-<6位序号>`
    命名，不再按文件名数值排序。
 
-`start_row` 按 §5.1 的模式推导；part 区间两两不相交且并集 == `[0, R)`
-（`ValidateRowSpace` 校验，任何模式下都执行）。
+`start_row` 按 §3.2 的公式推导；part 区间两两不相交且并集 == `[0, R)`
+（`ValidateRowSpace` 校验，始终执行）。
 
 ### 3.4 不变量（Invariant，7 条）
 
@@ -134,7 +136,7 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 
 ## 4. Row Ordering
 
-- 本版本 `canonical_order` 仅支持 `"fixed"`（v2 及更早的 manifest 字段，v3 读端
+- 本版本 `canonical_order` 仅支持 `"fixed"`（v2 及更早的 manifest 字段，v4 读端
   忽略）：行坐标在写入时确定，**永不变更**。（保留未来 `"sorted"` 枚举位，但不实现。）
 - Compaction 必须保持行序与行坐标不变（只能合并文件，不能重排行）。
 - Writer 可选择按 Key 排序写入（利于未来 skip index），但 Reader **不得假设有序**。
@@ -143,7 +145,7 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 
 ## 5. Manifest 规格
 
-### 5.1 `_table.json`（可选；v3）
+### 5.1 `_table.json`（可选；v4）
 
 **`_table.json` 是可选文件**。缺失时全部字段取默认值（下表"默认"列），读取行为
 与"显式写出默认值"完全一致。示例（全部显式）：
@@ -152,7 +154,6 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 {
   "name": "cnstk_ixday",
   "version": 1,
-  "aligned": "all",
   "rg_rows": 16384,
   "part_rows": 4194304,
   "last_txid": 42,
@@ -171,18 +172,9 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 字段语义：
 
 - `name` / `version`：表名与 manifest 版本（可选；写时保留、读时校验 name 与请求一致）。
-- `aligned`（**可选**，三模式声明；默认 = 未声明 → 探测）：
-  - `"all"`：所有 Group 同构（part 数、首 part 行数、末 part 行数全一致）。
-    行区间 `start_row(i) = i * part_rows`（全局同一 part_rows）。
-  - `"group"`：每个 Group 组内规则（除最后一个 part 外全部 == 首 part 行数）；
-    组间可不同。行区间 `start_row(i) = i * group_part_rows`（按组）。
-  - `"none"`：不假设任何规则；行区间由 footer 行数逐文件累加。
-  - **显式声明时强制校验，违反即报错（fail-fast，绝不静默降级）**；
-    **未声明时探测降级链**：先验 `all`（首/末/part 数组间一致），不满足再验
-    `group`（组内全量：除最后 part 外 == 首 part 行数，对照实际 footer），
-    都不满足则 `none`。探测使用 plan 阶段已读到的全部 footer 行数，无额外 IO。
 - `rg_rows`（可选）：默认 Row Group 大小，Writer 按此 flush（默认 16384）。
-- `part_rows`（可选）：目标 part 大小提示（默认 4194304）。
+- `part_rows`（可选）：目标 part 大小提示（默认 4194304）。**读端不使用该值**
+  ——part 大小由 index 首个 part 的 footer 行数决定（§3.2）。
 - `last_txid`：最近一次成功提交的事务号（§9）。无 marker 文件，这是事务的
   唯一记录。Writer/Compactor 每次成功 commit 后 +1。
 - `groups`（**可选**）：Column Group 列表（`"index"` 必含，其余形如 `lv1/lv2`）。
@@ -194,11 +186,10 @@ G 的第 N 行 = 该拼接序列的第 N 行。
     partitioning**，否则 Writer 无法决定目录布局。
   - **Writer 重写 `_table.json` 时必须原样写回 partitioning**，否则显式配置丢失
     （退化为目录推导，可能改变未来写入的目录布局）。
-- **旧字段向后兼容**：v2 的 `key`、`schema_version`、`canonical_order`、
-  `row_count`、`row_group_size` 被读端**忽略**（不报错、不参与任何计算）。
-  v3 的 Canonical Key = index Group 的 schema 列（§1）。
-- **Writer 不再写 `aligned` 字段**（写出的数据由读端探测判定模式）；
-  用户需要显式约束时可手写该字段。
+- **旧字段向后兼容**：`aligned`（v3 三模式）、v2 的 `key`、`schema_version`、
+  `canonical_order`、`row_count`、`row_group_size` 被读端**忽略**（不报错、不参与
+  任何计算）。**对齐模式不存在可配置字段**：全对齐是唯一契约，数据不满足即
+  fail-fast（§3.2）。v4 的 Canonical Key = index Group 的 schema 列（§1）。
 
 ### 5.2 目录/组发现（无显式 groups 时）
 
@@ -236,17 +227,15 @@ G 的第 N 行 = 该拼接序列的第 N 行。
 
 ---
 
-## 7. Part 文件与行区间声明（v3：footer 自描述 + 模式公式）
+## 7. Part 文件与行区间声明（v4：footer 自描述 + 全对齐公式）
 
-v1 的 `*.aligned.json` sidecar 已删除。每 part 的行数与列集合由 **Parquet
-footer** 自描述：
+无 sidecar：每 part 的行数与列集合由 **Parquet footer** 自描述：
 
 - part `row_count` = footer 行数（`NumRows`）；列集合 = footer 列名（文件 schema 顺序）。
-- `start_row` 由 §5.1 的模式决定：
-  - `all`/`group`：`start_row(i) = i * part_rows`（组内校验除最后 part 外全部
-    == `part_rows`，对照实际 footer，违反 fail-fast）；
-  - `none`：footer 行数逐文件累加。
-- 不变量（任何模式下都成立）：同一 Group 内所有 part 的
+- `start_row` 一律由公式推导：`start_row(i) = i * part_rows`，`part_rows` = index
+  Group 首个 part 的 footer 行数。组内校验除最后 part 外全部 == `part_rows`
+  （对照实际 footer，违反 fail-fast）；组间校验 part 数一致（§3.2）。
+- 不变量（始终成立）：同一 Group 内所有 part 的
   `[start_row, start_row+row_count)` 两两不相交，且并集 == `[0, R)`（R = 该
   Group footer 汇总行数）。违反即算数据损坏，扫描报错（`ValidateRowSpace`）。
 - 因没有 sidecar/start_row 声明，**重命名/移动 part 会改变其在全局行序中的位置**；
@@ -259,7 +248,7 @@ footer** 自描述：
 - 列集合按 part 自描述（footer）。Reader 对打开的行区间取**并集**（first-seen 顺序）。
 - 旧 part 没有的列 → 读为 `NULL`（不重写历史）。
 - 同一列类型跨 part 必须一致；不一致 = 错误（Phase 1 不做类型升级）。
-- Canonical Key = index schema（v3），一经创建**不可变更**（除非重建表）。
+- Canonical Key = index schema（v4），一经创建**不可变更**（除非重建表）。
 
 ---
 
@@ -271,8 +260,8 @@ footer** 自描述：
 3. **提交 = 两步**：
    a. 把每个 Group 的 partition 目录 rename 到正式位置（同文件系统，单次 rename 原子）；
    b. 重写 `_table.json`：`last_txid = <txid>`，**原样保留 partitioning**；
-      临时文件写 + 原子 rename。v3 的 `_table.json` 不含行数/Key 字段
-      （行数由 footer + 探测得出）。
+      临时文件写 + 原子 rename。v4 的 `_table.json` 不含行数/Key 字段
+      （行数由 footer 得出 + 全对齐公式推导行区间）。
 4. **Reader 可见性规则**：
    - 一个 part 可见 ⟺ 存在于正式位置（`_tmp/` 内的 part 永不可见，§2.1d）。
    - 崩溃发生在 (a) 与 (b) 之间 → 新 part 已 rename 但 `_table.json.last_txid`
@@ -300,8 +289,8 @@ footer** 自描述：
 2. 组发现：显式 `groups`，或从文件布局推导（§5.2）。
 3. 对每个 Group：glob `*.parquet`（忽略 `_`/`.` 段）→ 读每个 part 的 footer
    （行数 + 列名）→ 推导/读取 partitioning → §3.3 排序（相对路径字符串序）→
-   探测/生效 Aligned Mode（§5.1）→ 推导 start_row（公式或累加）→
-   校验覆盖 `[0, R)` 无重叠无空洞（fail-fast）。
+   全对齐校验（§3.2：part 数 == index、组内非最后 part == part_rows）→
+   推导 start_row（公式）→ 校验覆盖 `[0, R)` 无重叠无空洞（fail-fast）。
 4. 跨 Group 校验：所有 Group 的 footer 汇总行数**完全一致**（§3.2），否则报
    "alignment violation"。
 5. 结果：`(group, [part + 行区间])` 列表 = 扫描计划。该计划可缓存（§12）。
@@ -321,8 +310,8 @@ footer** 自描述：
 - Row Group Pruning：Parquet min/max 统计。
 - Projection：只读被选列、只开被选 Group。
 - **跨 leaf 传播（固定相交）**：各 leaf 的 partition pruning 结果映射到统一
-  Logical Row Space 坐标后**相交**为一个全局扫描区间（`IntersectIntervals`）。
-  读端**忽略**旧 v1 的 `aligned=false`（UnionIntervals）语义。
+  Logical Row Space 坐标后**相交**为一个全局扫描区间（`IntersectIntervals`，
+  固定行为，不做 Union 并集）。
 
 ---
 
@@ -331,11 +320,11 @@ footer** 自描述：
 | 情形 | 行为 |
 |------|------|
 | 表目录不存在 | 报错，指明路径（"table directory does not exist"） |
-| `_table.json` JSON 非法 / `aligned` 值非法 | 报错，指明路径 |
+| `_table.json` JSON 非法 | 报错，指明路径 |
 | manifest `name`（若写）与请求表名不一致 | 报错 |
 | `groups`（若写）不含 `index` 或含非 `lv1/lv2` 条目 | 报错 |
-| 显式 `aligned: all/group` 但数据不满足（组内非最后 part != part_rows） | 报错（fail-fast，不降级） |
-| 显式 `aligned: all` 但组间 part 数/大小不一致 | 报错（fail-fast） |
+| 组间 part 数不一致（某组 part 数 != index） | 报错 "full alignment required"（fail-fast） |
+| 组内非最后 part 行数 != `part_rows` | 报错 "full alignment required"（fail-fast） |
 | Group 的 part 区间不覆盖 `[0,R)` 或有重叠 | 报错 "alignment violation" |
 | 各 Group footer 汇总行数不一致 | 报错 "alignment violation"（跨 Group） |
 | 同一 Group 推导出的分区段格式冲突 | 报错 |
@@ -377,3 +366,8 @@ footer** 自描述：
       fail-fast / 未声明探测降级链）；Canonical Key = index schema；part 顺序
       = 相对路径字符串序（索引即 part_id）；行区间公式推导（校验 footer）；
       旧字段向后兼容忽略
+- [x] v4：**删除三模式与探测降级链，只保留全对齐（all）**——`aligned` 字段读端
+      忽略；组间 part 数/大小必须一致、组内非最后 part == part_rows，违反即
+      fail-fast（"full alignment required"）；行区间一律公式 `i*part_rows`；
+      数据生成器/测试/文档全部改为全对齐布局；Compaction 改为单事务处理所有组
+      （保持组间 part 数一致，per-group compact 已删除）

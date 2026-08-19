@@ -5,10 +5,9 @@
 # executes a Tier (A smoke / B main / C stress) or an explicit selection across
 # the engine groups, measuring COLD + WARM per test point.
 #
-# Engines: D-WIDE D-JOIN A-ALIGNED A-NORMAL (+ P-CONCAT P-JOIN if polars is
-# importable). A-NORMAL is the plugin's aligned=false mode (union-interval
-# per-leaf pruning, NOT a hash key-join); A-ALIGNED is aligned=true (position
-# assembly + intersection pruning).
+# Engines: D-WIDE D-JOIN A-ALIGNED (+ P-CONCAT P-JOIN if polars is
+# importable). A-ALIGNED is the aligned reader (full alignment + position
+# assembly + intersection pruning), not a hash key-join.
 #
 # Usage:
 #   bash scripts/run_multi_bench.sh --tier A [--rows N] [--width N]
@@ -86,7 +85,6 @@ FIELDSET=$(layout_fieldset "$WIDTH")
 echo "== Tier $TIER: rows=$ROWS width=$WIDTH (alpha=$ALPHA fs=$FIELDSET) sparse=$SPARSITY engines=${ENGINES[*]} threads=${THREADS[*]} =="
 
 ALIGNED_TABLE="bench_mb"        # physical table
-NORMAL_TABLE="bench_mb_normal"  # sibling with flipped _table.json (reader ignores the flag)
 
 # ---------- data generation (once per rows/width/sparsity) --------------------------
 GEN_FLAGS=(--rows "$ROWS" --width "$WIDTH" --sparsity "$SPARSITY" --aligned true --out "$OUT" --tag mb)
@@ -96,22 +94,6 @@ if [ "$need_gen" = 1 ] && [ "$FLAG_NOREGEN" = 0 ]; then
   bash "$ROOT/scripts/gen_multi_bench.sh" "${GEN_FLAGS[@]}"
 fi
 if [ ! -f "$OUT/$ALIGNED_TABLE/_table.json" ]; then echo "aligned table missing (use --no-regen only if data exists): $OUT/$ALIGNED_TABLE"; exit 1; fi
-
-# A-NORMAL sibling: symlink the group dirs + flip the aligned flag (kept for
-# historical comparability; the reader now ignores the flag so behavior matches
-# A-ALIGNED). Always rebuilt so it stays in lockstep with the main table's
-# row_count (a stale sibling from an earlier scale caused a row_count mismatch).
-if [ -n "$(printf '%s\n' "${ENGINES[@]}" | grep -x 'A-NORMAL' || true)" ]; then
-  rm -rf "$OUT/$NORMAL_TABLE"; mkdir -p "$OUT/$NORMAL_TABLE"
-  ln -s "$(readlink -f "$OUT/$ALIGNED_TABLE/index")" "$OUT/$NORMAL_TABLE/index"
-  ln -s "$(readlink -f "$OUT/$ALIGNED_TABLE/factor")" "$OUT/$NORMAL_TABLE/factor"
-  ln -s "$(readlink -f "$OUT/$ALIGNED_TABLE/fieldset")" "$OUT/$NORMAL_TABLE/fieldset"
-  python3 - "$OUT/$ALIGNED_TABLE/_table.json" "$OUT/$NORMAL_TABLE/_table.json" "$NORMAL_TABLE" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1])); d['aligned']=False; d['name']=sys.argv[3]
-json.dump(d, open(sys.argv[2],'w'))
-PY
-fi
 
 BASE="$OUT/bench_baseline_mb"
 WIDE="$BASE/wide.parquet"; JOINAL="$BASE/join_alpha.parquet"; JOINFS="$BASE/join_fs.parquet"
@@ -155,7 +137,6 @@ engine_sql() { # e q f sel rows -> sql
   where=$(filter_of "$f" "$sel" "$rows")
   case "$e" in
     A-ALIGNED) tbl="$ALIGNED_TABLE"; echo "SELECT count(*) FROM (SELECT $proj FROM aligned_table('$tbl')$where);";;
-    A-NORMAL)  tbl="$NORMAL_TABLE";  echo "SELECT count(*) FROM (SELECT $proj FROM aligned_table('$tbl')$where);";;
     D-WIDE)    echo "SELECT count(*) FROM (SELECT $proj FROM read_parquet('$WIDE')$where);";;
     D-JOIN)
       # index rt join alpha on rowid=rowid_alpha join fieldset on rowid=rowid_fs
@@ -181,9 +162,8 @@ now_ns(){ date +%s%N; }
 elapsed(){ echo "scale=9; ($2 - $1)/1000000000" | bc -l; }
 # Repeat the SAME query REPEATS times in ONE duckdb process (separated by ';')
 # and time the whole batch, then divide by REPEATS. This amortizes the per-
-# process startup cost (~0.02s) that otherwise dominates tiny/cached datasets
-# (e.g. the A-ALIGNED-vs-A-NORMAL gap seen earlier was this startup noise, not
-# the engine). warm_s = mean per query.
+# process startup cost (~0.02s) that otherwise dominates tiny/cached datasets.
+# warm_s = mean per query.
 REPEATS=${REPEATS:-5}
 # ddb_run <th> <pre> <sql...> — run DuckDB, feeding the SQL through a temp file
 # on stdin so very wide queries (W3, thousands of columns) that overflow ARG_MAX
@@ -213,7 +193,7 @@ run_one(){ # e q f sel th -> prints "cold warm"
     printf '%s' "$out" | sed 's/TIMES //'
     return
   fi
-  if [ "$e" = "A-ALIGNED" ] || [ "$e" = "A-NORMAL" ]; then pre="SET aligned_data_root='$OUT';"; else pre=""; fi
+  if [ "$e" = "A-ALIGNED" ]; then pre="SET aligned_data_root='$OUT';"; else pre=""; fi
   # cold: single fresh-process run (first touch; still includes startup)
   a=$(now_ns); ddb_run "$th" "$pre" "$sql" >/dev/null 2>&1 || true; b=$(now_ns); cold=$(elapsed "$a" "$b")
   # warm: mean over REPEATS in ONE process (startup amortized out)
@@ -221,12 +201,11 @@ run_one(){ # e q f sel th -> prints "cold warm"
   printf '%.6f %.6f' "$cold" "$warm"
 }
 
-# ---------- correctness guard: A-ALIGNED vs A-NORMAL on the same data ---------------
+# ---------- correctness guard: partition pruning on a non-first partition ---------------
 sc_a=$("$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM aligned_table('$ALIGNED_TABLE') WHERE date=DATE '2026-09-02';" | tail -1)
-sc_n=$("$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM aligned_table('$NORMAL_TABLE') WHERE date=DATE '2026-09-02';" | tail -1)
 expected=$((ROWS/4))
-for v in "$sc_a" "$sc_n"; do if [ "$v" != "$expected" ]; then echo "SELF-CHECK FAIL: got '$v' expected $expected"; exit 1; fi; done
-echo "SELF-CHECK OK: A-ALIGNED & A-NORMAL prune to $expected rows on non-first partition."
+if [ "$sc_a" != "$expected" ]; then echo "SELF-CHECK FAIL: got '$sc_a' expected $expected"; exit 1; fi
+echo "SELF-CHECK OK: A-ALIGNED prunes to $expected rows on non-first partition."
 
 # cross-engine row-count consistency: every engine must return ROWS/4 rows for
 # Q2+F2+S0 (date partition point). This proves all engines observe the SAME
@@ -236,7 +215,6 @@ check_count(){ # engine -> rows after (date='2026-09-02')
   local e="$1"
   case "$e" in
     A-ALIGNED) "$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM (SELECT date,symbol,close FROM aligned_table('$ALIGNED_TABLE') WHERE date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
-    A-NORMAL)  "$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM (SELECT date,symbol,close FROM aligned_table('$NORMAL_TABLE') WHERE date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
     D-WIDE)    "$DUCKDB" -light-mode -csv -noheader -c "SELECT count(*) FROM (SELECT date,symbol,close FROM read_parquet('$WIDE') WHERE date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
     D-JOIN)    "$DUCKDB" -light-mode -csv -noheader -c "SELECT count(*) FROM (SELECT i.date,i.symbol,i.close FROM read_parquet('$BASE/join_index.parquet') i JOIN read_parquet('$JOINAL') a ON i.rowid=a.rowid_alpha WHERE i.date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
     P-CONCAT|P-JOIN)
@@ -296,7 +274,6 @@ REPORT="$ROOT/docs/BENCH_MULTI.md"
   echo "> Column layout: index 20 (date,symbol,close,volume,rowid + ix001..ix015),";
   echo "> alpha$ALPHA sparse (${SPARSITY}% NULL), fs$FIELDSET. Q1~3 Q2~35 Q3~500 Q4~5000 Q5=ALL.";
   echo "> warm = fresh-process 2nd run (page cache warmed); cold = 1st touch in fresh process.";
-  echo "> A-NORMAL is the plugin's aligned=false (union-interval per-leaf pruning), not a key join.";
 } > "$REPORT"
 
 CSV="$ROOT/scripts/bench_multi_output.csv"
