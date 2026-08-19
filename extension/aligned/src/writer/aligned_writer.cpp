@@ -341,10 +341,10 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 	// staged _tmp tree is removed before rethrowing.
 	auto &fs = FileSystem::GetFileSystem(context);
 
-	idx_t start_row = bind.start_row == DConstants::INVALID_INDEX ? bind.plan.table.row_count : bind.start_row;
-	if (start_row != bind.plan.table.row_count) {
+	idx_t start_row = bind.start_row == DConstants::INVALID_INDEX ? bind.plan.row_count : bind.start_row;
+	if (start_row != bind.plan.row_count) {
 		throw IOException("Aligned table '%s': append must start at the current table end (row %llu); got %llu",
-		                  bind.plan.table.name, bind.plan.table.row_count, start_row);
+		                  bind.plan.table.name, bind.plan.row_count, start_row);
 	}
 	idx_t new_total = start_row + bind.source_rows;
 
@@ -413,7 +413,7 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &gs = gstates[gi];
 			gs.group = &bind.plan.groups[gi];
-			gs.rgs = bind.plan.table.row_group_size > 0 ? bind.plan.table.row_group_size : 131072;
+			gs.rgs = bind.plan.table.rg_rows > 0 ? bind.plan.table.rg_rows : 131072;
 			gs.col_names = bind.group_columns[gi];
 			for (auto &col : bind.group_columns[gi]) {
 				gs.col_types.push_back(reader->columns[needed_file_idx[needed_pos[col]]].type);
@@ -581,10 +581,7 @@ void AlignedWriteFunction(ClientContext &context, TableFunctionInput &data, Data
 			}
 			string table_manifest =
 			    "{\"name\":\"" + JsonEscape(plan.table.name) + "\",\"version\":" + to_string(plan.table.version) +
-			    ",\"schema_version\":" + to_string(plan.table.schema_version) + ",\"key\":" +
-			    JsonStringArray(plan.table.key) + ",\"canonical_order\":\"" + JsonEscape(plan.table.canonical_order) +
-			    "\",\"row_count\":" + to_string(new_total) + ",\"row_group_size\":" +
-			    to_string(plan.table.row_group_size);
+			    ",\"rg_rows\":" + to_string(plan.table.rg_rows);
 			if (plan.table.part_rows > 0) {
 				table_manifest += ",\"part_rows\":" + to_string(plan.table.part_rows);
 			}

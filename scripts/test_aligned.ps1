@@ -144,6 +144,32 @@ $ErrorActionPreference = $prevEAP
 if ($LASTEXITCODE -ne 0 -and $out -match "two-level path") { Write-Host 'PASS: 搂2.1c one-level group rejected' } else { Write-Host "FAIL: 搂2.1c one-level group ($out)"; $script:failures++ }
 Remove-Item (Join-Path $dataRoot 'badlvl') -Recurse -Force
 
+# --- v3 contract: optional _table.json + aligned mode probing ----------------
+# A table without _table.json: groups are discovered from the file layout and
+# the aligned mode degrades automatically (cnstk_ixday's 2048/952 parts are
+# not regular -> "none" -> footer accumulation).
+$v3Table = Join-Path $dataRoot 'v3_notable'
+Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $v3Table -Recurse -Force
+Remove-Item (Join-Path $v3Table '_table.json') -Force
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; WITH t AS (SELECT * FROM aligned_table('v3_notable')) SELECT count(*), sum(CASE WHEN rowid != rowid_alpha OR rowid != rowid_ma THEN 1 ELSE 0 END) FROM t;"
+$vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','
+Expect-Equal 'v3 no-manifest rows (probe->none)' ([long]$vals[0]) 6000
+Expect-Equal 'v3 no-manifest misaligned' ([long]$vals[1]) 0
+# Declared "all" on irregular data must fail fast (never silently degrade)
+'{"name":"v3_notable","version":1,"aligned":"all","rg_rows":16384,"part_rows":4194304}' | Set-Content -Path (Join-Path $v3Table '_table.json') -Encoding Ascii
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('v3_notable');" 2>&1 | Out-String
+$ErrorActionPreference = $prevEAP
+if ($LASTEXITCODE -ne 0 -and $out -match "aligned mode 'all' declared") { Write-Host 'PASS: v3 declared-all on irregular data rejected' } else { Write-Host "FAIL: v3 declared-all ($out)"; $script:failures++ }
+# Declared "none" reads the same irregular data fine
+'{"name":"v3_notable","version":1,"aligned":"none","rg_rows":16384,"part_rows":4194304}' | Set-Content -Path (Join-Path $v3Table '_table.json') -Encoding Ascii
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; WITH t AS (SELECT * FROM aligned_table('v3_notable')) SELECT count(*), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM t;"
+$vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','
+Expect-Equal 'v3 declared-none rows' ([long]$vals[0]) 6000
+Expect-Equal 'v3 declared-none misaligned' ([long]$vals[1]) 0
+Remove-Item $v3Table -Recurse -Force
+
 # --- error cases (expected failures 鈥?must not terminate the script) ---------
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
@@ -153,7 +179,7 @@ $out2 = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table
 $code2 = $LASTEXITCODE
 $ErrorActionPreference = $prevEAP
 if ($code1 -ne 0 -and $out -match 'no data root configured') { Write-Host 'PASS: missing root error' } else { Write-Host "FAIL: missing root error ($out)"; $script:failures++ }
-if ($code2 -ne 0 -and $out2 -match '_table.json') { Write-Host 'PASS: missing table error' } else { Write-Host "FAIL: missing table error ($out2)"; $script:failures++ }
+if ($code2 -ne 0 -and $out2 -match 'does not exist') { Write-Host 'PASS: missing table error' } else { Write-Host "FAIL: missing table error ($out2)"; $script:failures++ }
 
 Write-Host ''
 if ($failures -eq 0) {

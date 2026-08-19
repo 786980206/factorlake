@@ -104,18 +104,17 @@ fieldset/ma/      year=2026/month=08/
 
 ## 5. Manifest（轻量，不做 Catalog DB）
 
-目录本身就是 Catalog，文件发现用 Hive layout。每张 Logical Table **一个** `_table.json`
-（**没有 `_group.json`、没有 part sidecar、没有 commit marker**，v2 契约）：
+目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**（v3 契约；
+**没有 `_group.json`、没有 part sidecar、没有 commit marker**）：缺失时全部用
+默认值（aligned 探测、rg_rows=16384、part_rows=4194304），Group 列表从文件布局
+发现（glob `**/*.parquet` → 跳过 `name=value` 分区段 → 最长非分区段后缀即 Group）：
 
 ```json
 {
   "name": "cnstk_ixday",
   "version": 1,
-  "schema_version": 1,
-  "key": ["date", "symbol"],
-  "canonical_order": "fixed",
-  "row_count": 1234567890,
-  "row_group_size": 131072,
+  "aligned": "all",
+  "rg_rows": 16384,
   "part_rows": 4194304,
   "last_txid": 42,
   "groups": ["index", "factor/alpha101", "factor/alpha191", "fieldset/ema",
@@ -130,13 +129,23 @@ fieldset/ma/      year=2026/month=08/
 }
 ```
 
-- `row_count` 只记账，**Reader 以 Parquet footer 汇总为准**（所有 Group 必须一致）。
+- `aligned`（可选，三模式）：`"all"`（组间同构，全局公式）/ `"group"`（组内规则，
+  按组公式）/ `"none"`（footer 累加）。**显式声明 → 校验失败即 fail-fast，不降级**；
+  **未声明 → 探测降级链 all→group→none**（探测用 plan 阶段已读的 footer 行数，
+  无额外 IO）。**Writer 不写 aligned 字段**（数据由读端探测判定）。
+- `rg_rows`（可选，默认 16384）：Writer flush 的 Row Group 大小。
+- `part_rows`（可选，默认 4194304）：目标 part 大小提示。
 - `last_txid`：最近成功提交的事务号（Writer/Compactor 每次 commit +1；无 marker 文件）。
 - `partitioning`（可选）：`group → 有序目录模板`，模板只允许 `year=%Y` / `month=%Y-%m` /
   `date=%Y-%m-%d`，source 固定 `date`。**空表起步必须显式给出**；否则从目录结构推导
   （仅识别这三种段，未知 `name=value` 段忽略）；Writer 重写 manifest 必须原样写回。
-- 行区间契约：同一 Group 的 part 按 (分区目录字符串序, part 序号数值序) 排序，
-  start_row 由 footer 行数累加；跨 Group 总行数必须完全一致（否则 fail-fast）。
+- **Canonical Key = index Group 的 schema 列**（v3，不再写进 manifest）。
+- **旧字段向后兼容忽略**：v2 的 `key` / `schema_version` / `canonical_order` /
+  `row_count` / `row_group_size` 读端忽略，不参与计算。
+- 行区间契约（v3）：part 顺序 = **组内相对路径字符串排序，索引即 part_id**（不再
+  要求 `part-%06llu` 命名）；`all`/`group` 用公式 `start_row(i) = i*part_rows`
+  （组内非最后 part 必须恰好 part_rows 行，对照 footer 校验，违反 fail-fast）；
+  `none` 由 footer 行数累加。跨 Group 总行数必须完全一致（否则 fail-fast）。
 
 ---
 
@@ -531,6 +540,39 @@ bash scripts/test_aligned.sh
   - 排查路径备忘：`Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000}` 看崩溃
     偏移；dumpbin `/headers` 查段表判断偏移属哪个段；obj 内容特征字符串比对（master 版
     "sidecar declares" vs alpha 版 "last_txid"）确认混编
+- [x] **v3 契约实施完成（2026-08）**：`_table.json` 可选 + aligned 三模式 + 探测降级链
+  - **契约**（docs/STORAGE_CONTRACT.md v3）：`_table.json` 缺失时全部默认值（aligned
+    探测、rg_rows=16384、part_rows=4194304）+ glob 组发现（`**/*.parquet` → 跳过
+    `name=value` 段 → 最长非分区后缀即 Group）；`aligned` 三模式 `all`/`group`/`none`，
+    **显式声明 fail-fast 不降级**、**未声明探测降级链 all→group→none**（用 plan 阶段
+    已读 footer 行数，无额外 IO）；**Canonical Key = index Group 的 schema**（不再写
+    manifest）；part 顺序 = **组内相对路径字符串排序、索引即 part_id**（不再要求
+    `part-%06llu`）；行区间 `all`/`group` 用公式 `start_row(i)=i*part_rows`（组内
+    非最后 part 对照 footer 校验，违反 fail-fast）、`none` 累加；旧字段
+    （key/schema_version/canonical_order/row_count/row_group_size）向后兼容忽略
+  - **代码**：manifest.hpp/cpp 重写（TryReadTableManifest/组发现/探测链/公式行区间）；
+    writer/compactor 写新字段（aligned 不写、rg_rows 替代 row_group_size、行数改为
+    plan.row_count 记账）；scan 只改 total_rows 来源；表目录不存在报错信息变化
+  - **关键设计修正**：writer 写入的数据（index 每天 65536×3+53392 vs alpha 每天
+    250000）**天然不是 all**（组间 part_rows 不同）→ **writer 不写 aligned 字段**，
+    由读端探测判定（compact 前后模式可能不同：compacttest 初始 all、compact 后
+    index 2×2000+alpha 1×4000 → 降级 group）
+  - **探测语义修正**："group" 判据 = 组内**全量**校验（除最后 part 外 == 首 part 行数，
+    读 plan 阶段全部 footer，无额外 IO），不是"1st==2nd"弱猜测——bench_ixday 的
+    index（16 文件，中间 part-000003 仅 53392 行）会通过 1st==2nd 但违反公式 → 必须
+    全量校验后降级 none（否则 alignment violation 误报）
+  - **未声明 vs 显式区分**：`TableManifest.aligned_declared` 标志——默认值 "all" 不能
+    被误判为显式声明（cnstk_ixday 不规则数据在无声明时探测降级 none，若被当成显式
+    all 会 fail-fast 误报）
+  - **验收**：test_aligned.ps1 28/28 PASS（新增 5 个 v3 断言：无 manifest 探测+glob
+    组发现、显式 all 不规则数据 fail-fast、显式 none 正常）；test_writer/test_compaction/
+    test_parallel 全 PASS；v3 专项场景全部验证（无 manifest 6000 行 mis=0、显式
+    none/group/all 满足均正常、显式 all 不满足 fail-fast）
+  - **事故教训**：`git stash` 会把 **duckdb/ 子模块的本地补丁**（tools/shell/CMakeLists.txt
+    的 DUCKDB_SHELL_OUTPUT_NAME 支持）也 stash 进**子模块自己的 stash 队列**（主仓
+    stash list 看不到）→ 表现为主仓 `git stash pop` 报 "No stash entries"、子模块补丁
+    "丢失"、cmake 重配后 build.ninja 只剩 duckdb.exe 目标。恢复：`git -C duckdb stash list/pop`。
+    避免在含子模块本地补丁的仓库用 `git stash`（改用 `git stash -- <路径>` 或先提交）
 
 ### Phase 1 关键经验（必须记住，避免重踩）：`Copy(source, target, source_count, source_offset, target_offset)`
    中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。

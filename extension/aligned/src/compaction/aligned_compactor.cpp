@@ -103,9 +103,7 @@ static void BumpLastTxid(FileSystem &fs, const TablePlan &plan, idx_t txid) {
 		partitioning += "}";
 	}
 	string manifest = "{\"name\":\"" + JsonEscape(table.name) + "\",\"version\":" + to_string(table.version) +
-	                  ",\"schema_version\":" + to_string(table.schema_version) + ",\"key\":" + JsonStringArray(table.key) +
-	                  ",\"canonical_order\":\"" + JsonEscape(table.canonical_order) + "\",\"row_count\":" +
-	                  to_string(table.row_count) + ",\"row_group_size\":" + to_string(table.row_group_size);
+	                  ",\"rg_rows\":" + to_string(table.rg_rows);
 	if (table.part_rows > 0) {
 		manifest += ",\"part_rows\":" + to_string(table.part_rows);
 	}
@@ -271,7 +269,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			}
 
 			// Staged new part
-			idx_t rgs = bind.plan.table.row_group_size > 0 ? bind.plan.table.row_group_size : 131072;
+			idx_t rgs = bind.plan.table.rg_rows > 0 ? bind.plan.table.rg_rows : 131072;
 			string part_name = StringUtil::Format("part-%06llu", (unsigned long long)NextPartIndex(fs, dir));
 			string staged_dir = tmp_root + "/" + group.manifest.group;
 			fs.CreateDirectoriesRecursive(staged_dir);

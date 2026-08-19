@@ -284,7 +284,7 @@ static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, cons
 	auto result = make_uniq<AlignedTableBindData>();
 	BuildTablePlan(context, root, table, result->plan);
 	ResolveColumnTypes(context, result->plan, result->names, result->types);
-	result->total_rows = result->plan.table.row_count;
+	result->total_rows = result->plan.row_count;
 	return_types = result->types;
 	names = result->names;
 	return std::move(result);

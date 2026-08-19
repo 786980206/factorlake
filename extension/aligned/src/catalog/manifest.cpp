@@ -97,7 +97,6 @@ vector<string> GetStringArray(duckdb_yyjson::yyjson_val *obj, const char *key, c
 }
 
 //! Parses the optional _table.json "partitioning" map (group -> templates).
-//! The group manifests are gone; partitioning lives in the table manifest.
 void ParsePartitioning(duckdb_yyjson::yyjson_val *obj, case_insensitive_map_t<vector<PartitionTemplate>> &out,
                        const string &path) {
 	auto val = duckdb_yyjson::yyjson_obj_get(obj, "partitioning");
@@ -154,68 +153,133 @@ bool HasIgnoredPathSegment(const string &path) {
 	return false;
 }
 
-//! Parses a "part-%06llu" file name; returns false when malformed.
-bool ParsePartName(const string &base_name, idx_t &part_id) {
-	if (base_name.rfind("part-", 0) != 0) {
-		return false;
+//! Derives the group name from a normalized part path: strips the file name,
+//! then walks the directory segments (relative to the table root) from the
+//! end towards the root, skipping partition segments (containing '='), until
+//! the first non-partition segment. The group is the longest suffix of
+//! non-partition segments below the table root ("index", "factor/alpha101",
+//! ...). Returns "" when the file sits directly in the table root.
+string DeriveGroupFromPath(const string &norm_path, const string &table_prefix) {
+	string rel = norm_path;
+	if (norm_path.size() > table_prefix.size() && StringUtil::StartsWith(norm_path, table_prefix + "/")) {
+		rel = norm_path.substr(table_prefix.size() + 1);
 	}
-	string num_str = base_name.substr(5);
-	if (num_str.empty() || num_str.size() > 20) {
-		return false;
-	}
-	for (auto c : num_str) {
-		if (c < '0' || c > '9') {
-			return false;
+	string dir = rel;
+	auto slash = dir.find_last_of('/');
+	dir = slash == string::npos ? "" : dir.substr(0, slash);
+	string group_rel;
+	while (!dir.empty()) {
+		auto s = dir.find_last_of('/');
+		string seg = s == string::npos ? dir : dir.substr(s + 1);
+		if (seg.find('=') != string::npos) {
+			// partition segment: skipped
+		} else if (group_rel.empty()) {
+			group_rel = seg;
+		} else {
+			group_rel = seg + "/" + group_rel;
 		}
+		dir = s == string::npos ? "" : dir.substr(0, s);
 	}
-	try {
-		part_id = std::stoull(num_str);
-	} catch (...) {
-		return false;
-	}
-	return true;
+	return group_rel;
+}
+
+//! Normalizes a path to '/' separators (absolute path expected).
+string NormalizePath(const string &path) {
+	string norm = path;
+	std::replace(norm.begin(), norm.end(), '\\', '/');
+	return norm;
 }
 
 } // namespace
 
-TableManifest ReadTableManifest(FileSystem &fs, const string &manifest_path) {
+bool TryReadTableManifest(FileSystem &fs, const string &manifest_path, TableManifest &manifest) {
+	if (!fs.FileExists(manifest_path)) {
+		return false;
+	}
 	string content = ReadTextFile(fs, manifest_path);
-	TableManifest manifest;
 	WithJsonObject(manifest_path, content, [&](duckdb_yyjson::yyjson_val *root) {
-		manifest.name = GetRequiredString(root, "name", manifest_path);
+		GetStringField(root, "name", manifest.name);
 		idx_t version = 1;
 		if (GetUIntField(root, "version", version)) {
 			manifest.version = version;
 		}
-		idx_t schema_version = 1;
-		if (GetUIntField(root, "schema_version", schema_version)) {
-			manifest.schema_version = schema_version;
+		string aligned_mode;
+		if (GetStringField(root, "aligned", aligned_mode)) {
+			if (aligned_mode != "all" && aligned_mode != "group" && aligned_mode != "none") {
+				throw IOException("Aligned table: manifest '%s' has unsupported aligned mode '%s' (expected "
+				                  "'all', 'group' or 'none')",
+				                  manifest_path, aligned_mode);
+			}
+			manifest.aligned_mode = aligned_mode;
+			manifest.aligned_declared = true;
 		}
-		manifest.key = GetStringArray(root, "key", manifest_path, true);
-		string canonical_order;
-		if (GetStringField(root, "canonical_order", canonical_order)) {
-			manifest.canonical_order = canonical_order;
-		}
-		// row_count is bookkeeping only (written by the writer); the reader
-		// derives the total row count from the Parquet footers.
-		GetUIntField(root, "row_count", manifest.row_count);
-		GetUIntField(root, "row_group_size", manifest.row_group_size);
+		// Legacy fields (key, canonical_order, row_count, row_group_size) are
+		// ignored for backwards compatibility.
+		GetUIntField(root, "rg_rows", manifest.rg_rows);
 		GetUIntField(root, "part_rows", manifest.part_rows);
 		GetUIntField(root, "last_txid", manifest.last_txid);
-		manifest.groups = GetStringArray(root, "groups", manifest_path, true);
+		manifest.groups = GetStringArray(root, "groups", manifest_path, false);
 		ParsePartitioning(root, manifest.partitioning, manifest_path);
 	});
-	if (manifest.key.empty()) {
-		throw IOException("Aligned table: manifest '%s' declares an empty key", manifest_path);
+	return true;
+}
+
+//! Opens a part file and reads footer metadata (row count + columns).
+static PartInfo ReadPartFooter(ClientContext &context, const string &path) {
+	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
+	PartInfo part;
+	part.path = path;
+	auto slash = path.find_last_of("/\\");
+	part.part_name = slash == string::npos ? path : path.substr(slash + 1);
+	if (StringUtil::EndsWith(part.part_name, ".parquet")) {
+		part.part_name = part.part_name.substr(0, part.part_name.size() - 8);
 	}
-	if (manifest.groups.empty()) {
-		throw IOException("Aligned table: manifest '%s' declares no column groups", manifest_path);
+	part.row_count = reader->NumRows();
+	for (auto &col : reader->columns) {
+		part.columns.push_back(col.name);
 	}
-	if (manifest.canonical_order != "fixed") {
-		throw IOException("Aligned table: manifest '%s' has unsupported canonical_order '%s' (only 'fixed' is supported)",
-		                  manifest_path, manifest.canonical_order);
+	return part;
+}
+
+//! Row-group size of the first row group of a part file (0 when unavailable).
+static idx_t FirstRowGroupSize(ClientContext &context, const string &path) {
+	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
+	if (reader->metadata && reader->metadata->metadata && !reader->metadata->metadata->row_groups.empty()) {
+		return reader->metadata->metadata->row_groups[0].num_rows;
 	}
-	return manifest;
+	return 0;
+}
+
+//! Probe pass: reads the first and the last part of every group and records
+//! their row counts (and the first row-group size of the first part).
+struct ProbeInfo {
+	idx_t part_rows = 0; // rows of the first part
+	idx_t last_rows = 0; // rows of the last part
+	idx_t rg_rows = 0;   // first row-group size of the first part
+};
+
+static ProbeInfo ProbeGroup(ClientContext &context, GroupPlan &group) {
+	ProbeInfo info;
+	if (group.parts.empty()) {
+		return info;
+	}
+	info.part_rows = group.parts[0].row_count;
+	info.last_rows = group.parts.back().row_count;
+	// info.rg_rows = FirstRowGroupSize(context, group.parts[0].path);
+	return info;
+}
+
+//! Validates the group-level formula precondition against the ACTUAL footer
+//! row counts: every part except the last must hold exactly part_rows rows
+//! (part rows were read at plan time — no extra IO). Returns the index of the
+//! violating part, or DConstants::INVALID_INDEX when the group is aligned.
+static idx_t FindAlignedViolation(const GroupPlan &group, idx_t part_rows) {
+	for (idx_t i = 0; i + 1 < group.parts.size(); i++) {
+		if (group.parts[i].row_count != part_rows) {
+			return i;
+		}
+	}
+	return DConstants::INVALID_INDEX;
 }
 
 void BuildTablePlan(ClientContext &context, const string &root_path, const string &table_name, TablePlan &plan) {
@@ -227,25 +291,63 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		root.pop_back();
 	}
 	plan.table_path = root + "/" + table_name;
-	plan.table = ReadTableManifest(fs, plan.table_path + "/_table.json");
-	if (!StringUtil::CIEquals(plan.table.name, table_name)) {
-		throw IOException("Aligned table: manifest name '%s' does not match requested table '%s'", plan.table.name,
-		                  table_name);
+
+	// Optional _table.json; defaults apply when absent
+	TableManifest manifest;
+	if (TryReadTableManifest(fs, plan.table_path + "/_table.json", manifest)) {
+		plan.table = std::move(manifest);
+		if (!plan.table.name.empty() && !StringUtil::CIEquals(plan.table.name, table_name)) {
+			throw IOException("Aligned table: manifest name '%s' does not match requested table '%s'",
+			                  plan.table.name, table_name);
+		}
+	} else {
+		if (!fs.DirectoryExists(plan.table_path)) {
+			throw IOException("Aligned table '%s': table directory does not exist at '%s'", table_name,
+			                  plan.table_path);
+		}
+		plan.table = TableManifest(); // defaults: aligned=all, rg_rows=16384, part_rows=4194304
+	}
+	plan.aligned_mode = plan.table.aligned_mode;
+	string table_prefix = NormalizePath(plan.table_path);
+
+	// Group discovery: explicit list from the manifest wins; otherwise every
+	// directory that directly contains part files (partition segments
+	// "name=value" stripped) is a column group.
+	vector<string> group_names = plan.table.groups;
+	if (group_names.empty()) {
+		auto files = fs.GlobFiles(table_prefix + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
+		case_insensitive_set_t seen;
+		for (auto &file : files) {
+			if (HasIgnoredPathSegment(file.path)) {
+				continue;
+			}
+			string group = DeriveGroupFromPath(NormalizePath(file.path), table_prefix);
+			if (group.empty()) {
+				throw IOException("Aligned table '%s': part file '%s' sits directly in the table root "
+				                  "(no column group directory)",
+				                  table_name, file.path);
+			}
+			if (seen.insert(group).second) {
+				group_names.push_back(group);
+			}
+		}
 	}
 
 	// Contract §2.1b: the 'index' group is mandatory
 	bool has_index = false;
-	for (auto &g : plan.table.groups) {
+	for (auto &g : group_names) {
 		if (StringUtil::CIEquals(g, "index")) {
 			has_index = true;
 			break;
 		}
 	}
 	if (!has_index) {
-		throw IOException("Aligned table '%s': mandatory group 'index' is missing from _table.json", plan.table.name);
+		throw IOException("Aligned table '%s': mandatory group 'index' was not found", plan.table.name.empty() ?
+		                                                                               table_name :
+		                                                                               plan.table.name);
 	}
 
-	for (auto &group_name : plan.table.groups) {
+	for (auto &group_name : group_names) {
 		GroupPlan group;
 		group.manifest.group = group_name;
 		// Contract §2.1c: every non-index group is a two-level path 'lv1/lv2'
@@ -254,60 +356,39 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			if (slash == string::npos || group_name.find('/', slash + 1) != string::npos || slash == 0 ||
 			    slash + 1 >= group_name.size()) {
 				throw IOException("Aligned table '%s': group '%s' must be a two-level path 'lv1/lv2' (except 'index')",
-				                  plan.table.name, group_name);
+				                  plan.table.name.empty() ? table_name : plan.table.name, group_name);
 			}
 			group.lv1 = group_name.substr(0, slash);
 			group.lv2 = group_name.substr(slash + 1);
 		}
 		group.group_path = plan.table_path + "/" + group_name;
 
-		// Discover part files (any physical partition layout; directories
-		// starting with '.' or '_' are ignored — contract §2.1d). Part
-		// metadata (row count, columns) comes from the Parquet footer only;
-		// there are no sidecars and no commit markers anymore.
-		auto files = fs.GlobFiles(group.group_path + "/**/part-*.parquet", FileGlobOptions::ALLOW_EMPTY);
+		// Discover part files: every .parquet file in the group tree whose path
+		// has no '.'/'_' directory segment (uncommitted / stray files are
+		// invisible — contract §2.1d). The sorted relative-path order IS the
+		// part order; the index in that list IS the part id (no numeric part
+		// names required). Metadata comes from the Parquet footer only.
+		auto files = fs.GlobFiles(group.group_path + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
 		struct DiscoveredPart {
-			string dir_rel; // partition dir relative to the group root ("" = none)
-			idx_t part_id;  // numeric id from the file name
+			string rel_path; // normalized path relative to the group root (incl. file name)
 			PartInfo part;
 		};
 		vector<DiscoveredPart> discovered;
 		vector<string> part_paths; // for partition-schema derivation
+		string group_prefix = NormalizePath(group.group_path);
 		for (auto &file : files) {
 			auto &path = file.path;
 			if (HasIgnoredPathSegment(path)) {
-				continue; // uncommitted / stray directories are invisible
+				continue;
 			}
-			auto slash = path.find_last_of("/\\");
-			string base_name = slash == string::npos ? path : path.substr(slash + 1);
-			if (StringUtil::EndsWith(base_name, ".parquet")) {
-				base_name = base_name.substr(0, base_name.size() - 8);
-			}
-			idx_t part_id = 0;
-			if (!ParsePartName(base_name, part_id)) {
-				continue; // not a valid part file
-			}
-			// Open the Parquet footer for row count + column names
-			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
 			DiscoveredPart dp;
-			dp.part.path = path;
-			dp.part.part_name = base_name;
-			dp.part.row_count = reader->NumRows();
-			for (auto &col : reader->columns) {
-				dp.part.columns.push_back(col.name);
+			dp.part = ReadPartFooter(context, path);
+			string norm = NormalizePath(path);
+			if (norm.size() > group_prefix.size() && StringUtil::StartsWith(norm, group_prefix + "/")) {
+				dp.rel_path = norm.substr(group_prefix.size() + 1);
+			} else {
+				dp.rel_path = norm;
 			}
-			// Partition dir relative to the group root (normalized to '/')
-			string norm = path;
-			std::replace(norm.begin(), norm.end(), '\\', '/');
-			string prefix = group.group_path;
-			std::replace(prefix.begin(), prefix.end(), '\\', '/');
-			if (norm.size() > prefix.size() && StringUtil::StartsWith(norm, prefix + "/")) {
-				dp.dir_rel = norm.substr(prefix.size() + 1);
-			}
-			// strip the file name
-			auto last = dp.dir_rel.find_last_of('/');
-			dp.dir_rel = last == string::npos ? "" : dp.dir_rel.substr(0, last);
-			dp.part_id = part_id;
 			part_paths.push_back(norm);
 			discovered.push_back(std::move(dp));
 		}
@@ -321,28 +402,149 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			group.manifest.partitioning = DerivePartitioningFromPaths(part_paths, plan.table.name, group_name);
 		}
 
-		// Sort into row order: partition dir (string order == chronological
-		// order for the fixed year/month/date formats) then part id (write
-		// order). start_row accumulates footer row counts in that order.
+		// Sort into row order: the normalized relative path (partition dirs in
+		// string order == chronological order for the fixed year/month/date
+		// formats, then the file name). The position in this sorted list is
+		// the part id.
 		std::sort(discovered.begin(), discovered.end(),
-		          [](const DiscoveredPart &a, const DiscoveredPart &b) {
-			          if (a.dir_rel != b.dir_rel) {
-				          return a.dir_rel < b.dir_rel;
-			          }
-			          return a.part_id < b.part_id;
-		          });
-		idx_t start = 0;
+		          [](const DiscoveredPart &a, const DiscoveredPart &b) { return a.rel_path < b.rel_path; });
 		group.parts.reserve(discovered.size());
 		for (auto &dp : discovered) {
-			dp.part.start_row = start;
-			start += dp.part.row_count;
 			group.parts.push_back(std::move(dp.part));
 		}
-		// Validate the group's row space: parts tile [0, group_rows) exactly
-		// (the alignment contract for this group).
-		idx_t group_rows = start;
-		ValidateRowSpace(plan.table.name, group_name, group_rows, group.parts);
+		plan.groups.push_back(std::move(group));
+	}
 
+	// Probe the alignment mode. "all" needs every group to agree on the part
+	// count, the first-part row count and the last-part row count; "group"
+	// only needs each group's internal regularity (every part except the last
+	// holds the same row count). When a mode is declared explicitly in
+	// _table.json its precondition is enforced fail-fast; when absent, the
+	// probe degrades silently ("all" -> "group" -> "none"). "none" derives
+	// every part's interval from the footer row counts directly.
+	idx_t index_gi = DConstants::INVALID_INDEX;
+	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
+		if (StringUtil::CIEquals(plan.groups[gi].manifest.group, "index")) {
+			index_gi = gi;
+			break;
+		}
+	}
+	vector<ProbeInfo> probes(plan.groups.size());
+	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
+		probes[gi] = ProbeGroup(context, plan.groups[gi]);
+	}
+
+	// Group-level precondition: within every group every part except the last
+	// holds exactly the first part's row count. This is the formula's
+	// precondition, verified against the actual footer counts of ALL parts.
+	bool group_ok = true;
+	idx_t violating_gi = DConstants::INVALID_INDEX;
+	idx_t violating_pi = DConstants::INVALID_INDEX;
+	idx_t violating_rows = 0;
+	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
+		auto &g = plan.groups[gi];
+		if (g.parts.empty()) {
+			continue;
+		}
+		violating_pi = FindAlignedViolation(g, probes[gi].part_rows);
+		if (violating_pi != DConstants::INVALID_INDEX) {
+			group_ok = false;
+			violating_gi = gi;
+			violating_rows = g.parts[violating_pi].row_count;
+			break;
+		}
+		g.part_rows = probes[gi].part_rows;
+		g.last_rows = probes[gi].last_rows;
+		g.rg_rows = probes[gi].rg_rows;
+	}
+
+	// Cross-group agreement (only relevant for "all")
+	bool all_ok = group_ok;
+	if (all_ok) {
+		for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
+			auto &p = probes[gi];
+			auto &ref = probes[index_gi];
+			if (p.part_rows != ref.part_rows || p.last_rows != ref.last_rows ||
+			    plan.groups[gi].parts.size() != plan.groups[index_gi].parts.size()) {
+				all_ok = false;
+				break;
+			}
+		}
+	}
+
+	if (plan.table.aligned_declared) {
+		// Declared explicitly: enforce fail-fast, never degrade.
+		if (plan.table.aligned_mode == "all" || plan.table.aligned_mode == "group") {
+			if (!group_ok) {
+				throw IOException("Aligned table '%s': aligned mode '%s' declared, but group '%s' part '%s' holds "
+				                  "%llu rows; all parts except the last must hold exactly %llu rows",
+				                  plan.table.name.empty() ? table_name : plan.table.name, plan.table.aligned_mode,
+				                  plan.groups[violating_gi].manifest.group,
+				                  plan.groups[violating_gi].parts[violating_pi].part_name, violating_rows,
+				                  probes[violating_gi].part_rows);
+			}
+			if (plan.table.aligned_mode == "all" && !all_ok) {
+				throw IOException("Aligned table '%s': aligned mode 'all' declared, but the groups disagree on "
+				                  "part count / part size (index has %llu parts, %llu rows per part; another group "
+				                  "diverges)",
+				                  plan.table.name.empty() ? table_name : plan.table.name,
+				                  plan.groups[index_gi].parts.size(), probes[index_gi].part_rows);
+			}
+			plan.aligned_mode = plan.table.aligned_mode;
+		} else {
+			// "none" declared
+			plan.aligned_mode = "none";
+		}
+	} else {
+		// Default (no declaration): probe the degradation chain.
+		plan.aligned_mode = all_ok ? "all" : (group_ok ? "group" : "none");
+	}
+
+	// Row intervals:
+	//   "all"   - start_row(i) = i * part_rows          (identical across groups)
+	//   "group" - start_row(i) = i * group_part_rows    (per group)
+	//   "none"  - start_row accumulates footer row counts per file
+	// The formula preconditions were already verified above against the actual
+	// footer row counts.
+	if (plan.aligned_mode == "all" || plan.aligned_mode == "group") {
+		for (auto &group : plan.groups) {
+			idx_t start = 0;
+			for (auto &part : group.parts) {
+				part.start_row = start;
+				start += group.part_rows;
+			}
+		}
+	} else {
+		for (auto &group : plan.groups) {
+			idx_t start = 0;
+			for (auto &part : group.parts) {
+				part.start_row = start;
+				start += part.row_count;
+			}
+		}
+	}
+
+	// Validate each group's row space and cross-group agreement on the total
+	// row count (the alignment contract — required in every mode, because the
+	// DataChunk assembly needs the same Logical Row Space).
+	idx_t total = 0;
+	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
+		auto &group = plan.groups[gi];
+		idx_t group_rows = 0;
+		for (auto &part : group.parts) {
+			group_rows += part.row_count;
+		}
+		// ValidateRowSpace checks the parts tile [0, group_rows) exactly.
+		ValidateRowSpace(plan.table.name.empty() ? table_name : plan.table.name, group.manifest.group, group_rows,
+		                 group.parts);
+		if (gi == 0) {
+			total = group_rows;
+		} else if (group_rows != total) {
+			throw IOException("Aligned table '%s': group '%s' covers %llu rows but the table covers %llu rows "
+			                  "(alignment violation)",
+			                  plan.table.name.empty() ? table_name : plan.table.name, group.manifest.group, group_rows,
+			                  total);
+		}
 		// Column order: union of part columns, first-seen order (contract §8)
 		for (auto &part : group.parts) {
 			for (auto &col : part.columns) {
@@ -351,23 +553,8 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 				}
 			}
 		}
-		plan.groups.push_back(std::move(group));
 	}
-
-	// Cross-group alignment: every group must cover the SAME total row count
-	// (all groups live on the same Logical Row Space — contract §3).
-	idx_t total = plan.groups[0].parts.empty() ? 0 : plan.groups[0].parts.back().start_row +
-	                                                  plan.groups[0].parts.back().row_count;
-	for (auto &group : plan.groups) {
-		idx_t group_rows =
-		    group.parts.empty() ? 0 : group.parts.back().start_row + group.parts.back().row_count;
-		if (group_rows != total) {
-			throw IOException("Aligned table '%s': group '%s' covers %llu rows but the table covers %llu rows "
-			                  "(alignment violation)",
-			                  plan.table.name, group.manifest.group, group_rows, total);
-		}
-	}
-	plan.table.row_count = total;
+	plan.row_count = total; // probed total (writer/compactor bookkeeping)
 }
 
 } // namespace duckdb
