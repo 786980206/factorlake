@@ -573,6 +573,41 @@ bash scripts/test_aligned.sh
     stash list 看不到）→ 表现为主仓 `git stash pop` 报 "No stash entries"、子模块补丁
     "丢失"、cmake 重配后 build.ninja 只剩 duckdb.exe 目标。恢复：`git -C duckdb stash list/pop`。
     避免在含子模块本地补丁的仓库用 `git stash`（改用 `git stash -- <路径>` 或先提交）
+- [x] **三模式（all/group/none）性能基准 + 扩展发布机制（2026-08）**：
+  - **扩展发布**（详见 docs/EXTENSION_RELEASE.md）：
+    - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension(aligned "" ${FILES})`
+      + `target_link_libraries(aligned_loadable_extension parquet_extension duckdb_mbedtls duckdb_zstd)`；
+      **坑：第二参数是 PARAMETERS**（parquet 传 `-warnings`），漏传空串会把第一个源文件
+      （extension.cpp）当 PARAMETERS 吃掉 → 产物缺入口函数，LOAD 报
+      "did not contain the expected entrypoint function"
+    - `src/extension.cpp` 末尾加入口：`extern "C" { DUCKDB_CPP_EXTENSION_ENTRY(aligned, loader) {...} }`
+      （v1.5.4 签名 = `void aligned_duckdb_cpp_init(duckdb::ExtensionLoader &)`，与
+      extension-template 一致；静态构建走 generated loader 不调用它）
+    - 发布构建：`-DEXTENSION_STATIC_BUILD=1`（DuckDB 核心静态链入扩展，官方发布方式）+
+      新目录 build-rel；产物 `build-rel/extension/aligned/aligned.duckdb_extension`（24.3MB，
+      自包含 parquet/mbedtls/zstd → 用户无需预装 parquet）
+    - **INSTALL 机制实证**（v1.5.4 源码）：`IsFullPath`（含 `.`/`/`/`\`）→ `INSTALL '<url>'`
+      直接安装（http:// 走 InstallFromHttpUrl 无需 httpfs；https:// 走 DirectInstallExtension）；
+      repository 方式 URL 模板 = `${repo}/${REVISION}/${PLATFORM}/${NAME}.duckdb_extension[.gz]`
+      （GitHub Release 平铺资产放不了目录 → **直接 URL 是正解**）；无签名扩展必须
+      `duckdb -unsigned`（INSTALL 写入前与 LOAD 均校验 AllowUnsignedExtensionsSetting）；
+      扩展内嵌 engine version，加载时强校验 == CLI 版本（v1.5.4 ≠ 1.5.5）
+    - 本地全链路验证 ✓：官方 CLI v1.5.4 + `-unsigned` + `INSTALL '本地路径'` + `LOAD aligned`
+      + writetest 6000 行 mis=0；不带 -unsigned → 签名拒绝；.info metadata 生成
+    - `.github/workflows/release.yml`：tag v* → windows/linux 两 job（clone duckdb v1.5.4
+      --recurse-submodules + EXTENSION_STATIC_BUILD=1 构建 aligned_loadable_extension）→
+      action-gh-release 上传 `aligned-<platform>.duckdb_extension`
+  - **三模式基准**（scripts/gen_bench_modes.ps1 + bench_modes.ps1，详见 docs/BENCHMARK_MODES.md）：
+    - 同一逻辑数据（1M×127 列、4 天分区）三种 part 布局、无 _table.json → 探测三模式：
+      bench_all（各组 4×250000→all）/ bench_group（index 4×250000、alpha·ma 8×125000→group）/
+      bench_none（index 16 part 每天 65536×3+53392 = **v2 bench_ixday 布局**→none）
+    - 数据验证：三表 count=1,000,000、sum(rowid)=499,999,500,000、alpha000=142858、mis=0；
+      探测与显式声明交叉验证 6/6（all→all、group→group、none→none 通过；错配 fail-fast）
+    - **结论**：① 三模式扫描性能无实质差异（±5% 内，公式 vs footer 累加只影响 plan 构建）；
+      ② part 粒度影响固定开销——group 的 s25（剪枝到 1/4）比 all/none 慢 20~27%
+      （125K part ×2 数量 → OpenPart/CreateReader 固定开销）；**writer 应尽量大 part**；
+      ③ v3 vs v2 无回归：bench_none（== v2 布局）45 项 ratio ∈ [0.97, 1.08] 均值 ≈1.03；
+      ④ 探测零额外 IO；⑤ p100 t8 ≈ t4（120 列聚合并行饱和，与 v2 趋势一致）
 
 ### Phase 1 关键经验（必须记住，避免重踩）：`Copy(source, target, source_count, source_offset, target_offset)`
    中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。

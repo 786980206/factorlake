@@ -21,6 +21,12 @@ set(ALIGNED_EXTENSION_FILES
     src/compaction/aligned_compactor.cpp
 )
 
-# Phase 1: statically linked into the DuckDB binary (dev loop).
-# (build_loadable_extension will be added later for distribution.)
+# Statically linked into the DuckDB binary (dev loop).
 build_static_extension(aligned ${ALIGNED_EXTENSION_FILES})
+
+# Loadable binary for distribution (INSTALL/LOAD as a custom extension).
+# Links the parquet extension (ParquetReader reuse) + its third-party deps so
+# the .duckdb_extension is self-contained. Build with -DEXTENSION_STATIC_BUILD=1
+# (official release mode: DuckDB core statically linked into the binary).
+build_loadable_extension(aligned "" ${ALIGNED_EXTENSION_FILES})
+target_link_libraries(aligned_loadable_extension parquet_extension duckdb_mbedtls duckdb_zstd)

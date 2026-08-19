@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone DuckDB v1.5.4 (vendored build tree)
+        run: |
+          git clone --depth 1 --branch v1.5.4 --recurse-submodules https://github.com/duckdb/duckdb.git duckdb
+        shell: bash
+
+      - name: Install ninja
+        run: choco install ninja -y --no-progress
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure (loadable extension, static build)
+        run: >
+          cmake -S duckdb -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DEXTENSION_STATIC_BUILD=1
+          -DDUCKDB_EXTENSION_CONFIGS=${{ github.workspace }}/scripts/aligned_extension_config.cmake
+
+      - name: Build
+        run: cmake --build build --target aligned_loadable_extension -j 4
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aligned-windows_amd64.duckdb_extension
+          path: build/extension/aligned/aligned.duckdb_extension
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone DuckDB v1.5.4 (vendored build tree)
+        run: |
+          git clone --depth 1 --branch v1.5.4 --recurse-submodules https://github.com/duckdb/duckdb.git duckdb
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure (loadable extension, static build)
+        run: >
+          cmake -S duckdb -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DEXTENSION_STATIC_BUILD=1
+          -DDUCKDB_EXTENSION_CONFIGS=${{ github.workspace }}/scripts/aligned_extension_config.cmake
+
+      - name: Build
+        run: cmake --build build --target aligned_loadable_extension -j 4
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aligned-linux_amd64.duckdb_extension
+          path: build/extension/aligned/aligned.duckdb_extension
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.duckdb_extension
+          generate_release_notes: true

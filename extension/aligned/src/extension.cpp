@@ -87,3 +87,15 @@ std::string AlignedExtension::Version() const {
 }
 
 } // namespace duckdb
+
+// Loadable extension entrypoint (used when the extension is built with
+// build_loadable_extension and loaded via INSTALL/LOAD, e.g. from a GitHub
+// Release. The statically-linked build path uses the generated extension
+// loader instead and never calls this function.)
+extern "C" {
+
+DUCKDB_CPP_EXTENSION_ENTRY(aligned, loader) {
+	duckdb::AlignedExtension ext;
+	ext.Load(loader);
+}
+}
