@@ -62,6 +62,7 @@ struct PartInfo {
 	idx_t start_row = 0;
 	idx_t row_count = 0;
 	vector<string> columns; // column names in FILE schema order
+	vector<LogicalType> types; // column types in FILE schema order (from the footer, plan time)
 };
 
 // A resolved, validated Column Group.

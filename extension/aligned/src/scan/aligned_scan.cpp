@@ -218,28 +218,17 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 
 	for (auto gi : order) {
 		auto &group = plan.groups[gi];
-		// Open the first part once (if any) as the type source for most columns
-		unique_ptr<ParquetReader> first_reader;
-		if (!group.parts.empty()) {
-			first_reader = OpenPartReader(context, group.parts[0], plan.table.name, group.manifest.group);
-		}
-		// Resolves a column's type from the first part containing it
-		// (schema evolution: later parts may introduce new columns)
+		// Column types come from the part metadata captured at plan time
+		// (footer reads, no per-column reader construction — P1: previously
+		// every column missing from the first part opened a new ParquetReader).
+		// Schema evolution: the type of a column is the type of the FIRST part
+		// containing it.
 		auto resolve_type = [&](const string &col) -> LogicalType {
-			if (first_reader) {
-				auto it = std::find(group.parts[0].columns.begin(), group.parts[0].columns.end(), col);
-				if (it != group.parts[0].columns.end()) {
-					return first_reader->columns[it - group.parts[0].columns.begin()].type;
-				}
-			}
-			for (idx_t pi = 1; pi < group.parts.size(); pi++) {
-				auto &part = group.parts[pi];
+			for (auto &part : group.parts) {
 				auto it = std::find(part.columns.begin(), part.columns.end(), col);
-				if (it == part.columns.end()) {
-					continue;
+				if (it != part.columns.end()) {
+					return part.types[it - part.columns.begin()];
 				}
-				auto reader = OpenPartReader(context, part, plan.table.name, group.manifest.group);
-				return reader->columns[it - part.columns.begin()].type;
 			}
 			throw IOException("Aligned table '%s' group '%s': column '%s' is declared but not found in any part",
 			                  plan.table.name, group.manifest.group, col);

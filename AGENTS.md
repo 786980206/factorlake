@@ -603,11 +603,29 @@ bash scripts/test_aligned.sh
       bench_none（index 16 part 每天 65536×3+53392 = **v2 bench_ixday 布局**→none）
     - 数据验证：三表 count=1,000,000、sum(rowid)=499,999,500,000、alpha000=142858、mis=0；
       探测与显式声明交叉验证 6/6（all→all、group→group、none→none 通过；错配 fail-fast）
-    - **结论**：① 三模式扫描性能无实质差异（±5% 内，公式 vs footer 累加只影响 plan 构建）；
-      ② part 粒度影响固定开销——group 的 s25（剪枝到 1/4）比 all/none 慢 20~27%
-      （125K part ×2 数量 → OpenPart/CreateReader 固定开销）；**writer 应尽量大 part**；
-      ③ v3 vs v2 无回归：bench_none（== v2 布局）45 项 ratio ∈ [0.97, 1.08] 均值 ≈1.03；
-      ④ 探测零额外 IO；⑤ p100 t8 ≈ t4（120 列聚合并行饱和，与 v2 趋势一致）
+- **结论**：① 三模式扫描性能无实质差异（±5% 内，公式 vs footer 累加只影响 plan 构建）；
+    ② part 粒度影响固定开销——group 的 s25（剪枝到 1/4）比 all/none 慢 20~27%
+    （125K part ×2 数量 → OpenPart/CreateReader 固定开销）；**writer 应尽量大 part**；
+    ③ v3 vs v2 无回归：bench_none（== v2 布局）45 项 ratio ∈ [0.97, 1.08] 均值 ≈1.03；
+    ④ 探测零额外 IO；⑤ p100 t8 ≈ t4（120 列聚合并行饱和，与 v2 趋势一致）
+- [x] **整体审视 + 文档补齐（2026-08）**：
+  - `README.md`（新增）：项目定位/用法/核心概念/功能矩阵/构建/性能结论/文档索引/路线图
+  - `docs/READ_OPTIMIZATIONS.md`（新增 + 实测修正）：读取链路优化计划。**初版分析
+    的 P0-A/P0-B 是误判（已修正）**：读 remove_unused_columns.cpp 源码确认过滤列
+    **总是**保留在 column_ids（filter 列被注入 column_references 防剪除，
+    `filter_prune` 只控制 projection_ids 输出剪枝）→ `SELECT alpha001 WHERE
+    date=...`（date 未投影）时分区/RG 剪枝**一直生效**（实测 35714/142858、0.028s）。
+    **已实施**：① `filter_prune=true`（extension.cpp ×2，过滤列不进 scan 输出 →
+    EXPLAIN 里多余 PROJECTION 层消失；scan 侧 scratch+ReferenceColumns 路径本就
+    完整，只开开关）；② P1-A 列类型解析复用（`PartInfo.types` 存 footer 类型，
+    ResolveColumnTypes 不再逐 part 开 reader）。P1-C 聚合 stats 快速路径
+    **依赖 DuckDB ≥ v1.6 的 AggregatePushdown API**（v1.5.4 无），标记待升级。
+    回归：test_aligned 30 / test_writer 17 / test_compaction 16 / test_parallel 全 PASS
+  - `docs/WRITE_PLAN.md`（新增）：写入增强计划（Phase 8）。W-1 目录源（glob 多文件）、
+    W-2 part_rows 上限切分（同分区多 part，不破坏探测公式）、W-3 并发写互斥
+    （last_txid CAS）、W-4 写后校验（validate=true）、W-5 group 间并行、
+    W-6 UPDATE/DELETE 明确不做、W-7 公共 JSON helper + rg_rows 默认值 131072；
+    实施顺序 W-S1~W-S6
 
 ### Phase 1 关键经验（必须记住，避免重踩）：`Copy(source, target, source_count, source_offset, target_offset)`
    中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。
@@ -687,6 +705,11 @@ bash scripts/test_aligned.sh
    向量被全部丢弃、范围不重叠。Windows 无调试器时这是最快路径。
 6. **性能测量用 `.timer on`（文件输入）**，`-c` 的进程启动开销 ~0.8s 会淹没扫描时间；
    EXPLAIN ANALYZE 的算子耗时是可信的（不含进程启动）。
+7. **改动共享头文件（结构体布局，如 PartInfo 加字段）后必须强制全量重编扩展**：
+   ninja 增量会漏重编依赖该头文件的 obj（实测 manifest.hpp 改 PartInfo 后
+   writer/compactor 没重编 → 新旧布局混链 → 0xC0000005 崩溃，症状极隐蔽）。
+   命令：`Remove-Item build3\extension\aligned\CMakeFiles\aligned_extension.dir -Recurse -Filter *.obj`
+   再 `ninja -C build3 duckdb_al3.exe`。与"切分支后全量重编"教训同类。
 
 ### Phase 5 关键经验（Writer）
 

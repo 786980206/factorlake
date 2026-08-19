@@ -18,20 +18,19 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	aligned_table_fn.projection_pushdown = true; // Phase 2: only open requested groups/columns
 	// Filter pushdown is what lets partition/row-group pruning actually reach
 	// the aligned scan: with filter_pushdown the executor passes WHERE predicates
-	// into TableFunctionInitInput::filters; filter_prune additionally pushes
-	// filters on columns that are filtered but not projected (e.g. a partition
-	// source column like `date` when only factor columns are selected), so the
-	// leaf can prune its kept parts and the aligned=true intersection shrinks the
-	// global scan range.
+	// into TableFunctionInitInput::filters; the optimizer always keeps filtered
+	// columns in column_ids (remove_unused_columns keeps filter columns alive
+	// regardless of filter_prune), so the scan can prune partitions / row groups
+	// and apply row-level filters on filter-only columns even when they are not
+	// projected (verified: SELECT alpha001 WHERE date=... prunes without date
+	// being projected).
 	aligned_table_fn.filter_pushdown = true;
-	// NOTE: filter_prune = false on purpose. With filter_prune=true DuckDB
-	// pushes filters on columns that are filtered but NOT projected; our scan
-	// currently reads only projected columns, so it cannot apply a row filter on
-	// a pruned (never-read) column. Leave filter_prune off so filter-only columns
-	// are still projected through the function (DuckDB then filters after the
-	// scan). Pruning still works when the partition source column is projected
-	// (the common `SELECT ... date ... WHERE date=...` shape).
-	aligned_table_fn.filter_prune = false;
+	// filter_prune=true: additionally prune the filter-only columns from the
+	// scan OUTPUT (projection_ids). The scan still reads them (hidden read
+	// columns for pruning + row filters) but the output chunk only carries the
+	// projected columns, saving the upstream PROJECTION operator. The
+	// scratch-chunk + ReferenceColumns path in the scan already implements this.
+	aligned_table_fn.filter_prune = true;
 	loader.RegisterFunction(aligned_table_fn);
 
 	// aligned_scan(root, table_name)
@@ -40,7 +39,7 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	aligned_scan_fn.cardinality = AlignedCardinality;
 	aligned_scan_fn.projection_pushdown = true; // Phase 2
 	aligned_scan_fn.filter_pushdown = true;
-	aligned_scan_fn.filter_prune = false;
+	aligned_scan_fn.filter_prune = true;
 	loader.RegisterFunction(aligned_scan_fn);
 
 	// Setting that supplies the default data root for aligned_table(name)

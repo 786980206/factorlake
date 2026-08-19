@@ -237,6 +237,7 @@ static PartInfo ReadPartFooter(ClientContext &context, const string &path) {
 	part.row_count = reader->NumRows();
 	for (auto &col : reader->columns) {
 		part.columns.push_back(col.name);
+		part.types.push_back(col.type);
 	}
 	return part;
 }
