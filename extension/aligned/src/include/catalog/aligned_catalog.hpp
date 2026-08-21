@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -11,13 +11,15 @@ class AlignedTableEntry;
 struct AlignedTableBindData;
 
 //! A logical table of the aligned attached database. Reads go straight to the
-//! parquet column groups via the aligned_table scan — nothing is materialized.
+//! parquet column groups via the aligned_table scan 鈥?nothing is materialized.
 class AlignedTableEntry : public TableCatalogEntry {
 public:
 	AlignedTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, string root_p);
 
 	//! Scan function = aligned_table(root, table); bind data is pre-built.
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
+	void BindUpdateConstraints(Binder &binder, LogicalGet &get, LogicalProjection &proj, LogicalUpdate &update,
+	                           ClientContext &context) override;
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
 
@@ -105,3 +107,4 @@ private:
 void RegisterAlignedStorageExtension(DatabaseInstance &db);
 
 } // namespace duckdb
+

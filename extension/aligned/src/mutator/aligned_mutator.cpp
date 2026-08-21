@@ -618,6 +618,28 @@ static MutateTarget &GetCreateTarget(ClientContext &context, const MutateBindDat
 			t->out_names.push_back(col.name);
 			t->out_types.push_back(col.type);
 		}
+	} else if (!bind.plan.groups[gi].parts.empty()) {
+		// Fresh part in an EXISTING group: carry the group's full current
+		// schema PLUS any newly mapped columns (schema evolution) — unmapped
+		// existing columns write NULL. Using only the mapping would narrow
+		// the group schema and break rewrites of older, wider parts; using
+		// only the group schema would drop newly added columns.
+		auto &group_schema = bind.plan.groups[gi];
+		t->out_names = group_schema.column_order;
+		t->out_types = group_schema.schema_types;
+		for (idx_t mi = 0; mi < gm.col_names.size(); mi++) {
+			bool exists = false;
+			for (auto &on : t->out_names) {
+				if (StringUtil::CIEquals(on, gm.col_names[mi])) {
+					exists = true;
+					break;
+				}
+			}
+			if (!exists) {
+				t->out_names.push_back(gm.col_names[mi]);
+				t->out_types.push_back(gm.col_types[mi]);
+			}
+		}
 	} else {
 		t->out_names = gm.col_names;
 		t->out_types = gm.col_types;

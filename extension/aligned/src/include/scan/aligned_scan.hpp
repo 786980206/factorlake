@@ -14,6 +14,9 @@ struct AlignedTableBindData : public TableFunctionData {
 	vector<string> names;
 	vector<LogicalType> types;
 	idx_t total_rows = 0;
+	//! Owning catalog entry when scanned through an attached table (Phase 8);
+	//! nullptr for direct aligned_table()/aligned_scan() calls.
+	class TableCatalogEntry *catalog_entry = nullptr;
 };
 
 //! Bind without going through TableFunctionBindInput (used by the attached
@@ -37,4 +40,5 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 unique_ptr<NodeStatistics> AlignedCardinality(ClientContext &context, const FunctionData *bind_data);
 
 } // namespace duckdb
+
 

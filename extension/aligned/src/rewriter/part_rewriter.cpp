@@ -205,19 +205,24 @@ struct MergeWriter {
 	}
 
 	//! Bulk-copies old rows [a, b) (within the current old chunk) to the
-	//! scratch chunk.
+	//! scratch chunk, splitting by scratch capacity (the scratch holds at most
+	//! STANDARD_VECTOR_SIZE rows; a bulk run between two events can be longer).
 	void BulkCopyOld(idx_t a, idx_t b) {
-		idx_t local_a = a - old_chunk_start;
-		idx_t pos = scratch_rows;
-		idx_t n = b - a;
-		for (idx_t c = 0; c < out_cols; c++) {
-			VectorOperations::Copy(old_chunk.data[c], scratch.data[c], local_a + n, local_a, pos);
-		}
-		scratch_rows += n;
-		emitted += n;
-		cur = b;
-		if (scratch_rows >= STANDARD_VECTOR_SIZE) {
-			FlushScratch();
+		while (a < b) {
+			const idx_t avail = STANDARD_VECTOR_SIZE - scratch_rows;
+			const idx_t n = MinValue(b - a, avail);
+			const idx_t local_a = a - old_chunk_start;
+			const idx_t pos = scratch_rows;
+			for (idx_t c = 0; c < out_cols; c++) {
+				VectorOperations::Copy(old_chunk.data[c], scratch.data[c], local_a + n, local_a, pos);
+			}
+			a += n;
+			scratch_rows += n;
+			emitted += n;
+			cur = a;
+			if (scratch_rows >= STANDARD_VECTOR_SIZE) {
+				FlushScratch();
+			}
 		}
 	}
 

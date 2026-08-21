@@ -31,6 +31,12 @@
 
 namespace duckdb {
 
+//! BindInfo hook for LogicalGet::GetTable(): reports the owning catalog entry
+//! so DELETE/UPDATE recognize the scan as a base table.
+static BindInfo AlignedScanGetBindInfo(const optional_ptr<FunctionData> bind_data) {
+	auto &abd = bind_data->Cast<AlignedTableBindData>();
+	return BindInfo(*abd.catalog_entry);
+}
 //===----------------------------------------------------------------------===//
 // AlignedTableEntry
 //===----------------------------------------------------------------------===//
@@ -53,7 +59,20 @@ TableFunction AlignedTableEntry::GetScanFunction(ClientContext &context, unique_
 	fn.projection_pushdown = true;
 	fn.filter_pushdown = true;
 	fn.filter_prune = true;
+	// Lets DELETE/UPDATE binders recognize this GET as a base table (LogicalGet::GetTable).
+	bind_data->Cast<AlignedTableBindData>().catalog_entry = this;
+	fn.get_bind_info = AlignedScanGetBindInfo;
 	return fn;
+}
+
+void AlignedTableEntry::BindUpdateConstraints(Binder &binder, LogicalGet &get, LogicalProjection &proj,
+                                              LogicalUpdate &update, ClientContext &context) {
+	// Default: no extra columns. Only the columns the UPDATE statement touches
+	// are fetched; the rowid identifies the target rows. The aligned UPDATE
+	// pipeline resolves rowid -> (date, symbol) keys and only writes the SET
+	// columns back (columns absent from an old part due to schema evolution
+	// must NOT be force-updated — that would fail the v7 contract).
+	TableCatalogEntry::BindUpdateConstraints(binder, get, proj, update, context);
 }
 
 unique_ptr<BaseStatistics> AlignedTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
@@ -261,12 +280,48 @@ PhysicalOperator &AlignedCatalog::PlanInsert(ClientContext &context, PhysicalPla
 
 PhysicalOperator &AlignedCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalDelete &op, PhysicalOperator &plan) {
-	throw NotImplementedException("aligned attach: DELETE is not implemented yet");
+	auto &entry = op.table.Cast<AlignedTableEntry>();
+	auto &del = planner.Make<PhysicalAlignedDelete>(op.types, entry.name, entry.GetRoot(),
+	                                                op.estimated_cardinality);
+	del.children.push_back(plan);
+	return del;
 }
 
 PhysicalOperator &AlignedCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalUpdate &op, PhysicalOperator &plan) {
-	throw NotImplementedException("aligned attach: UPDATE is not implemented yet");
+	auto &entry = op.table.Cast<AlignedTableEntry>();
+	// Per SET column: table column name and the group that owns it (from the
+	// table plan's group schemas). Used to stage [date, symbol, set...] and to
+	// build the upsert mapping.
+	vector<string> set_names;
+	vector<string> set_groups;
+	vector<LogicalType> ignore_types;
+	vector<string> ignore_names;
+	auto bind_data = AlignedBindForCatalog(context, entry.GetRoot(), entry.name, ignore_types, ignore_names);
+	auto &bind_plan = bind_data->Cast<AlignedTableBindData>().plan;
+	for (auto &cidx : op.columns) {
+		auto name = entry.GetColumns().GetColumn(cidx).Name();
+		set_names.push_back(name);
+		string grp;
+		for (auto &g : bind_plan.groups) {
+			for (auto &cn : g.column_order) {
+				if (StringUtil::CIEquals(cn, name)) {
+					grp = g.manifest.group;
+					break;
+				}
+			}
+			if (!grp.empty()) {
+				break;
+			}
+		}
+		set_groups.push_back(grp);
+	}
+	auto &upd = planner.Make<PhysicalAlignedUpdate>(op.types, std::move(set_names), std::move(set_groups), entry.name,
+	                                                entry.GetRoot(), op.estimated_cardinality)
+	                 .Cast<PhysicalAlignedUpdate>();
+	upd.expressions = std::move(op.expressions);
+	upd.children.push_back(plan);
+	return upd;
 }
 
 DatabaseSize AlignedCatalog::GetDatabaseSize(ClientContext &context) {
@@ -309,6 +364,9 @@ void RegisterAlignedStorageExtension(DatabaseInstance &db) {
 }
 
 } // namespace duckdb
+
+
+
 
 
 

@@ -1,4 +1,5 @@
 ﻿#include "scan/aligned_scan.hpp"
+#include <fstream>
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -112,10 +113,19 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	idx_t interval_idx = 0;
 	idx_t next_row = 0; // cursor within the current active interval
 	// Projection pushdown (Phase 2): full schema position -> output chunk position
+	//   projected_pos: effective OUTPUT chunk position (projection_ids rank)
+	//   scratch_pos:   column_ids index (the filter-path scratch chunk)
 	vector<idx_t> projected_pos;
-	// Virtual rowid column (catalog integration / DELETE-UPDATE): output chunk
-	// position of the logical row number, INVALID_INDEX when not requested.
+	vector<idx_t> scratch_pos;
+	// Virtual rowid column (catalog integration / DELETE-UPDATE): scratch slot
+	// (column_ids index) and effective output position (INVALID when pruned).
+	idx_t rowid_scratch = DConstants::INVALID_INDEX;
 	idx_t rowid_pos = DConstants::INVALID_INDEX;
+	// Duplicate column requests (UPDATE re-references key columns): (from, to)
+	// positions of the same full-schema column, per index space; filled after
+	// the group scan by copying the first occurrence.
+	vector<pair<idx_t, idx_t>> dup_copies_scratch;
+	vector<pair<idx_t, idx_t>> dup_copies_out;
 	// Per-group flag: does this group contribute any requested column?
 	vector<bool> group_active;
 	// Filters (Phase 3): shared filter definitions (states are per-thread, see
@@ -409,18 +419,56 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 	// requested (e.g. count(*)) 鈥?the output chunk then has no vectors and the
 	// scan only reports cardinality.
 	result->projected_pos.assign(bind.names.size(), DConstants::INVALID_INDEX);
+	result->scratch_pos.assign(bind.names.size(), DConstants::INVALID_INDEX);
+	// Effective OUTPUT position of every column_ids entry. With filter_prune
+	// the executor allocates the output chunk by projection_ids (a subset of
+	// column_ids), so output position != column_ids index in general. The
+	// scratch chunk (filter path) is indexed by column_ids position instead,
+	// hence two parallel maps.
+	vector<idx_t> out_of_colids(input.column_ids.size(), DConstants::INVALID_INDEX);
+	if (input.projection_ids.empty()) {
+		for (idx_t i = 0; i < input.column_ids.size(); i++) {
+			out_of_colids[i] = i;
+		}
+	} else {
+		for (idx_t j = 0; j < input.projection_ids.size(); j++) {
+			auto p = input.projection_ids[j];
+			if (p < out_of_colids.size()) {
+				out_of_colids[p] = j;
+			}
+		}
+	}
+	vector<char> requested(bind.names.size(), 0);
 	for (idx_t i = 0; i < input.column_ids.size(); i++) {
 		auto col_id = input.column_ids[i];
+		auto out_pos = out_of_colids[i];
 		if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
-			// Virtual rowid = logical row number (aligned row space position).
-			result->rowid_pos = i;
+			// Virtual rowid = logical row number. scratch slot = column_ids
+			// index; output slot = effective position (INVALID when pruned).
+			result->rowid_scratch = i;
+			result->rowid_pos = out_pos;
 			continue;
 		}
 		if (col_id >= bind.names.size()) {
 			throw InternalException("aligned_table: column id %llu out of range (schema has %llu columns)", col_id,
 			                        bind.names.size());
 		}
-		result->projected_pos[col_id] = i;
+		requested[col_id] = 1;
+		if (result->scratch_pos[col_id] == DConstants::INVALID_INDEX) {
+			result->scratch_pos[col_id] = i;
+		} else {
+			result->dup_copies_scratch.emplace_back(result->scratch_pos[col_id], i);
+		}
+		if (out_pos == DConstants::INVALID_INDEX) {
+			continue; // pruned from the scan output (filter-only column)
+		}
+		if (result->projected_pos[col_id] != DConstants::INVALID_INDEX) {
+			// Same column requested twice (e.g. UPDATE re-references key
+			// columns): replicate the filled vector after the group scan.
+			result->dup_copies_out.emplace_back(result->projected_pos[col_id], out_pos);
+			continue;
+		}
+		result->projected_pos[col_id] = out_pos;
 	}
 
 	// Determine which groups actually need to be opened
@@ -428,7 +476,9 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 		auto &group = bind.plan.groups[gi];
 		for (auto full_pos : group.output_positions) {
-			if (full_pos != DConstants::INVALID_INDEX && result->projected_pos[full_pos] != DConstants::INVALID_INDEX) {
+			// A group is active when ANY of its columns is requested —
+			// including filter-only columns that are pruned from the output.
+			if (full_pos != DConstants::INVALID_INDEX && requested[full_pos]) {
 				result->group_active[gi] = true;
 				break;
 			}
@@ -523,7 +573,8 @@ unique_ptr<LocalTableFunctionState> AlignedInitLocal(ExecutionContext &context, 
 	if (!input.projection_ids.empty() || input.filters) {
 		vector<LogicalType> scanned_types;
 		for (auto col_id : input.column_ids) {
-			scanned_types.push_back(bind.types[col_id]);
+			// Virtual rowid slot: BIGINT placeholder (filled post-assembly).
+			scanned_types.push_back(col_id == COLUMN_IDENTIFIER_ROW_ID ? LogicalType::BIGINT : bind.types[col_id]);
 		}
 		result->scratch = make_uniq<DataChunk>();
 		result->scratch->Initialize(context.client, scanned_types);
@@ -1128,6 +1179,9 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 		// call.
 		bool use_scratch = !lstate.row_filters.empty() || !gstate.projection_ids.empty();
 		auto &target = use_scratch ? *lstate.scratch : output;
+		// Position map of the assembly target: the scratch chunk is indexed by
+		// column_ids position, the executor's output chunk by projection rank.
+		const auto &pos_map = use_scratch ? gstate.scratch_pos : gstate.projected_pos;
 		if (use_scratch) {
 			target.Reset();
 		}
@@ -1145,8 +1199,15 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 				continue;
 			}
 			const auto &parts = gstate.kept_parts[gi].empty() ? bind.plan.groups[gi].parts : gstate.kept_parts[gi];
-			ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, gstate.projected_pos, parts,
+			ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, pos_map, parts,
 			                gstate.group_filters[gi]);
+		}
+
+		// Replicate duplicated column requests before filtering so all
+		// positions carry the same values.
+		auto &dups = use_scratch ? gstate.dup_copies_scratch : gstate.dup_copies_out;
+		for (auto &dup : dups) {
+			VectorOperations::Copy(target.data[dup.first], target.data[dup.second], chunk_rows, 0, 0);
 		}
 
 		// Apply the pushed-down filters to the assembled chunk (per-thread states)
@@ -1200,6 +1261,8 @@ unique_ptr<NodeStatistics> AlignedCardinality(ClientContext &context, const Func
 }
 
 } // namespace duckdb
+
+
 
 
 
