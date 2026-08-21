@@ -146,14 +146,25 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 			loc.part_local_row = p - off;
 		} else {
 			// p == partition row count: the key sorts after every symbol of the
-			// partition. The caller appends a NEW part (index = the next free
-			// partition-local index) holding only the new rows — the existing
-			// parts are not rewritten.
-			idx_t max_index = part.partition_index;
-			for (idx_t k = 0; k < partition.part_count; k++) {
-				auto &pk = index_group->parts[partition.first_part + k];
-				if (pk.partition_index > max_index) {
-					max_index = pk.partition_index;
+			// partition. The caller appends a NEW part holding only the new
+			// rows — the existing parts are not rewritten. The new part index
+			// must be free across ALL groups (not just the index group),
+			// otherwise it would collide with another group's existing part at
+			// the same index and violate the v6 "shared index row counts must
+			// agree" contract. Use the partition-wide maximum index + 1.
+			idx_t max_index = 0;
+			for (auto &group : plan.groups) {
+				for (auto &gp : group.partitions) {
+					if (gp.key != key) {
+						continue;
+					}
+					for (idx_t k = 0; k < gp.part_count; k++) {
+						auto &pk = group.parts[gp.first_part + k];
+						if (pk.partition_index > max_index) {
+							max_index = pk.partition_index;
+						}
+					}
+					break;
 				}
 			}
 			loc.part_index = max_index + 1;

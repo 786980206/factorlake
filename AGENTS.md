@@ -908,6 +908,11 @@ tive'）→ 断言 pattern 必须用
   - 映射列类型 = 组内已存类型（组 schema），非源文件类型：源 VALUES 字面量 111.1→DECIMAL、111→INTEGER，写出的新 part 与老 part（DOUBLE/BIGINT）类型不一致 → 扫描时 scratch chunk（bind.types=组类型）与 reader 向量（文件类型）Copy 类型不匹配崩溃（InternalException Expected vector of type DOUBLE, but found vector of type INT32，来自 ConstantVector::VerifyVectorType）；本次 bug 根因即此。修复：组已存在时用组 schema 类型，仅首写空表回退源类型
   - 验收：test_upsert.ps1 29/29（替换 test_writer.ps1）、test_aligned 42/42（baddate 断言改 first two columns 匹配 v7 消息）、test_compaction 14/14、test_parallel 8/8 全 PASS
 - [x] **文档清理（2026-08）**：删除 plan.md（AGENTS.md 即权威 Plan）、logic.md（引用已删除 aligned_writer.cpp 的过时深潜）、docs/BENCH_MULTI.md（v4 起 A-NORMAL 已删，历史快照）、docs/WRITE_PLAN.md（为已删除 aligned_write 写的计划）、scripts/test_writer.ps1、scripts/bench_output.csv、scripts/bench_multi_output.csv（孤儿原始输出，分析文档为权威）；README/STORAGE_CONTRACT/AGENTS §9/§14 同步 v7
+- [x] **aligned_upsert 的 mapping 参数改为可选 + 修复 append 跨组 part 索引碰撞（2026-08）**：
+  - mapping 可选：已存在的表省略 mapping 时，按每个源列名在其所属 group 的 column_order 中自动推断（大小写不敏感）；空表首写仍必须显式给 mapping（无 schema 可推断，BinderException）。extension.cpp 用 `aligned_upsert_fn.varargs = LogicalType::VARCHAR`（v1.5.4 无 `max_argument_count` 成员）支持 2~3 个入参
+  - 修复 append 碰撞：key_resolver.cpp `Resolve` 的 append part 索引原只取 index 组 max+1，当某非 index 组（如 alpha101 缺号 0000,0002）max 更大时新 part 与该组现有同号 part 行数冲突 → IO Error "shared indexes must agree on row counts"。改为跨**所有组**取分区内 max 索引 +1，对齐布局表正常；人造缺号测试布局（index 连续但 alpha 缺号到 0002）仍会因 index 连续索引契约失败（属 fixture 产物，mutator 写的真实表保持索引对齐，不受影响）
+  - 验收：test_upsert 30/30（新增 auto-derive upsert + 空表首写缺 mapping 拒绝）、test_aligned 42/42、test_compaction 14/14、test_parallel 8/8 全 PASS
+- [ ] **Phase 8：标准 DML（INSERT/UPDATE/DELETE INTO aligned_table('t')）**：函数形式（非 catalog 裸名），UPDATE 走 upsert 式（键缺失则插入）；复用 mutator，输入由 parquet 文件改为内存 DataChunk 流
 
 ### v7 Mutator 关键经验
 

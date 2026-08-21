@@ -208,8 +208,25 @@ if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM ali
     Write-Host 'PASS: delete source missing key columns rejected'
 } else { Write-Host 'FAIL: delete source key check not enforced'; $script:failures++ }
 
+# ---- auto-derive mapping (no explicit mapping) on an existing table ----------
+$s8 = Join-Path $dataRoot 'upsert_s8.parquet'
+$s8f = $s8.Replace('\', '/')
+& $duckdb -c "COPY (SELECT DATE '2026-09-10' AS date, '009999' AS symbol, 77.7::DOUBLE AS close, 8.8::DOUBLE AS alpha001, 9.9::DOUBLE AS ma5) TO '$s8f' (FORMAT PARQUET);" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'staging 8 failed' }
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_inserted, rows_updated, parts_rewritten FROM aligned_upsert('$table', '$s8f');"
+Expect-Equal 'auto-derive upsert (ins, upd, parts)' $out.Trim() '1,0,3'
+$out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT close, alpha001, ma5 FROM aligned_table('$table') WHERE symbol='009999';"
+Expect-Equal 'auto-derive new row values' $out.Trim() '77.7,8.8,9.9'
+# empty-table first write still REQUIRES explicit mapping (no schema to infer)
+$emptyDir = Join-Path $dataRoot 'upsert_empty'
+New-Item -ItemType Directory -Force -Path $emptyDir | Out-Null
+if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('upsert_empty', '$s8f');" 'mandatory group') {
+    Write-Host 'PASS: empty-table first write without mapping rejected'
+} else { Write-Host 'FAIL: empty-table first write should require mapping'; $script:failures++ }
+Remove-Item $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
+
 # ---- cleanup -----------------------------------------------------------------
-Remove-Item $s1, $s2, $s3, $s4, $s5, $s6, $s7 -Force -ErrorAction SilentlyContinue
+Remove-Item $s1, $s2, $s3, $s4, $s5, $s6, $s7, $s8 -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
 if ($failures -eq 0) { Write-Host 'ALL TESTS PASSED' } else { Write-Host "$failures TEST(S) FAILED"; exit 1 }

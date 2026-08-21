@@ -33,6 +33,7 @@ Row Group 剪枝；跨 Group 的所有行天然对齐，无需 JOIN。
 SELECT * FROM aligned_scan('/data', 'cnstk_ixday');
 
 -- 写入（upsert：按 (date, symbol) 主键插入/更新/追加新分区，原子提交）：
+-- mapping 可省略（已存在的表自动按列名推断列所属 group；空表首写必须显式给 mapping）：
 SELECT * FROM aligned_upsert('cnstk_ixday', '/data/stage/2026-08-17.parquet',
                              'index:date,symbol,close;factor/alpha101:alpha001,alpha002;fieldset/ma:ma20',
                              root='/data');

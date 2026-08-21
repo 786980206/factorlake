@@ -52,8 +52,9 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	// An existing key is UPDATED (only the mapped columns are overwritten), a
 	// new key is INSERTED at its sorted position. Returns
 	// (rows_inserted, rows_updated, parts_rewritten, txid).
-	TableFunction aligned_upsert_fn("aligned_upsert", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                                AlignedUpsertFunction, AlignedUpsertBind, MutateInitGlobal, nullptr);
+	TableFunction aligned_upsert_fn("aligned_upsert", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AlignedUpsertFunction,
+	                                AlignedUpsertBind, MutateInitGlobal, nullptr);
+	aligned_upsert_fn.varargs = LogicalType::VARCHAR; // mapping (3rd arg) is optional (auto-derived)
 	aligned_upsert_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_upsert_fn);
 

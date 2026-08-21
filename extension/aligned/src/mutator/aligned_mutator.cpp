@@ -150,13 +150,18 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 	auto result = make_uniq<MutateBindData>();
 	result->is_delete = is_delete;
 	const char *fn = is_delete ? "aligned_delete" : "aligned_upsert";
-	if (is_delete ? input.inputs.size() != 2 : input.inputs.size() != 3) {
+	size_t expected = is_delete ? 2 : 3;
+	if (!is_delete && input.inputs.size() == 2) {
+		expected = 2; // mapping is optional: auto-derive from the table schema
+	}
+	if (input.inputs.size() != expected) {
 		throw BinderException("%s: expected (%s)", fn,
-		                      is_delete ? "table_name, keys_source" : "table_name, source_path, mapping");
+		                      is_delete ? "table_name, keys_source"
+		                                : "table_name, source_path [, mapping]");
 	}
 	result->table_name = StringValue::Get(input.inputs[0]);
 	result->source_path = StringValue::Get(input.inputs[1]);
-	string mapping_str = is_delete ? string() : StringValue::Get(input.inputs[2]);
+	string mapping_str = (is_delete || input.inputs.size() < 3) ? string() : StringValue::Get(input.inputs[2]);
 
 	string root;
 	ResolveRoot(context, input, fn, root);
@@ -168,20 +173,45 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 	bool empty_table = index_group.parts.empty();
 	result->empty_table = empty_table;
 
-	// Parse + validate the mapping against the table groups (upsert only).
+	// Resolve the group mapping (upsert only). When `mapping` is omitted the
+	// columns are auto-assigned to the group that already owns them (by name),
+	// so the user only needs to pass it for the first write of an empty table
+	// or to override the default placement.
 	case_insensitive_map_t<vector<string>> mapping;
-	if (!is_delete) {
-		ParseMapping(mapping_str, fn, mapping);
-	}
 	result->group_mapping.resize(result->plan.groups.size());
-	for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
-		auto &gm = result->group_mapping[gi];
-		auto &group = result->plan.groups[gi];
-		auto it = mapping.find(group.manifest.group);
-		if (it == mapping.end()) {
-			continue; // unmapped group (upsert: NULL rows; delete: no mapping)
+	if (!is_delete) {
+		if (mapping_str.empty()) {
+			if (empty_table) {
+				throw BinderException("%s: mapping is required for the first write of an empty table "
+				                      "(it defines the Column Group structure); e.g. "
+				                      "'index:date,symbol,close;factor/alpha101:alpha001'",
+				                      fn);
+			}
+			// Auto-derive: each source column → the group whose schema owns it.
+			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(result->source_path), ParquetOptions(context));
+			for (auto &col : reader->columns) {
+				for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
+					auto &group = result->plan.groups[gi];
+					bool owned = std::any_of(group.column_order.begin(), group.column_order.end(),
+					                         [&](const string &n) { return StringUtil::CIEquals(n, col.name); });
+					if (owned) {
+						result->group_mapping[gi].col_names.push_back(col.name);
+						break;
+					}
+				}
+			}
+		} else {
+			ParseMapping(mapping_str, fn, mapping);
+			for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
+				auto &gm = result->group_mapping[gi];
+				auto &group = result->plan.groups[gi];
+				auto it = mapping.find(group.manifest.group);
+				if (it == mapping.end()) {
+					continue; // unmapped group (upsert: NULL rows)
+				}
+				gm.col_names = it->second;
+			}
 		}
-		gm.col_names = it->second;
 	}
 	// Every mapping entry must name a real group (typos fail fast instead of
 	// silently writing nothing for that group).
