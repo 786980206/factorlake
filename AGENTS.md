@@ -918,12 +918,22 @@ tive'）→ 断言 pattern 必须用
   - **实现**：src/catalog/aligned_attach.cpp——DDL 在 init_global 里用**独立 Connection + 独立线程**执行（见下教训）；bind 只做 root 解析 + 目录发现（跳过 `.`/`_` 前缀）；函数输出 (table_name, status)，错误逐表报告不中断
   - **验收**：scripts/test_attach.ps1 7/7 PASS（attach、裸名 SELECT、标准 INSERT 6000→6001、UPDATE 可见、DELETE 回 6000、detach、attach/detach 不动列组数据）；test_aligned 42 / test_upsert 30 / test_compaction 14 全 PASS
 - [ ] **Phase 8（后续）**：DML 写入回写列组的 sync 命令；attach 大表的分块物化
+- [x] **Phase 8c：标准 DELETE/UPDATE（DuckLake 式逻辑 attach，直写 parquet）完成（2026-08）**：
+  - PlanDelete/PlanUpdate 返回自定义 sink 算子（PhysicalAlignedDelete/PhysicalAlignedUpdate），直接写 parquet 列组：
+    - DELETE：收集 WHERE 选中的 rowid → 侧扫 index 组解析 (date,symbol) keys → 临时 keys parquet → worker 线程调 aligned_delete
+    - UPDATE：只取 SET 列（base BindUpdateConstraints），sink 缓冲 (rowid, set值) → 解析 keys → stage [date,symbol,set...] → 调 aligned_upsert，mapping 只含被改列（老 part 缺列的 schema-evolution 列不被强制更新）
+  - 扫描侧修复（catalog 的 LogicalGet ≠ 表函数）：① 虚拟 rowid 须映射到**有效输出位**（projection_ids 秩）而非 column_ids 下标（filter_prune 下 executor 按 projection_ids 分配输出 chunk）；② 重复列请求（UPDATE 子 GET 重复引用键列）复制填充而非覆盖单值 projected_pos；③ scratch=column_ids 位 / output=projection 秩两套索引空间分开；④ LogicalGet::GetTable() 需要 get_bind_info 返回归属 entry，否则 DELETE/UPDATE 报 "not a base table"
+  - mutator 修复（被真实 DML 暴露的存量 bug）：① fresh part 在已存在组里用「组 schema ∪ 新增映射列」，否则窄 part 重定义组 schema 破坏老宽 part 重写；② RewritePart BulkCopyOld 按 scratch 容量分块——一次拷贝 >2048 行溢出 2048 行 scratch（0xc0000374 堆损坏，任何 >~2049 行的部分删除/插入合并都会崩）
+  - 验收：scripts/test_dml.ps1 7/7（标准 INSERT/UPDATE/DELETE 直写 parquet）；test_aligned 42 / test_upsert 30 / test_attach 7 / test_compaction 14 全 PASS
 
 ### Phase 8 关键经验
 
 1. **嵌套查询死锁三连坑**：① 在 bind 里对同一 ClientContext 执行 Query → 死锁（context 忙）；② 换独立 Connection 仍在 bind/init_global 同线程执行 → 死锁（外层查询占着当前线程的执行栈）；③ 放独立线程才通。但真正让 CLI 卡死的元凶是第 ④ 个坑——
 2. **表函数必须以「输出 0 行」结束**：AttachFunction 每次调用都输出全部行且不置结束 → DuckDB 无限重复调用该函数 → 表现为"挂死"。加 `finished` 标志，第二次调用 `SetCardinality(0)` 返回。诊断手段：往临时文件打 Trace 日志定位到"内层 DDL 其实已完成"，才暴露是外层扫描死循环。
 3. v1.5.4 细节：`Connection(DatabaseInstance::GetDatabase(context))`（需 include database.hpp）；表函数可选位置参数用 `varargs = LogicalType::VARCHAR` 且首参声明 `{LogicalType::VARCHAR}`；同名 TableFunctionSet 内两个同签名函数会报 "Could not choose a best candidate"。
+4. **`FileSystem::CreateLocal()` 返回 unique_ptr**：`auto &fs = *FileSystem::CreateLocal();` 是悬垂引用（临时 unique_ptr 语句结束即释放其指向对象）→ 下一次使用崩溃（0xc0000005，定位在 CreateDirectoriesRecursive）。必须 `auto fs = FileSystem::CreateLocal(); auto &fs2 = *fs;` 保持所有权。
+5. **catalog 表扫描的列请求 ≠ 表函数**：executor 按 `projection_ids`（column_ids 子集，filter_prune 剪枝后）分配输出 chunk 向量数；`input.column_ids` 可能含**重复列**（UPDATE 子 GET 重复引用键列）和虚拟 rowid(-1)。投影位必须映射到 projection_ids 秩，重复列要复制填充。用 trace 打 `input.column_ids`/`projection_ids`/filters keys 对比 SELECT 与 DML 子计划即可一眼定位。
+6. **诊断流程（DuckLake 式 DML）**：EXPLAIN ANALYZE 看各算子实际 rows（PROJECTION 0 rows = 扫描输出空）；scan 里打 column_ids/filters/proj 确认 executor 传参；worker 里按步骤打 Trace 定位崩溃点（keys resolved → staged_coll → fs → dir → writer ctor → flush → upsert）。
 
 ### v7 Mutator 关键经验
 
