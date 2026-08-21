@@ -44,18 +44,23 @@ SELECT * FROM aligned_delete('cnstk_ixday', '/data/stage/2026-08-17.parquet', ro
 -- 合并 part（单事务合并所有组，按分区目录，原子切换）：
 SELECT * FROM aligned_compact('cnstk_ixday', 'all', root='/data');
 
--- Attach：把数据根下的逻辑表注册成真正的 DuckDB catalog 表（物化快照），
--- 之后即可用裸表名跑标准 SQL（SELECT / INSERT / UPDATE / DELETE）：
-SELECT * FROM aligned_attach('cnstk_ixday');          -- 单表；aligned_attach() 为全表
-INSERT INTO cnstk_ixday (date, symbol, close, alpha001, ma5)
+-- Attach（DuckLake 式逻辑 attach，推荐）：把数据根挂载为 catalog 数据库，
+-- 表保持「逻辑表」——SELECT 走 aligned 扫描，标准 DML 直接读写底层 parquet 列组：
+ATTACH '/data' AS al (TYPE ALIGNED);
+SELECT * FROM al.cnstk_ixday;
+INSERT INTO al.cnstk_ixday (date, symbol, close, alpha001, ma5)
   VALUES (DATE '2026-09-01', '009999', 99.5, 1.5, 2.5);
-UPDATE cnstk_ixday SET close = 123.4 WHERE symbol = '009999';
-DELETE FROM cnstk_ixday WHERE symbol = '009999';
-SELECT * FROM aligned_detach('cnstk_ixday');          -- 会话结束或 detach 即丢弃
+UPDATE al.cnstk_ixday SET close = 123.4 WHERE symbol = '009999';
+DELETE FROM al.cnstk_ixday WHERE symbol = '009999';
+-- INSERT/UPDATE 按 (date, symbol) 主键 upsert，只重写受影响 part；原子提交。
+-- DETACH al; 即可卸载（数据始终在 parquet 列组里）。
 
--- 注意：attach 出的表是「会话内物化快照」，标准 DML 写入的是 DuckDB 自身存储，
--- 不回写 parquet 列组；需要持久化到列组时仍走 aligned_upsert/aligned_delete。
--- 直接写列组（不 attach，支持超大数据流式写入）：
+-- aligned_attach()（旧，物化快照）：把逻辑表物化成 DuckDB 原生表（快照），
+-- DML 写入 DuckDB 自身存储、不回写列组；仅适合临时分析，持久化仍走 upsert/delete：
+SELECT * FROM aligned_attach('cnstk_ixday');          -- 单表；aligned_attach() 为全表
+SELECT * FROM aligned_detach('cnstk_ixday');
+
+-- 不 attach、直接流式写列组（超大数据首选）：
 SELECT * FROM aligned_upsert('cnstk_ixday', '/data/stage/2026-08-17.parquet', root='/data');
 ```
 
@@ -111,7 +116,7 @@ index）用**同一种一层分区段**（`year=`/`month=`/`date=`）；Group �
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
 | 写入 | ✅ | `aligned_upsert()` / `aligned_delete()`（v7 mutator）：按 (date, symbol) 主键插入 / 更新 / 追加新分区 / 删除行；只重写受影响 part；`_tmp` 暂存 + 原子提交（last_txid+1） |
 | 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，按分区目录合并 part，原子切换 |
-| catalog 集成 | ✅ | `aligned_attach()`：把逻辑表注册成真正的 DuckDB catalog 表（会话内物化快照），裸表名跑标准 SELECT / INSERT / UPDATE / DELETE；`aligned_detach()` 移除。DML 写入 DuckDB 自身存储、不回写列组；流式写列组仍走 `aligned_upsert`/`aligned_delete` |
+| catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组**（按 (date,symbol) upsert、只重写受影响 part）。另有 `aligned_attach()` 物化快照辅助函数 |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
 
 不支持（明确不做）：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。
