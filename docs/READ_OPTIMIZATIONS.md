@@ -7,7 +7,7 @@
 ## 1. 当前读取链路（一图流）
 
 ```
-Bind:    BuildTablePlan           → 打开每个 part 的 footer（行数/列），全对齐校验，
+Bind:    BuildTablePlan           → 打开每分区最后 1 个 part 的 footer（行数/列），分区对齐校验，
                                      校验 Row Space、派生分组/分区
          ResolveColumnTypes       → 每 group 开第一个 part 读列类型（schema evolution
                                     时逐 part 找）
@@ -57,8 +57,8 @@ Scan:    AlignedScanFunction
    `ALIGNED_TABLE(Projections: alpha001)`）。scan 仍读取过滤列（隐藏读取列，
    用于剪枝 + 行级过滤），输出经 scratch + `ReferenceColumns(projection_ids)`
    修剪——该路径原有代码已完整实现，本次只是打开开关。
-   验收：`test_aligned.ps1` 30 项、`test_writer.ps1` 17 项、`test_compaction.ps1`
-   16 项、`test_parallel.ps1` 全 PASS。
+    验收：`test_aligned.ps1` 42 项、`test_upsert.ps1` 29 项、`test_compaction.ps1`
+    14 项、`test_parallel.ps1` 全 PASS。
 
 2. **P1-A 列类型解析复用**（`PartInfo.types`）：`ReadPartFooter` 在 plan 阶段
    已读 footer，把每列类型存入 `PartInfo.types`；`ResolveColumnTypes` 不再

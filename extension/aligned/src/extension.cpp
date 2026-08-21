@@ -4,8 +4,8 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "mutator/aligned_mutator.hpp"
 #include "scan/aligned_scan.hpp"
-#include "writer/aligned_writer.hpp"
 
 namespace duckdb {
 
@@ -47,13 +47,23 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("aligned_data_root", "Root directory for AlignedTable logical tables",
 	                             LogicalType::VARCHAR);
 
-	// aligned_write(table_name, source_path, mapping, root=..., start_row=...)
-	// Phase 5: append rows to an AlignedTable from a source parquet file
-	TableFunction aligned_write_fn("aligned_write", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                               AlignedWriteFunction, AlignedWriteBind, AlignedWriteInitGlobal, nullptr);
-	aligned_write_fn.named_parameters["root"] = LogicalType::VARCHAR;
-	aligned_write_fn.named_parameters["start_row"] = LogicalType::UBIGINT;
-	loader.RegisterFunction(aligned_write_fn);
+	// aligned_upsert(table_name, source_path, mapping, root=...)
+	// v7: upsert rows by primary key (date, symbol) from a source parquet file.
+	// An existing key is UPDATED (only the mapped columns are overwritten), a
+	// new key is INSERTED at its sorted position. Returns
+	// (rows_inserted, rows_updated, parts_rewritten, txid).
+	TableFunction aligned_upsert_fn("aligned_upsert", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                AlignedUpsertFunction, AlignedUpsertBind, MutateInitGlobal, nullptr);
+	aligned_upsert_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(aligned_upsert_fn);
+
+	// aligned_delete(table_name, keys_source, root=...)
+	// v7: delete rows by primary key (date, symbol). Non-existent keys are
+	// skipped (idempotent). Returns (rows_deleted, parts_rewritten, txid).
+	TableFunction aligned_delete_fn("aligned_delete", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                AlignedDeleteFunction, AlignedDeleteBind, MutateInitGlobal, nullptr);
+	aligned_delete_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(aligned_delete_fn);
 
 	// aligned_compact(table_name, group_name, root=...)
 	// Phase 7: merge a group's parts per partition directory (atomic switch)

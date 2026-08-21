@@ -65,7 +65,7 @@ Days=(2026-09-01 2026-09-02 2026-09-03 2026-09-04)
 rowsPerDay=$((ROWS / ${#Days[@]}))
 
 rj(){ mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" > "$1"; }
-partn(){ printf 'part-%06d' "$1"; }
+partn(){ printf '%04d-%010d' "$1" "$2"; }
 # Run a (potentially huge) SQL statement via a temp file on stdin, so very wide
 # datasets (W3, thousands of columns) that overflow ARG_MAX with `-c` still work.
 run_duck(){ local tmp="$OUT/.gen_bench.sql"; printf '%s\n' "$1" > "$tmp"; "/d/proj/factorlake/duckdb/build/duckdb_aligned.exe" -light-mode < "$tmp" >/dev/null; }
@@ -108,19 +108,18 @@ txid=0; dayStart=0
 for date in "${Days[@]}"; do
   txid=$((txid+1)); start=$dayStart; end=$((start+rowsPerDay))
 
-  # index group: day-level partition, 1 part per day (fully aligned with
-  # alpha/fieldset), RGS 32768
+#   index group: day-level partition, 1 part per day (same kind for all
+#   groups — v5 single-level partition contract), RGS 32768
   indexDir="$tableDir/index/date=$date"; mkdir -p "$indexDir"
-  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid $([ -n "$IX_SEL" ] && echo ", $IX_SEL") FROM r) TO '$indexDir/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
+  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid $([ -n "$IX_SEL" ] && echo ", $IX_SEL") FROM r) TO '$indexDir/$(partn 0 $rowsPerDay).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
 
-  # alpha group: year/month/date, 1 part, ALPHA_COLS sparse cols
-  alphaDir="$tableDir/factor/alpha/year=2026/month=2026-09/date=$date"; mkdir -p "$alphaDir"
-  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT CAST(r AS BIGINT) AS rowid_alpha $([ -n "$ALPHA_SEL" ] && echo ", $ALPHA_SEL") FROM r) TO '$alphaDir/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
+  # alpha group: day-level partition, 1 part, ALPHA_COLS sparse cols
+  alphaDir="$tableDir/factor/alpha/date=$date"; mkdir -p "$alphaDir"
+  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT CAST(r AS BIGINT) AS rowid_alpha $([ -n "$ALPHA_SEL" ] && echo ", $ALPHA_SEL") FROM r) TO '$alphaDir/$(partn 0 $rowsPerDay).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
 
-  # fieldset group: coarse year/month, 1 part per day
-  fsDir="$tableDir/fieldset/fs/year=2026/month=2026-09"; mkdir -p "$fsDir"
-  pn=$(partn $((txid-1)))
-  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT CAST(r AS BIGINT) AS rowid_fs $([ -n "$FS_SEL" ] && echo ", $FS_SEL") FROM r) TO '$fsDir/$pn.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
+  # fieldset group: day-level partition, 1 part (same kind as index/alpha)
+  fsDir="$tableDir/fieldset/fs/date=$date"; mkdir -p "$fsDir"
+  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT CAST(r AS BIGINT) AS rowid_fs $([ -n "$FS_SEL" ] && echo ", $FS_SEL") FROM r) TO '$fsDir/$(partn 0 $rowsPerDay).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
 
   dayStart=$((dayStart+rowsPerDay))
 done

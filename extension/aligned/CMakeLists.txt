@@ -16,8 +16,10 @@ set(ALIGNED_EXTENSION_FILES
     src/catalog/manifest.cpp
     src/resolver/row_space.cpp
     src/resolver/partition_resolver.cpp
+    src/resolver/key_resolver.cpp
+    src/rewriter/part_rewriter.cpp
+    src/mutator/aligned_mutator.cpp
     src/scan/aligned_scan.cpp
-    src/writer/aligned_writer.cpp
     src/compaction/aligned_compactor.cpp
 )
 

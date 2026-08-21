@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
 
 namespace duckdb {
@@ -90,14 +91,15 @@ string SegmentValueToTemplate(const string &value) {
 } // namespace
 
 vector<PartitionTemplate> DerivePartitioningFromPaths(const vector<string> &paths, const string &table_name,
-                                                      const string &group_name) {
-	// Ordered segment names (first-seen order) and their templates.
-	vector<string> order;
-	case_insensitive_map_t<string> templates_by_name;
+                                                      const string &group_name, const string &source_column) {
+	// Single-level partitioning (v5): the first path reveals the partition
+	// segment; every other path must agree on the same format. The source
+	// column (v6) is the index schema's DATE/TIMESTAMP field among its first
+	// two columns — bound by the caller.
+	vector<PartitionTemplate> result;
 	for (auto &raw : paths) {
 		string path = raw;
 		std::replace(path.begin(), path.end(), '\\', '/');
-		// Split the path into segments and inspect each name=value segment.
 		size_t pos = 0;
 		while (pos < path.size()) {
 			auto slash = path.find('/', pos);
@@ -116,24 +118,17 @@ vector<PartitionTemplate> DerivePartitioningFromPaths(const vector<string> &path
 			if (tmpl.empty()) {
 				continue; // unrecognized value format: ignored
 			}
-			auto it = templates_by_name.find(name);
-			if (it == templates_by_name.end()) {
-				templates_by_name[name] = tmpl;
-				order.push_back(name);
-			} else if (it->second != tmpl) {
-				throw IOException("Aligned table '%s' group '%s': partition segment '%s' has inconsistent formats "
-				                  "('%s' vs '%s')",
-				                  table_name, group_name, name, it->second, tmpl);
+			if (result.empty()) {
+				PartitionTemplate t;
+				t.template_str = tmpl;
+				t.source = source_column.empty() ? "date" : source_column;
+				result.push_back(std::move(t));
+			} else if (result[0].template_str != tmpl) {
+				throw IOException("Aligned table '%s' group '%s': partition segments have inconsistent formats "
+				                  "('%s' vs '%s'); the v5 contract allows one single-level partition kind",
+				                  table_name, group_name, result[0].template_str, tmpl);
 			}
 		}
-	}
-	vector<PartitionTemplate> result;
-	result.reserve(order.size());
-	for (auto &name : order) {
-		PartitionTemplate tmpl;
-		tmpl.template_str = templates_by_name[name];
-		tmpl.source = "date"; // the partition source column is always `date`
-		result.push_back(std::move(tmpl));
 	}
 	return result;
 }
@@ -143,7 +138,17 @@ static bool IsConstantDateFilter(const TableFilter &filter, ExpressionType &cmp,
 		return false;
 	}
 	auto &cf = filter.Cast<ConstantFilter>();
-	if (cf.constant.IsNull() || cf.constant.type().id() != LogicalTypeId::DATE) {
+	if (cf.constant.IsNull()) {
+		return false;
+	}
+	if (cf.constant.type().id() == LogicalTypeId::TIMESTAMP) {
+		// v6: TIMESTAMP constants are compared on their date part (the
+		// partition source column may be a TIMESTAMP field).
+		cmp = cf.comparison_type;
+		value = Timestamp::GetDate(cf.constant.GetValue<timestamp_t>());
+		return true;
+	}
+	if (cf.constant.type().id() != LogicalTypeId::DATE) {
 		return false;
 	}
 	cmp = cf.comparison_type;

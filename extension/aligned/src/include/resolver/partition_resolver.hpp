@@ -15,12 +15,13 @@ bool EvaluatePartitionTemplate(const string &template_str, date_t value, string 
 //! Derives the partition schema of a group from its part file paths. Only the
 //! fixed segment kinds are recognized: year=YYYY, month=YYYY-MM and
 //! date=YYYY-MM-DD (segment name -> template). Other name=value segments are
-//! ignored. The partition source column is always the logical "date" column.
-//! Throws IOException when parts of the same group disagree on a segment's
-//! format. Returns an empty list when no recognized segment exists (an
-//! unpartitioned group).
+//! ignored. The partition source column (v6) is the index schema's
+//! DATE/TIMESTAMP field among its first two columns — bound by the caller
+//! (falls back to "date" when empty). Throws IOException when parts of the
+//! same group disagree on a segment's format. Returns an empty list when no
+//! recognized segment exists (an unpartitioned group).
 vector<PartitionTemplate> DerivePartitioningFromPaths(const vector<string> &paths, const string &table_name,
-                                                      const string &group_name);
+                                                      const string &group_name, const string &source_column);
 
 //! Prunes a part list by a constant comparison filter on a partition source
 //! column (contract §4). The templates must be the prefix of the group's

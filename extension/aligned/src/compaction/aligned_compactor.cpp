@@ -124,12 +124,24 @@ static idx_t NextPartIndex(FileSystem &fs, const string &dir) {
 	}
 	fs.ListFiles(dir, [&](OpenFileInfo &info) {
 		auto &name = info.path;
-		if (StringUtil::StartsWith(name, "part-") && StringUtil::EndsWith(name, ".parquet") && name.size() > 13) {
-			string idx_str = name.substr(5, name.size() - 5 - 8);
-			try {
-				unsigned long long value = std::stoull(idx_str);
-				next = MaxValue<idx_t>(next, (idx_t)value + 1);
-			} catch (...) {
+		if (name.size() >= 16 && StringUtil::EndsWith(name, ".parquet")) {
+			// base = "0002-0000002048" (15 chars, '-' at position 4)
+			string base = name.substr(0, name.size() - 8);
+			if (base.size() == 15 && base[4] == '-') {
+				bool digits = true;
+				for (idx_t i = 0; i < 15; i++) {
+					if (i != 4 && (base[i] < '0' || base[i] > '9')) {
+						digits = false;
+						break;
+					}
+				}
+				if (digits) {
+					try {
+						unsigned long long value = std::stoull(base.substr(0, 4));
+						next = MaxValue<idx_t>(next, (idx_t)value + 1);
+					} catch (...) {
+					}
+				}
 			}
 		}
 	});
@@ -237,14 +249,15 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 				}
 
 			// All parts must share the same column set (schema evolution
-			// within a directory cannot be compacted in v1)
-			auto &columns = parts[0]->columns;
-			for (idx_t i = 1; i < parts.size(); i++) {
-				if (parts[i]->columns != columns) {
-					throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts have "
-					                  "different column sets (schema evolution within a directory)",
-					                  bind.plan.table.name, group.manifest.group, dir);
-				}
+			// within a directory cannot be compacted in v1). The merged part's
+			// schema is the first part's FILE schema (per-part column metadata
+			// is not stored in the plan — it is read from the footer here).
+			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(parts[0]->path), ParquetOptions(context));
+			vector<string> columns;
+			vector<LogicalType> col_types;
+			for (auto &rc : reader->columns) {
+				columns.push_back(rc.name);
+				col_types.push_back(rc.type);
 			}
 
 			// Rows must be contiguous within the directory
@@ -259,33 +272,25 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 				row_count += parts[i]->row_count;
 			}
 
-			// Column types: from the first part
-			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(parts[0]->path), ParquetOptions(context));
-			vector<LogicalType> col_types;
-			for (idx_t i = 0; i < parts[0]->columns.size(); i++) {
-				bool found = false;
-				for (auto &rc : reader->columns) {
-					if (StringUtil::CIEquals(rc.name, parts[0]->columns[i])) {
-						col_types.push_back(rc.type);
-						found = true;
-						break;
-					}
-				}
-				if (!found) {
-					throw IOException("Aligned table '%s' group '%s': part '%s' is missing column '%s'",
-					                  bind.plan.table.name, group.manifest.group, parts[0]->part_name,
-					                  parts[0]->columns[i]);
-				}
-			}
-
-			// Staged new part
+			// Staged new part. v6: the merged part is the only part of the
+			// partition, so its self-describing name is "{idx:04d}-{rows:10d}"
+			// with idx = 0 (every group merges the same partition together, so
+			// cross-group indexes stay consistent). The staging path includes
+			// the partition's relative path so that multiple partitions of one
+			// group do not collide.
 			idx_t rgs = bind.plan.table.rg_rows > 0 ? bind.plan.table.rg_rows : 131072;
-			string part_name = StringUtil::Format("part-%06llu", (unsigned long long)NextPartIndex(fs, dir));
-			string staged_dir = tmp_root + "/" + group.manifest.group;
+			if (row_count > 9999999999ULL) {
+				throw IOException("Aligned table '%s' group '%s': merged part '%s' holds %llu rows — more than the "
+				                  "self-describing name can represent (10 digits)",
+				                  bind.plan.table.name, group.manifest.group, dir, row_count);
+			}
+			string part_name = StringUtil::Format("0000-%010llu", (unsigned long long)row_count);
+			string group_rel = dir.substr(group.group_path.size());
+			string staged_dir = tmp_root + "/" + group.manifest.group + group_rel;
 			fs.CreateDirectoriesRecursive(staged_dir);
 			string staged_path = staged_dir + "/" + part_name + ".parquet";
 			auto writer = make_uniq<ParquetWriter>(
-			    context, fs, staged_path, col_types, parts[0]->columns, duckdb_parquet::CompressionCodec::ZSTD,
+			    context, fs, staged_path, col_types, columns, duckdb_parquet::CompressionCodec::ZSTD,
 			    ChildFieldIDs(), ShreddingType(), vector<pair<string, string>>(), nullptr, optional_idx(),
 			    1073741824ULL /* PrimitiveColumnWriter::MAX_UNCOMPRESSED_DICT_PAGE_SIZE */, 1, 0.01,
 			    ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
@@ -299,9 +304,23 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			for (auto &part : parts) {
 				auto part_reader =
 				    make_uniq<ParquetReader>(context, OpenFileInfo(part->path), ParquetOptions(context));
-				// fresh reader: column_ids is empty — read ALL columns in
-				// file order (the merged part keeps parts[0]'s column order)
-				for (idx_t i = 0; i < part->columns.size(); i++) {
+				// Every part must share the first part's column set (same names,
+				// same order) — schema evolution within a directory is rejected
+				if (part_reader->columns.size() != columns.size()) {
+					throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts have "
+					                  "different column sets (schema evolution within a directory)",
+					                  bind.plan.table.name, group.manifest.group, dir);
+				}
+				for (idx_t ci = 0; ci < columns.size(); ci++) {
+					if (part_reader->columns[ci].name != columns[ci]) {
+						throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts have "
+						                  "different column sets (schema evolution within a directory)",
+						                  bind.plan.table.name, group.manifest.group, dir);
+					}
+				}
+				// fresh reader: read ALL columns in file order (the merged part
+				// keeps the first part's column order)
+				for (idx_t i = 0; i < part_reader->columns.size(); i++) {
 					part_reader->column_ids.push_back(MultiFileLocalColumnId(i));
 				}
 				ParquetReaderScanState scan_state;

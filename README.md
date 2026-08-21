@@ -32,13 +32,16 @@ Row Group 剪枝；跨 Group 的所有行天然对齐，无需 JOIN。
 -- 或者显式指定根目录：
 SELECT * FROM aligned_scan('/data', 'cnstk_ixday');
 
--- 写入（append-only，原子提交）：
-SELECT * FROM aligned_write('cnstk_ixday', '/data/stage/2026-08-17.parquet',
+-- 写入（upsert：按 (date, symbol) 主键插入/更新/追加新分区，原子提交）：
+SELECT * FROM aligned_upsert('cnstk_ixday', '/data/stage/2026-08-17.parquet',
                              'index:date,symbol,close;factor/alpha101:alpha001,alpha002;fieldset/ma:ma20',
                              root='/data');
 
--- 合并 part（按分区目录，原子切换）：
-SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha101', root='/data');
+-- 删除（按 keys source 里的 (date, symbol) 定位要删的行）：
+SELECT * FROM aligned_delete('cnstk_ixday', '/data/stage/2026-08-17.parquet', root='/data');
+
+-- 合并 part（单事务合并所有组，按分区目录，原子切换）：
+SELECT * FROM aligned_compact('cnstk_ixday', 'all', root='/data');
 ```
 
 ## 核心概念
@@ -53,15 +56,15 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha101', root='/data');
 ```
 <data_root>/
 ├── cnstk_ixday/            ← Logical Table
-│   ├── _table.json         ← 可选 manifest（缺失时用默认值，见契约 v4）
+│   ├── _table.json         ← 可选 manifest（缺失时用默认值，见契约 v7）
 │   ├── index/              ← Column Group（Key + 基础行情，必须存在）
-│   │   └── date=2026-08-17/
+│   │   └── month=2026-08/
 │   ├── factor/alpha101/    ← Column Group（lv1/lv2 两级路径）
 │   └── fieldset/ma/        ← Column Group
 └── cnstk_klm01/            ← 另一张 Logical Table
 ```
 
-7 条核心 Invariant（详见 `docs/STORAGE_CONTRACT.md` v4）：
+7 条核心 Invariant（详见 `docs/STORAGE_CONTRACT.md` v7）：
 
 | # | Invariant |
 |---|-----------|
@@ -73,9 +76,13 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha101', root='/data');
 | 6 | Physical Files 可以完全不同 |
 | 7 | 查询阶段绝不通过 Key 做 JOIN |
 
-**对齐契约（唯一，无模式选择）**：所有 Group 必须全对齐（full alignment）——part 数、
-part 大小、末 part 大小一致，行区间由公式 `start_row(i) = i * part_rows` 推导
-（`part_rows` = index 首 part 行数）。违反即 fail-fast（"full alignment required"）。
+**对齐契约（唯一，无模式选择）**：分区对齐（partition-aligned）——所有 Group（含
+index）用**同一种一层分区段**（`year=`/`month=`/`date=`）；Group 分区键 ⊆ index
+（缺分区 → 行保留、列全 NULL）；共享分区总行数一致。**part 文件名自描述
+`{idx:04d}-{rows:10d}.parquet`**：行区间由文件名累加推导（零 footer IO），index
+分区内索引 0000 起连续，非 index 组允许缺号；**index schema 前两列 = 主键
+(date, symbol)**：恰一列 DATE/TIMESTAMP（分区源列）+ 一列 symbol（v7 契约）。
+违反即 fail-fast。
 `_table.json` 的 `aligned` 字段（v3 三模式）已被删除：读端忽略，不存在探测降级链。
 
 ## 已实现功能
@@ -87,11 +94,11 @@ part 大小、末 part 大小一致，行区间由公式 `start_row(i) = i * par
 | 过滤下推 | ✅ | Hive 分区剪枝 + Parquet Row Group stats 剪枝 + 行级 filter（`WHERE date=...` 剪到 1/4 数据时约 2-3× 收益） |
 | 并行扫描 | ✅ | Aligned Row Group 为任务单元，8 线程实测 ≈4.2× 加速 |
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
-| 写入 | ✅ | `aligned_write()`：append-only、按分区切 part、`_tmp` 暂存 + 原子提交（last_txid+1） |
-| 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**（保持组间 part 数一致），按分区目录合并 part，原子切换 |
+| 写入 | ✅ | `aligned_upsert()` / `aligned_delete()`（v7 mutator）：按 (date, symbol) 主键插入 / 更新 / 追加新分区 / 删除行；只重写受影响 part；`_tmp` 暂存 + 原子提交（last_txid+1） |
+| 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，按分区目录合并 part，原子切换 |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
 
-不支持（第一版明确不做）：UPDATE/DELETE、Tombstone/Delta、事务并发写。
+不支持（明确不做）：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。
 
 ## 构建
 
@@ -112,12 +119,15 @@ ninja -C build-rel aligned_loadable_extension
 # → build-rel/extension/aligned/aligned.duckdb_extension
 ```
 
-测试（数据生成 + 验收脚本，Windows 用 `.ps1`、Linux 用 `.sh`，当前 28/28 PASS）：
+测试（数据生成 + 验收脚本，Windows 用 `.ps1`、Linux 用 `.sh`）：
 
 ```bash
 bash scripts/gen_testdata.sh   # 生成 testdata/（6000 行 × 3 组）
 bash scripts/test_aligned.sh   # 读取/投影/分区剪枝/并行/契约校验
 ```
+
+Windows 验收（全量回归）：`test_aligned.ps1` 42/42、`test_upsert.ps1` 29/29、
+`test_compaction.ps1` 14/14、`test_parallel.ps1` 8/8 全 PASS。
 
 ## 性能结论（详见 docs/）
 
@@ -126,7 +136,7 @@ bash scripts/test_aligned.sh   # 读取/投影/分区剪枝/并行/契约校验
 - **`docs/BENCHMARK_MULTI_ANALYSIS.md`**：6 引擎对比（DuckDB 宽表/JOIN、polars
   横向 concat/JOIN、aligned）。A-ALIGNED vs D-JOIN 在 10M 行 ≈ **40×**、vs polars
   JOIN ≈ **152×**（position 组装近似线性 vs JOIN/hstack 超线性）。
-- **三模式基准（all/group/none）已随 v4 删除**：全对齐契约固定为 all，无性能差异
+- **三模式基准（all/group/none）已随 v4 删除**；v5 起为分区对齐契约，无性能差异
   可比较；part 粒度影响固定开销的结论仍在（writer 应尽量大 part）。
 
 ## 文档索引
@@ -134,12 +144,10 @@ bash scripts/test_aligned.sh   # 读取/投影/分区剪枝/并行/契约校验
 | 文档 | 内容 |
 |------|------|
 | `AGENTS.md` | 项目权威记忆文件（架构决策、进度、关键经验，agent 必读） |
-| `docs/STORAGE_CONTRACT.md` | 存储契约 v4（目录规则、列名规则、全对齐契约、行区间、Manifest） |
+| `docs/STORAGE_CONTRACT.md` | 存储契约 v7（目录规则、列名规则、分区对齐契约、行区间、Manifest、写入协议） |
 | `docs/BENCHMARK*.md` | 各轮基准测试方法与结论 |
 | `docs/EXTENSION_RELEASE.md` | 扩展发布机制（INSTALL/LOAD、签名、GitHub Release） |
 | `docs/READ_OPTIMIZATIONS.md` | 读取链路现状分析与优化计划 |
-| `docs/WRITE_PLAN.md` | 写入功能现状与开发计划 |
-| `plan.md` | 原始完整技术 Plan（做什么、为什么、归属哪个 Phase） |
 
 ## 路线图
 
@@ -147,6 +155,6 @@ bash scripts/test_aligned.sh   # 读取/投影/分区剪枝/并行/契约校验
    （过滤列不投影也可剪枝、省掉多余 PROJECTION 层）、✅ 列类型解析复用；
    待做：NULL 填充向量化、reader 缓存、批量 footer、聚合 stats 快速路径
    （依赖 DuckDB ≥ v1.6）。
-2. **写入增强**（见 `docs/WRITE_PLAN.md`）：目录源、part_rows 上限切分、并发写
-   互斥（last_txid CAS）、写后校验、group 间并行。
+2. **写入增强**（v7 mutator 已完成核心）：目录源（多文件 glob）、并发写互斥
+   （last_txid CAS）、写后校验。
 3. **Catalog Integration**：最终目标 `SELECT * FROM cnstk_ixday;` 直接可用。

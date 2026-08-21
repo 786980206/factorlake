@@ -218,27 +218,18 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 
 	for (auto gi : order) {
 		auto &group = plan.groups[gi];
-		// Column types come from the part metadata captured at plan time
-		// (footer reads, no per-column reader construction — P1: previously
-		// every column missing from the first part opened a new ParquetReader).
-		// Schema evolution: the type of a column is the type of the FIRST part
-		// containing it.
-		auto resolve_type = [&](const string &col) -> LogicalType {
-			for (auto &part : group.parts) {
-				auto it = std::find(part.columns.begin(), part.columns.end(), col);
-				if (it != part.columns.end()) {
-					return part.types[it - part.columns.begin()];
-				}
-			}
-			throw IOException("Aligned table '%s' group '%s': column '%s' is declared but not found in any part",
-			                  plan.table.name, group.manifest.group, col);
-		};
-		for (auto &col : group.column_order) {
+		// Column types come from the group schema (the group's last part's
+		// footer, captured at plan time). The group schema is the LAST part's
+		// schema — older parts lacking evolution columns read as NULL at scan
+		// time (contract §8). O(1) lookup, no per-column part scan.
+		for (idx_t ci = 0; ci < group.column_order.size(); ci++) {
+			auto &col = group.column_order[ci];
+			auto &col_type = group.schema_types[ci];
 			if (gi == index_group) {
 				// index columns are authoritative: bare names
 				group.output_positions.push_back(names.size());
 				names.push_back(col);
-				types.push_back(resolve_type(col));
+				types.push_back(col_type);
 				continue;
 			}
 			if (index_columns.count(col) > 0) {
@@ -254,11 +245,11 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 				auto qualified = group.lv1 + "." + group.lv2 + "." + col;
 				group.output_positions.push_back(names.size());
 				names.push_back(qualified);
-				types.push_back(resolve_type(col));
+				types.push_back(col_type);
 			} else {
 				group.output_positions.push_back(names.size());
 				names.push_back(col);
-				types.push_back(resolve_type(col));
+				types.push_back(col_type);
 			}
 		}
 	}
@@ -471,11 +462,13 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		}
 	}
 
-	// Active row intervals. All tables are position-aligned (the alignment
-	// contract — no per-table switch anymore), so every leaf shares the same
-	// Logical Row Space and the per-leaf partition-pruning results map to a
-	// unified coordinate: they are INTERSECTED into one global scan range. A
-	// range pruned by any active leaf is skipped for all leaves.
+	// Active row intervals. Tables are partition-aligned: the index group
+	// covers the full row space and defines the total row count, so it is the
+	// authoritative pruning scope. Only groups whose partition keys EQUAL the
+	// index's keys (full coverage) share the same row range and can participate
+	// in the interval intersection; a partition-subset group is scanned for its
+	// own parts and NULL-fills the missing ranges, so its pruned ranges must
+	// NOT remove rows from the global scan range.
 	vector<pair<idx_t, idx_t>> active;
 	bool any_active = false;
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
@@ -483,6 +476,9 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			continue;
 		}
 		auto &group = bind.plan.groups[gi];
+		if (!group.full_coverage) {
+			continue; // partition-subset group: does not restrict the scan range
+		}
 		const auto &parts = result->kept_parts[gi].empty() ? group.parts : result->kept_parts[gi];
 		auto intervals = BuildIntervals(parts);
 		if (!any_active) {
@@ -496,8 +492,9 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		}
 	}
 	if (!any_active) {
-		// No columns requested at all (e.g. count(*) without filters):
-		// cardinality-only scan over the full row space
+		// No columns requested at all (e.g. count(*) without filters), or only
+		// partition-subset groups are active: the scan covers the full row
+		// space (subset groups NULL-fill their missing ranges).
 		active = {{0, bind.total_rows}};
 	}
 	result->active_intervals = std::move(active);
@@ -544,8 +541,23 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	g.part_idx = part_idx;
 	g.reader = OpenPartReader(context, part, bind.plan.table.name, group.manifest.group);
 
+	// Defensive check (v6): the open file's footer row count must equal the
+	// self-describing value parsed from the file name. The plan's row counts
+	// come from file names ONLY (no footer reads), so a mismatch means the
+	// file was written without the v6 naming contract or was truncated —
+	// fail fast instead of misaligning the file-name-derived row intervals.
+	if (g.reader->NumRows() != part.row_count) {
+		throw IOException("Aligned table '%s' group '%s' part '%s': file holds %llu rows but its name declares %llu "
+		                  "rows (self-describing part-name contract)",
+		                  bind.plan.table.name, group.manifest.group, part.part_name, g.reader->NumRows(),
+		                  part.row_count);
+	}
+
 	// Build the read mapping in group column order; only requested columns
-	// are read from the parquet file (projection pushdown)
+	// are read from the parquet file (projection pushdown). File columns are
+	// resolved against the OPEN reader's schema (the plan only stores the
+	// group schema — the last part's — so older schema-evolution parts find
+	// their columns here and newer columns are NULL-filled as missing).
 	g.read_cols.clear();
 	g.out_positions.clear();
 	g.read_types.clear();
@@ -561,12 +573,25 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 			continue;
 		}
 		auto &col = group.column_order[i];
-		auto it = std::find(part.columns.begin(), part.columns.end(), col);
-		if (it == part.columns.end()) {
+		auto it = std::find_if(g.reader->columns.begin(), g.reader->columns.end(),
+		                       [&](const MultiFileColumnDefinition &c) { return c.name == col; });
+		if (it == g.reader->columns.end()) {
 			g.missing_positions.push_back(projected);
 			continue;
 		}
-		auto file_idx = it - part.columns.begin();
+		auto file_idx = it - g.reader->columns.begin();
+		// Cross-part type consistency: the plan schema uses the last part's
+		// types; every part must agree on a column's type (schema evolution
+		// only adds/removes columns, never changes a type). A mismatch would
+		// otherwise crash cryptically inside VectorOperations::Copy via
+		// ConstantVector::VerifyVectorType — fail fast with a clear message.
+		if (group.schema_types[i] != g.reader->columns[file_idx].type) {
+			throw InternalException(
+			    "Aligned table '%s' group '%s' column '%s' has type %s in this part "
+			    "but %s in the group schema (cross-part type mismatch is not allowed)",
+			    bind.plan.table.name, group.manifest.group, col,
+			    g.reader->columns[file_idx].type.ToString(), group.schema_types[i].ToString());
+		}
 		g.read_cols.push_back(file_idx);
 		g.out_positions.push_back(projected);
 		g.read_types.push_back(g.reader->columns[file_idx].type);
@@ -623,12 +648,13 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 			bool skip = false;
 			if (rg.partition_row_group) {
 				for (auto &gf : group_filters) {
-					auto it = std::find(part.columns.begin(), part.columns.end(), gf.column_name);
-					if (it == part.columns.end()) {
+auto it = std::find_if(g.reader->columns.begin(), g.reader->columns.end(),
+				                       [&](const MultiFileColumnDefinition &c) { return c.name == gf.column_name; });
+					if (it == g.reader->columns.end()) {
 						// Column absent in this part (schema evolution): no pruning
 						continue;
 					}
-					auto file_idx = it - part.columns.begin();
+					auto file_idx = it - g.reader->columns.begin();
 					auto stats = rg.partition_row_group->GetColumnStatistics(StorageIndex(file_idx));
 					if (!stats) {
 						continue;
@@ -695,6 +721,30 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 	g.rg_window_valid = true;
 }
 
+//! NULL-fills window rows [from, to) of every requested column of `group`.
+//! Row `r` of the window maps to output row `output_offset + (r - window_start)`.
+static void NullFillGroupRange(DataChunk &output, idx_t output_offset, const GroupPlan &group,
+                               const vector<idx_t> &projected_pos, idx_t window_start, idx_t from, idx_t to) {
+	if (from >= to) {
+		return;
+	}
+	for (idx_t i = 0; i < group.column_order.size(); i++) {
+		if (group.output_positions[i] == DConstants::INVALID_INDEX) {
+			continue;
+		}
+		auto projected = projected_pos[group.output_positions[i]];
+		if (projected == DConstants::INVALID_INDEX) {
+			continue;
+		}
+		auto &vec = output.data[projected];
+		vec.SetVectorType(VectorType::FLAT_VECTOR);
+		auto &mask = FlatVector::Validity(vec);
+		for (idx_t r = from; r < to; r++) {
+			mask.SetInvalid(output_offset + (r - window_start));
+		}
+	}
+}
+
 //! Fills rows [window_start, window_start + count) of one group directly into
 //! the output DataChunk at [output_offset, output_offset + count).
 static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &bind, idx_t group_idx,
@@ -707,33 +757,67 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 	idx_t placed = 0;
 	idx_t cursor = window_start;
 	while (placed < count) {
-		if (g.part_idx >= parts.size()) {
-			throw IOException("Aligned table '%s': group '%s' has no data at row %llu but the table declares %llu "
-			                  "rows (alignment violation)",
-			                  bind.plan.table.name, group.manifest.group, cursor, bind.total_rows);
+		if (parts.empty()) {
+			// No parts at all (empty or fully pruned group): every row of this
+			// window reads as NULL (partition-aligned contract).
+			NullFillGroupRange(output, output_offset, group, projected_pos, window_start, window_start,
+			                   window_start + count);
+			placed = count;
+			break;
 		}
-		// Phase 4: with the shared cursor a thread's claims are not monotonic —
-		// a new window may start BEFORE the part the local state currently sits
-		// in. Rewind to the first part in that case (the advance loop below
-		// re-positions correctly); the row-group window is part-scoped and must
-		// be invalidated too.
-		if (cursor < parts[g.part_idx].start_row) {
-			g.part_idx = 0;
-			g.part_ready = false;
-			g.rg_window_valid = false;
-			g.carry_count = 0;
-		}
-		auto &part = parts[g.part_idx];
-		idx_t part_end = part.start_row + part.row_count;
-		if (cursor >= part_end) {
-			// Move to the next part (zero-row parts are skipped here); the
-			// row-group window belongs to this part and must not be reused
+		// Advance past exhausted parts.
+		while (g.part_idx < parts.size() &&
+		       cursor >= parts[g.part_idx].start_row + parts[g.part_idx].row_count) {
 			g.part_idx++;
 			g.part_ready = false;
 			g.rg_window_valid = false;
 			g.carry_count = 0;
+		}
+		if (g.part_idx >= parts.size()) {
+			// Window extends past the last part (missing partition suffix):
+			// NULL-fill the remainder.
+			NullFillGroupRange(output, output_offset, group, projected_pos, window_start, cursor,
+			                   window_start + count);
+			placed = count;
+			break;
+		}
+		if (cursor < parts[g.part_idx].start_row) {
+			// Parallel rewind or a gap: position on the last part whose
+			// start_row <= cursor (scan forward from the beginning; cursor is
+			// monotonic within a thread's claimed range).
+			g.part_idx = 0;
+			while (g.part_idx + 1 < parts.size() && parts[g.part_idx + 1].start_row <= cursor) {
+				g.part_idx++;
+			}
+			g.part_ready = false;
+			g.rg_window_valid = false;
+			g.carry_count = 0;
+		}
+		if (cursor < parts[g.part_idx].start_row) {
+			// A partition the group does not cover (before the first part):
+			// NULL-fill up to the next part's start (or the window end).
+			idx_t fill_end = MinValue<idx_t>(parts[g.part_idx].start_row, window_start + count);
+			idx_t fill_len = fill_end - cursor;
+			NullFillGroupRange(output, output_offset, group, projected_pos, window_start, cursor, fill_end);
+			placed += fill_len;
+			cursor += fill_len;
 			continue;
 		}
+		if (cursor >= parts[g.part_idx].start_row + parts[g.part_idx].row_count) {
+			// The part ends before the cursor: a partition the group does not
+			// cover sits between parts. NULL-fill up to the next part's start
+			// (or the window end); after the last part this terminates below.
+			idx_t next_start = g.part_idx + 1 < parts.size() ? parts[g.part_idx + 1].start_row
+			                                                 : window_start + count;
+			idx_t fill_end = MinValue<idx_t>(next_start, window_start + count);
+			idx_t fill_len = fill_end - cursor;
+			NullFillGroupRange(output, output_offset, group, projected_pos, window_start, cursor, fill_end);
+			placed += fill_len;
+			cursor += fill_len;
+			continue;
+		}
+		auto &part = parts[g.part_idx];
+		idx_t part_end = part.start_row + part.row_count;
 		if (!g.part_ready) {
 			OpenPart(context, bind, group_idx, g.part_idx, g, projected_pos, parts);
 		}
@@ -840,8 +924,8 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 		// Chunks cover consecutive parquet-window rows [pos, pos + c); the plan
 		// maps them to window-local rows (skipped segments are not in the stream).
 		while (segment_pos < read_need) {
-			auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
-			auto async_type = res.GetResultType();
+auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
+		auto async_type = res.GetResultType();
 			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
 				throw IOException("Aligned table '%s' group '%s': parquet scan ended early at row %llu (alignment "
 				                  "violation)",

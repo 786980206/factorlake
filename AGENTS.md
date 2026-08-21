@@ -104,7 +104,7 @@ fieldset/ma/      year=2026/month=08/
 
 ## 5. Manifest（轻量，不做 Catalog DB）
 
-目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**（v4 契约；
+目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**（v5 契约；
 **没有 `_group.json`、没有 part sidecar、没有 commit marker、没有 aligned 模式字段**）：
 缺失时全部用默认值（rg_rows=16384、part_rows=4194304），Group 列表从文件布局
 发现（glob `**/*.parquet` → 跳过 `name=value` 分区段 → 最长非分区段后缀即 Group）：
@@ -120,32 +120,45 @@ fieldset/ma/      year=2026/month=08/
              "fieldset/ma", "fieldset/qoq", "fieldset/ttm", "fieldset/yoy",
              "panel/cnstk_icday", "panel/cnstk_ixday", "panel/cnstk_klday"],
   "partitioning": {
-    "index":          [{"template": "date=%Y-%m-%d", "source": "date"}],
-    "factor/alpha101": [{"template": "year=%Y", "source": "date"},
-                        {"template": "month=%Y-%m", "source": "date"},
-                        {"template": "date=%Y-%m-%d", "source": "date"}]
+    "index":          [{"template": "month=%Y-%m", "source": "date"}],
+    "factor/alpha101": [{"template": "month=%Y-%m", "source": "date"}]
   }
 }
 ```
 
-- **全对齐（Full Alignment）是唯一契约**：所有 Group 必须同构——part 数 == index
-  的 part 数、组内非最后 part 行数 == index 首 part 行数（`part_rows`）、总行数
-  一致。违反即 fail-fast（"full alignment required"）。**无 group/none 模式、
-  无探测降级链**；`aligned` 字段（v3 三模式）读端忽略。
+- **分区对齐（Partition Alignment）是唯一契约（v5）**：所有 Group（含 index）用
+  **同一种一层分区段**（`year=` / `month=` / `date=` 三选一）；分区键 = 完整
+  `name=value` 段串（因此不同分区方式自动无法对齐）；Group 分区键集合 **⊆ index**
+  （允许缺分区 → 该区行保留、该组列全 NULL；**绝不添加 index 没有的分区**，违反即
+  fail-fast）；共享分区**总行数**必须一致（末 part 行数可不同）。**无全对齐
+  （part 数相同）要求、无 group/none 模式、无探测降级链**；`aligned` 字段（v3）
+  读端忽略。
 - `rg_rows`（可选，默认 16384）：Writer flush 的 Row Group 大小。
 - `part_rows`（可选，默认 4194304）：目标 part 大小提示。**读端不用该值**——part
-  大小由 index 首 part 的 footer 行数决定。
+  大小由 index **首分区首 part** 的 footer 行数决定（读 1 次）。
 - `last_txid`：最近成功提交的事务号（Writer/Compactor 每次 commit +1；无 marker 文件）。
-- `partitioning`（可选）：`group → 有序目录模板`，模板只允许 `year=%Y` / `month=%Y-%m` /
-  `date=%Y-%m-%d`，source 固定 `date`。**空表起步必须显式给出**；否则从目录结构推导
-  （仅识别这三种段，未知 `name=value` 段忽略）；Writer 重写 manifest 必须原样写回。
-- **Canonical Key = index Group 的 schema 列**（v4，不再写进 manifest）。
+- `partitioning`（可选）：`group → 目录模板列表`。**每个 Group 恰好一个模板**（单层）；
+  模板只允许 `year=%Y` / `month=%Y-%m` / `date=%Y-%m-%d`，source 固定 `date`；
+  **所有 Group 必须同一种模板**。**空表起步必须显式给出**；否则从目录结构推导
+  （仅识别这三种单层段，多层 `name=value` 段 → 报错）；Writer 重写 manifest 必须
+  原样写回 partitioning 与 groups。
+- **`groups` 字段读端永不解析**（v5）：Group 发现唯一路径 = 一次 glob；唯一例外 =
+  空表（无任何 part）且 `groups` 非空时给 Writer 提供 Group 骨架。
+- **Canonical Key = index Group 的 schema 列**（v5，不再写进 manifest）。
+- **日期列契约（v6）**：index schema（rel_path 排序最后 1 个 part footer）**前两列
+  中必须至少有一列是 DATE/TIMESTAMP**，否则 fail-fast；该列即 partitioning
+  `source`（目录推导自动绑定实际列名，显式声明不匹配 fail-fast）；分区目录只由
+  该日期列求值（不再写死 `date`）；`IsConstantDateFilter` 支持 TIMESTAMP 等值剪枝。
 - **旧字段向后兼容忽略**：v3 的 `aligned`、v2 的 `key` / `schema_version` /
   `canonical_order` / `row_count` / `row_group_size` 读端忽略，不参与计算。
-- 行区间契约（v4）：part 顺序 = **组内相对路径字符串排序，索引即 part_id**（不再
-  要求 `part-%06llu` 命名）；行区间一律公式 `start_row(i) = i*part_rows`（组内非
-  最后 part 必须恰好 part_rows 行，对照 footer 校验，违反 fail-fast）。跨 Group
-  总行数必须完全一致（否则 fail-fast）。
+- 行区间契约（v5）：part 顺序 = **组内相对路径字符串排序，索引即 part_id**（不再
+  要求 `part-%06llu` 命名）；行区间按**分区公式** `start_row = S_i + j*part_rows`
+  （S_i = index 同键分区起始行；j = 分区内第 j part）；分区行数
+  `R_i = (分区 part 数-1) * part_rows + 分区最后 part 行数`（只读每分区最后 1 个
+  footer + index 首 part）；组内非最后 part 必须恰好 part_rows 行（**扫描时 OpenPart
+  防御校验**，违反 fail-fast）；共享分区 R_i 跨 Group 一致（fail-fast）。组 schema
+  = **组内 rel_path 排序最后 1 个 part** 的 footer（各 part 实际列集扫描时按 reader
+  实时匹配，schema evolution → 缺失列 NULL）。
 
 ---
 
@@ -201,24 +214,29 @@ Extension 只负责：`Logical Table → Column Group resolution → Partition r
 
 ---
 
-## 9. Writer
+## 9. Writer（v7：aligned_upsert / aligned_delete mutator）
 
 ```
-AlignedTableWriter: Arrow RecordBatch → 按 Column Group 拆多个 Parquet Writer
-                    所有 Writer 共享同一 Row Boundary
+aligned_upsert(table, source, mapping, root=...)  → (rows_inserted, rows_updated, parts_rewritten, txid)
+aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewritten, txid)
 ```
 
-- 第一版 **Immutable + Append-only**：`part-001/002/003...`，新数据只追加，不改旧文件。
+- **v7 mutator**（`src/mutator/aligned_mutator.cpp` + `src/rewriter/part_rewriter.cpp`）
+  取代第一版 `aligned_write`（已删除）：按主键 `(date, symbol)` 插入/更新/删除，
+  只重写受影响 part；主键契约 = index schema 前两列（§5：恰一 DATE/TIMESTAMP + 一
+  symbol）。
 - **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式 partition，
-  再原子重写 `_table.json`（row_count 记账 + last_txid+1，partitioning 原样写回）；
+  再原子重写 `_table.json`（last_txid+1，partitioning/groups 原样写回）；
   崩溃则丢弃 transaction（`_tmp/` 对 Reader 永不可见），扫描时跨 Group 行数
   fail-fast 兜底。无 sidecar、无 marker 文件。
-- **Compaction**（后续）：后台合并 old parts → 新 part，保持 Canonical Row Space /
-  Row Ordering / Row Group Boundary 不变，atomic switch，查询不中断。
-- **Schema Evolution**（后续）：新列在老 partition 上读到 NULL，不重写历史。
-- **Sparse**：第一版不自己实现，靠 Parquet RLE/Dictionary/Compression 天然压缩；
-  未来极端 sparse 列再考虑独立 Group（如 `sparse/alpha999`）。
-- **第一版不支持 UPDATE/DELETE**，不要提前做 Tombstone/Delta。
+- **映射列类型 = 组内已存类型**（组 schema），非源文件类型——跨 part 列类型必须
+  一致；首写空表回退源类型。新分区只建在映射过的 Group（未映射 Group 该区行 NULL）。
+- **Compaction**：`aligned_compact(table, 'all')` 单事务合并所有组（按分区目录），
+  原子切换，查询不中断。
+- **Schema Evolution**：新列在老 part 上读到 NULL，不重写历史。
+- **Sparse**：靠 Parquet RLE/Dictionary/Compression 天然压缩；未来极端 sparse 列
+  再考虑独立 Group（如 `sparse/alpha999`）。
+- **不做**：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。
 
 ---
 
@@ -268,9 +286,10 @@ src/
 ├── extension.cpp
 ├── catalog/       logical_table.cpp  schema.cpp  manifest.cpp
 ├── resolver/      group_resolver.cpp  partition_resolver.cpp  row_space.cpp
+│                  key_resolver.cpp（v7：主键 → (分区, part, 局部行) 解析）
 ├── scan/          aligned_scan.cpp  aligned_scan_state.cpp  group_scan.cpp  scheduler.cpp
-├── parquet/       duckdb_parquet_adapter.cpp
-├── writer/        aligned_writer.cpp  group_writer.cpp  transaction.cpp
+├── mutator/       aligned_mutator.cpp（v7：upsert/delete 调度 + 原子提交）
+├── rewriter/      part_rewriter.cpp（v7：part 合并重写）
 ├── compaction/    compactor.cpp
 └── optimizer/     projection.cpp  filter.cpp
 ```
@@ -429,10 +448,11 @@ bash scripts/test_aligned.sh
     ToUnifiedFormat！），组装切片 DataChunk → `ColumnDataCollection` 缓冲 →
     `ParquetWriter`（ZSTD，按 group manifest RGS flush）
   - 分区目录由 manifest templates 对源 DATE 列求值（组间分区粒度可不同）；
-    part 名 = 目标目录下一个空闲 `part-%06llu`
+    part 名 = `{idx:04d}-{rows:10d}`（idx = 目标分区目录 NextPartIndex，rows = 实际
+    行数；行数超 10 位 fail-fast）
   - **原子提交**：全部写入 `<table>/_tmp/transaction-<txid>/`，成功后逐 part
-    move 到目标目录 + 写 sidecar + 更新 `.aligned-commit.json`（临时名+rename），
-    最后 bump `_table.json`/`_group.json` row_count；失败删除暂存树
+    move 到目标目录（v6 名落位），最后 bump `_table.json` last_txid（临时名+rename）；
+    失败删除暂存树
   - 写前模拟 ValidateRowSpace（所有 group 必须覆盖追加区间——对齐契约强制全组写入）
   - 验收：`scripts/test_writer.ps1` 全 PASS（空表首写 → 追加 → alpha999 进化列 →
     粗分区共享目录追加 part → 读回 6000 行全对 + 错误路径）
@@ -440,7 +460,7 @@ bash scripts/test_aligned.sh
   - `bench_aligned.ps1`（aligned / wide / join 三种 DuckDB 引擎）+ `bench_polars.py`
     （polars 按行位置横向 concat——传统宽表装配路径，正是本引擎要消灭的）
   - 维度：投影 5/25/120 列 × 扫描 25%/100% × 线程 1/4/8；p5 正确性跨引擎交叉校验
-  - 数据：bench_ixday 1M 行 × 127 列；结果见 `docs/BENCHMARK.md`、`scripts/bench_output.csv`
+  - 数据：bench_ixday 1M 行 × 127 列；结果见 `docs/BENCHMARK.md`
 - [x] **Phase 7 Compaction / Evolution 完成（2026-08）**：
   - `aligned_compact(table, group)`：按分区目录合并多 part → 单 part（同目录必须同列集，
     拒绝 schema-evolution 合并）→ 暂存 → move+sidecar → 替换 commit marker（临时名+rename）→
@@ -658,6 +678,82 @@ bash scripts/test_aligned.sh
   - **PS 5.1 经验**：stderr 消息在 78 列折行（"full \nalignment required"），错误
     正则须容错空白 `full\s*alignment required`；bash 工具里 `cmd /c "..."` 引号
     失效 → 写 .bat（vcvars64 + ninja）用 `cmd //c "path.bat"` 执行
+- [x] **v5 契约：partition-aligned（分区对齐），删除全对齐（2026-08）**：
+  - **契约**（docs/STORAGE_CONTRACT.md v5）：所有 Group（含 index）用**同一种一层
+    分区段**（`year=`/`month=`/`date=` 三选一）；分区键 = 完整 `name=value` 段串
+    （不同分区方式自动无法对齐）；Group 分区键集合 **⊆ index**（允许缺分区 → 该区
+    行保留、该组列全 NULL；绝不添加 index 没有的分区，违反即 fail-fast）；共享分区
+    **总行数**必须一致（末 part 行数可不同）。**无全对齐（part 数相同）要求、无
+    group/none 模式、无探测降级链**；`aligned` 字段读端忽略。
+  - **行区间**：`part_rows` = index **首分区首 part** footer 行数（读 1 次）；分区
+    行数 `R_i = (分区 part 数-1)*part_rows + 分区最后 part 行数`（只读每分区最后
+    1 个 footer + index 首 part）；分区内第 j part `start_row = S_i + j*part_rows`；
+    组内非最后 part 必须恰好 part_rows 行（**扫描时 OpenPart 防御校验**，违反
+    fail-fast）；共享分区 R_i 跨 Group 一致（fail-fast）
+  - **组 schema** = 组内 rel_path 排序最后 1 个 part 的 footer；`PartInfo` 不再存
+    每 part columns/types（扫描时用打开的 reader 实时匹配，schema evolution →
+    缺失列 NULL）
+  - **`groups` 字段读端永不解析**：Group 发现唯一路径 = 一次 glob；唯一例外 = 空表
+    （glob 无任何 part）且 `groups` 非空时给 Writer 提供 Group 骨架（writer 空表
+    起步必需）；Writer/Compactor 重写必须原样写回 groups + partitioning
+  - **`active_intervals` 相交仅限 `full_coverage` 组**（分区键 == index 全键集）；
+    子集组不参与相交，其缺失区由 ScanGroupWindow 的 NULL 填充分支处理
+  - **数据/测试**：gen_testdata 改为 month= 单层分区（index 07 1 part 2000 + 08
+    2 parts 2000+2000；alpha 07 2000 / 08 4000 + alpha099 进化列；**ma 缺 07 只
+    有 08 4000**，part_rows=2000 总 6000）；test_aligned 新增缺分区 NULL 填充、
+    末 part 行数不同合法、分区剪枝 month=、并行 6000/1200/1333/4000/17997000、
+    v3_bad = 删 index month=2026-07 → "has partition...index group does not"、
+    badlvl 改为含 index 组 + single 一级组 → "two-level path"；gen_bench/gen_multi_bench
+    全部改单层 `date=`（1 part/天）；test_writer/test_compaction partitioning 改
+    单层 `month=%Y-%m`
+  - **修 2 个 bug**：① index 组 `manifest.partitioning` 未赋值 → 分区剪枝对 index
+    失效（manifest.cpp 补显式/推导赋值）；② ScanGroupWindow rewind 后游标落入 part
+    间 gap（如 parts=[0,1000),[2000,3000) 且 cursor=1500）→ `part_end - cursor`
+    无符号下溢，新增 gap 分支 NULL 填充到下一 part 起始或窗口末尾
+  - **验收**：test_aligned 33/33、test_writer 17/17、test_compaction 16/16、
+    test_parallel 全 PASS（1M 行 8 线程 0.052s）；`WHERE date=2026-09-02` 剪枝
+    1M→250000
+  - **经验**：`PartitionInfo` 结构名与 DuckDB 已有 enum 冲突（`duckdb::PartitionInfo`）
+    → 改名 `GroupPartition`；parquet reader 的 `columns` 是
+    `vector<MultiFileColumnDefinition>`（在 `base_file_reader.hpp`），lambda 里显式
+    类型名要写对；PS 5.1 对 >78 列 stderr 折行时 `-match 'has partition.*index
+    group does not'` 因 "index\r\n group" 失配 → 用 `[\s\S]*index\s+group`；DuckDB
+    CLI `-csv` 输出 NULL 是字面 `NULL`（不是空串）；写超长大中文文档时 write 工具
+    会被截断 → 改用 python 分小段 append
+
+- [x] **v6 契约：自描述 part 文件名 + 日期列契约（2026-08）**：
+  - **契约**（docs/STORAGE_CONTRACT.md v6）：part 文件名**自描述**
+    `{idx:04d}-{rows:10d}.parquet`（idx = 分区内索引 0000 起，rows = 文件总行数
+    10 位定宽，上限 9,999,999,999）；part_id = 文件名 idx；**行区间由文件名累加
+    推导**（零 footer IO）：分区内第 j 个存在 part `start_row = S_i + Σ(索引更小的
+    存在 part 行数)`；分区 `R_i = Σ(文件名行数)`；**index 分区内索引必须 0000 起
+    连续**（缺号/重复 fail-fast），非 index 组允许缺号（如 0000,0002，数据行连续
+    按存在 part 累加）；共享分区 R_i 跨 Group 一致 + 同分区同索引跨组行数相等
+    （fail-fast）；**扫描时 OpenPart 防御校验** footer 实际行数 == 文件名 rows；
+    组 schema = 组内 rel_path 排序最后 1 个 part 的 footer（**每 Group 只读 1 个
+    footer**）
+  - **日期列契约**：index schema（最后 part footer）**前两列必须至少有一列是
+    DATE/TIMESTAMP**（否则 fail-fast）；该列即 partitioning `source`（目录推导自动
+    绑定实际列名，显式声明不匹配 fail-fast）；分区目录只由该日期列求值（不再写死
+    `date`）；`IsConstantDateFilter` 支持 TIMESTAMP 等值剪枝
+  - **writer**：staged 名可任意（`_tmp/` 不可见），提交时 v6 名落位（idx =
+    NextPartIndex 递增，rows = part 实际行数，超 10 位 fail-fast）；**compactor**：
+    合并产物 = `0000-{Σ:010d}`（Σ > 任何单个 part 行数且定宽 → 永不与旧 part 冲突），
+    并修复 v5 潜在 bug：staged 分区子目录防冲突
+  - **数据/测试**：gen_testdata 改 v6 布局（index 08 `0000,0001`；alpha 08
+    `0000,0002` **缺号** + alpha099 只在 0002 part；ma 缺 07）；**测试脚本 bug 修复**：
+    缺号 part 的数据行范围按分区内位置序号（pos）而非文件名索引计算（数据必须对应
+    start_row 定义的行区间）；test_aligned 新增 5 断言（badname/badidx/badrows/
+    baddate/ts_ixday）；test_writer/test_compaction part 名断言改 v6
+  - **PS 5.1 折行教训**：stderr 78 列折行把错误消息拆行（'self-describing' →
+    'self-desc
+ribing'、'consecutive' → 'consecu
+tive'）→ 断言 pattern 必须用
+    折行点之前的子串（'self-desc' / 'consecu'）
+  - **验收**：test_aligned 42/42、test_writer 17/17、test_compaction 16/16、
+    test_parallel 全 PASS；badname/badidx/badrows/baddate 错误场景全 fail-fast；
+    ts_ixday TIMESTAMP 剪枝 100 行；文档（STORAGE_CONTRACT v6 / README / AGENTS §5）
+    已同步
 
 ### Phase 1 关键经验（必须记住，避免重踩）：`Copy(source, target, source_count, source_offset, target_offset)`
    中 `source_count` 是**排他结束下标**，拷贝行数 = `source_count - source_offset`。
@@ -805,6 +901,19 @@ bash scripts/test_aligned.sh
    分支已从代码删除。yyjson 判布尔用 `yyjson_is_bool`/`yyjson_get_bool`。
 2. writer 重写 `_table.json` 时务必保留 `partitioning` 字段，否则显式分区配置
    丢失（退化为目录推导，可能改变未来写入的目录布局）。
+
+- [x] **v7 契约 + Mutator（aligned_upsert / aligned_delete）完成（2026-08）**：
+  - 契约（docs/STORAGE_CONTRACT.md v7）：主键契约——index schema 前两列 = (date, symbol)：恰一列 DATE/TIMESTAMP（分区源列）+ 一列 symbol（两日期列或无日期列均 fail-fast，v6 的「至少一列 DATE」已收紧）；aligned_upsert/aligned_delete 取代 aligned_write（已删除）
+  - mutator（src/mutator/aligned_mutator.cpp + src/rewriter/part_rewriter.cpp）：按主键 (date, symbol) 插入/更新/删除，只重写受影响 part；删除逻辑（删空单 part 分区 → 整分区移除；多 part 分区删空 → fail-fast run aligned_compact first）；_tmp/transaction-<txid>/ 暂存 + 原子提交（move + 重写 _table.json last_txid+1，partitioning/groups 原样写回）；mapping 里未知 Group → BinderException fail-fast（不再静默忽略）
+  - 映射列类型 = 组内已存类型（组 schema），非源文件类型：源 VALUES 字面量 111.1→DECIMAL、111→INTEGER，写出的新 part 与老 part（DOUBLE/BIGINT）类型不一致 → 扫描时 scratch chunk（bind.types=组类型）与 reader 向量（文件类型）Copy 类型不匹配崩溃（InternalException Expected vector of type DOUBLE, but found vector of type INT32，来自 ConstantVector::VerifyVectorType）；本次 bug 根因即此。修复：组已存在时用组 schema 类型，仅首写空表回退源类型
+  - 验收：test_upsert.ps1 29/29（替换 test_writer.ps1）、test_aligned 42/42（baddate 断言改 first two columns 匹配 v7 消息）、test_compaction 14/14、test_parallel 8/8 全 PASS
+- [x] **文档清理（2026-08）**：删除 plan.md（AGENTS.md 即权威 Plan）、logic.md（引用已删除 aligned_writer.cpp 的过时深潜）、docs/BENCH_MULTI.md（v4 起 A-NORMAL 已删，历史快照）、docs/WRITE_PLAN.md（为已删除 aligned_write 写的计划）、scripts/test_writer.ps1、scripts/bench_output.csv、scripts/bench_multi_output.csv（孤儿原始输出，分析文档为权威）；README/STORAGE_CONTRACT/AGENTS §9/§14 同步 v7
+
+### v7 Mutator 关键经验
+
+1. 源文件类型 ≠ 组内已存类型：gm.col_types 若按源 schema 构建（VALUES 字面量 111.1→DECIMAL、111→INTEGER），写出的新 part 类型与老 part（DOUBLE/BIGINT）不一致 → 扫描时 scratch chunk（bind.types=组 schema 类型）与 reader 实际向量（文件类型）Copy 类型不匹配崩溃。修复：组已存在时用组 schema 类型，仅首写空表回退源类型。
+2. 未知 mapping Group 静默忽略是隐性 bug：mutator 应在 bind 阶段 fail-fast 报错，而不是悄悄跳过。
+3. 测试脚本在 PowerShell 5.1 的坑：内联 $(...).Replace('\','/') 的字符串插值里反斜杠转义会失效（当字面量处理）→ 先预计算正斜杠路径变量；多条 statement 的 SQL 走临时文件 + cmd /c "duckdb < tmp"；stderr 报错 78 列折行 → 断言用折行点之前的短子串。
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。

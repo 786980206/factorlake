@@ -1,16 +1,18 @@
 # gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
-# and Phase 6 (benchmark). v3 contract: index mandatory, two-level
-# non-index groups, only the footer is authoritative (no sidecars, no commit
-# markers, no _group.json), _tmp ignored. Partition names: year= / month= / date=.
+# and Phase 6 (benchmark). v5 contract: index mandatory, two-level
+# non-index groups, single-level partition (year= / month= / date= — the SAME
+# kind for every group), only the footer is authoritative (no sidecars, no
+# commit markers, no _group.json), _tmp ignored.
 #
-# Layout (fully aligned — every group has the same part count / part size /
-# last-part size, the only supported contract):
+#   Layout (partition-aligned — index, alpha and ma share the date= kind; each
+#   partition holds 1 part per group (v6 self-describing name "0000-{rows:10d}"),
+#   so partition rows == part rows and every group has full coverage):
 #   bench_ixday/
 #     _table.json                     (optional; here with part_rows + groups)
 #     index/   date=2026-09-01..04/   1 part per day (rowsPerDay), RGS 32768
-#     factor/alpha101/ year=2026/month=2026-09/date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
-#     fieldset/ma/     year=2026/month=2026-09/                      4 parts (one per day), RGS 65536, 20 cols
+#     factor/alpha101/ date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
+#     fieldset/ma/     date=2026-09-01..04/   1 part per day, RGS 65536, 20 cols
 #
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\gen_bench.ps1 [-TotalRows 1000000]
 
@@ -42,7 +44,6 @@ function Write-JsonFile([string]$path, $obj) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
     ($obj | ConvertTo-Json -Depth 8) | Set-Content -Path $path -Encoding Ascii
 }
-function Part-Name([int]$i) { 'part-{0:D6}' -f $i }
 function Run-DuckDB([string]$sql) {
     & $duckdb -c $sql 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "duckdb failed: $sql" }
@@ -81,30 +82,29 @@ foreach ($d in $Days) {
          CAST((r + 1) * 100 AS BIGINT) AS volume,
          CAST(r AS BIGINT) AS rowid
   FROM r
-) TO '$($indexDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
+) TO '$($indexDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
     Run-DuckDB $sql
 
     # ---- alpha101: 1 part per day (RGS 65536), 100 sparse cols --------------
-    $alphaDir = Join-Path $tableDir "factor\alpha101\year=2026\month=2026-09\date=$date"
+    $alphaDir = Join-Path $tableDir "factor\alpha101\date=$date"
     New-Item -ItemType Directory -Force -Path $alphaDir | Out-Null
     $colList = @('CAST(r AS BIGINT) AS rowid_alpha') + $alphaCols
     $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT $(($colList -join ', '))
   FROM r
-) TO '$($alphaDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
+) TO '$($alphaDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
     Run-DuckDB $sql
 
-    # ---- ma: coarse year/month partition, 1 part per day --------------------
-    $maDir = Join-Path $tableDir 'fieldset\ma\year=2026\month=2026-09'
+    # ---- ma: day-level partition, 1 part per day (same kind as index/alpha) --
+    $maDir = Join-Path $tableDir "fieldset\ma\date=$date"
     New-Item -ItemType Directory -Force -Path $maDir | Out-Null
-    $partName = Part-Name ($txid - 1)
     $colList = @('CAST(r AS BIGINT) AS rowid_ma') + $maCols
     $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT $(($colList -join ', '))
   FROM r
-) TO '$($maDir.Replace('\','/'))/$partName.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
+) TO '$($maDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
     Run-DuckDB $sql
 
     $dayStart += $rows
