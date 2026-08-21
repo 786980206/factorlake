@@ -41,6 +41,10 @@ struct MutateTarget {
 	// Delete-emptied single-part partition: the part is not rewritten; the
 	// whole partition is removed from every group instead.
 	bool removed = false;
+	// Emptied part that is the group's HIGHEST index in its partition: the
+	// part file is removed outright (remaining indexes stay consecutive);
+	// unlike `removed` the partition directory itself survives.
+	bool remove_part = false;
 	// Fresh-part insert position counter (positions are assigned sequentially
 	// in sorted-key order).
 	idx_t insert_next = 0;

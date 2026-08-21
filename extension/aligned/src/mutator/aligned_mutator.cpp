@@ -690,11 +690,13 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &group = bind.plan.groups[gi];
 			for (auto &kv : targets[gi]) {
-				auto &t = *kv.second;
+			auto &t = *kv.second;
+			if (t.removed || t.remove_part) {
 				if (t.removed) {
 					removed_partitions.insert(t.partition_key);
-					continue;
 				}
+				continue;
+			}
 				bool has_ins = t.insert_buffer && t.insert_buffer->Count() > 0;
 				bool has_upd = t.update_buffer && t.update_buffer->Count() > 0;
 				if (!has_ins && !has_upd && t.delete_rows.empty()) {
@@ -757,6 +759,18 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				}
 			}
 			gstate.parts_removed++;
+		}
+		// Pass D: remove delete-emptied highest-index part files (per group;
+		// the remaining indexes stay consecutive, no renumbering needed).
+		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
+			for (auto &kv : targets[gi]) {
+				auto &t = *kv.second;
+				if (!t.remove_part || !t.part) {
+					continue;
+				}
+				fs.RemoveFile(t.part->path);
+				gstate.parts_removed++;
+			}
 		}
 		if (gstate.parts_rewritten > 0 || gstate.parts_removed > 0) {
 			BumpLastTxid(fs, bind.plan, txid);
@@ -1000,23 +1014,40 @@ void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, Dat
 		}
 	}
 
-	// 5. Pre-check: a part emptied by deletes must be the only part of its
-	//    partition (removal) — emptying a part of a multi-part partition is
-	//    rejected before anything is staged.
+	// 5. Pre-check: a part emptied by deletes must be removable without
+	//    breaking the index-consecutiveness contract — either it is the only
+	//    part of its partition (whole-partition removal) or it is the group's
+	//    highest-index part in that partition (part-file removal; remaining
+	//    indexes stay consecutive). Emptying an interior part of a multi-part
+	//    partition is rejected before anything is staged.
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
+		auto &group = bind.plan.groups[gi];
 		for (auto &kv : targets[gi]) {
 			auto &t = *kv.second;
 			if (!t.part || t.delete_rows.empty()) {
 				continue;
 			}
-			if (t.delete_rows.size() == t.part->row_count) {
-				if (t.part->partition_parts > 1) {
-					throw IOException("Aligned table '%s': cannot delete all rows of part '%s' (partition '%s' has "
-					                  "%llu parts); run aligned_compact first",
-					                  bind.table_name, t.part->part_name, t.partition_key, t.part->partition_parts);
-				}
-				t.removed = true;
+			if (t.delete_rows.size() != t.part->row_count) {
+				continue;
 			}
+			if (t.part->partition_parts == 1) {
+				t.removed = true;
+				continue;
+			}
+			// Highest existing index of this group within the partition?
+			idx_t max_index = t.part->partition_index;
+			for (auto &p : group.parts) {
+				if (p.partition_key == t.partition_key && p.partition_index > max_index) {
+					max_index = p.partition_index;
+				}
+			}
+			if (t.part->partition_index == max_index) {
+				t.remove_part = true;
+				continue;
+			}
+			throw IOException("Aligned table '%s': cannot delete all rows of part '%s' (partition '%s' has "
+			                  "%llu parts); run aligned_compact first",
+			                  bind.table_name, t.part->part_name, t.partition_key, t.part->partition_parts);
 		}
 	}
 

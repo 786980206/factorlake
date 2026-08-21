@@ -917,7 +917,6 @@ tive'）→ 断言 pattern 必须用
   - **交付形态**：`aligned_attach('table'|空=全部, root=...)` 把逻辑表物化成**真正的 DuckDB catalog 表**（`CREATE OR REPLACE TABLE name AS SELECT * FROM aligned_table(name)`），之后裸表名即可跑标准 SELECT / INSERT / UPDATE / DELETE；`aligned_detach(...)` 反向 DROP。attach 出的表是**会话内物化快照**：DML 写入 DuckDB 自身存储、不回写 parquet 列组；持久化到列组仍走 aligned_upsert/aligned_delete（未来可加 sync 命令）。大表 attach 会全量物化（bench_ixday 1M×127 很慢），建议按表 attach
   - **实现**：src/catalog/aligned_attach.cpp——DDL 在 init_global 里用**独立 Connection + 独立线程**执行（见下教训）；bind 只做 root 解析 + 目录发现（跳过 `.`/`_` 前缀）；函数输出 (table_name, status)，错误逐表报告不中断
   - **验收**：scripts/test_attach.ps1 7/7 PASS（attach、裸名 SELECT、标准 INSERT 6000→6001、UPDATE 可见、DELETE 回 6000、detach、attach/detach 不动列组数据）；test_aligned 42 / test_upsert 30 / test_compaction 14 全 PASS
-- [ ] **Phase 8（后续）**：DML 写入回写列组的 sync 命令；attach 大表的分块物化
 - [x] **Phase 8c：标准 DELETE/UPDATE（DuckLake 式逻辑 attach，直写 parquet）完成（2026-08）**：
   - PlanDelete/PlanUpdate 返回自定义 sink 算子（PhysicalAlignedDelete/PhysicalAlignedUpdate），直接写 parquet 列组：
     - DELETE：收集 WHERE 选中的 rowid → 侧扫 index 组解析 (date,symbol) keys → 临时 keys parquet → worker 线程调 aligned_delete
@@ -925,6 +924,12 @@ tive'）→ 断言 pattern 必须用
   - 扫描侧修复（catalog 的 LogicalGet ≠ 表函数）：① 虚拟 rowid 须映射到**有效输出位**（projection_ids 秩）而非 column_ids 下标（filter_prune 下 executor 按 projection_ids 分配输出 chunk）；② 重复列请求（UPDATE 子 GET 重复引用键列）复制填充而非覆盖单值 projected_pos；③ scratch=column_ids 位 / output=projection 秩两套索引空间分开；④ LogicalGet::GetTable() 需要 get_bind_info 返回归属 entry，否则 DELETE/UPDATE 报 "not a base table"
   - mutator 修复（被真实 DML 暴露的存量 bug）：① fresh part 在已存在组里用「组 schema ∪ 新增映射列」，否则窄 part 重定义组 schema 破坏老宽 part 重写；② RewritePart BulkCopyOld 按 scratch 容量分块——一次拷贝 >2048 行溢出 2048 行 scratch（0xc0000374 堆损坏，任何 >~2049 行的部分删除/插入合并都会崩）
   - 验收：scripts/test_dml.ps1 7/7（标准 INSERT/UPDATE/DELETE 直写 parquet）；test_aligned 42 / test_upsert 30 / test_attach 7 / test_compaction 14 全 PASS
+- [x] **Phase 8d：DELETE 删空最高索引 part 直接移除（标准 DML 边界完善，2026-08）**：
+  - v7 契约原语义「多 part 分区删空任一 part → fail-fast」对标准 SQL UX 不友好（INSERT 新键成单行 part 后立刻 DELETE 同一键是常见序列）。修正：删空的 part 若是该组在该分区的**最高索引 part** → 直接移除该 part 文件（剩余索引仍连续，无需 renumber；各组同索引 part 行数一致故同步移除）。仅内部 part 仍 fail-fast（需 aligned_compact）
+  - 实现：MutateTarget 加 `remove_part` 标志 + ExecuteAndCommit Pass D（RemoveFile + parts_removed++）；Pass A 跳过 staging
+  - **重要教训：不要用 aligned_compact 做 DELETE 回退** —— compact 在 schema-evolution 目录（同目录新旧列集混布）会失败，且失败时已 compact 的组不回滚（原子性缺口），曾把 upserttest 弄成 index 已压缩/alpha 未压缩的不一致状态。已知问题：aligned_compactor 的跨组原子性待加固
+  - 验收：E2E attach→INSERT→UPDATE→DELETE→DETACH 全通；5 套件全 PASS
+- [ ] **Phase 8（后续）**：aligned_compactor 跨组原子性加固（单组失败时回滚已移动的组）；DML 大批量写入的分块物化
 
 ### Phase 8 关键经验
 
