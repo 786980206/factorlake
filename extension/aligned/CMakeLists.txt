@@ -15,12 +15,14 @@ set(ALIGNED_EXTENSION_FILES
     src/extension.cpp
     src/catalog/manifest.cpp
     src/catalog/aligned_attach.cpp
+    src/catalog/aligned_catalog.cpp
     src/resolver/row_space.cpp
     src/resolver/partition_resolver.cpp
     src/resolver/key_resolver.cpp
     src/rewriter/part_rewriter.cpp
     src/mutator/aligned_mutator.cpp
     src/scan/aligned_scan.cpp
+    src/transaction/aligned_transaction.cpp
     src/compaction/aligned_compactor.cpp
 )
 

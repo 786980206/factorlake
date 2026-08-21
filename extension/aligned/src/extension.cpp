@@ -1,6 +1,7 @@
 #include "aligned_extension.hpp"
 
 #include "catalog/aligned_attach.hpp"
+#include "catalog/aligned_catalog.hpp"
 #include "compaction/aligned_compactor.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
@@ -81,6 +82,11 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	// table name; writes live in DuckDB-native storage until synced back.
 	loader.RegisterFunction(CreateAlignedAttachFunctions());
 	loader.RegisterFunction(CreateAlignedDetachFunctions());
+
+	// Phase 8: DuckLake-style storage extension. ATTACH '<root>' AS name
+	// (TYPE ALIGNED) creates a logical catalog over the parquet column groups:
+	// SELECT reads the parquet files directly (no materialization).
+	RegisterAlignedStorageExtension(db);
 
 	// Phase 4: Parquet metadata cache (footer / schema / row-group stats, LRU
 	// via DuckDB's ObjectCache, 8 GiB, validity-checked on access). The parquet

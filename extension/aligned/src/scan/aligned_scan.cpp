@@ -1,4 +1,4 @@
-#include "scan/aligned_scan.hpp"
+﻿#include "scan/aligned_scan.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -19,16 +19,9 @@ namespace duckdb {
 // Bind data / scan states
 //===----------------------------------------------------------------------===//
 
-struct AlignedTableBindData : public TableFunctionData {
-	TablePlan plan;
-	vector<string> names;
-	vector<LogicalType> types;
-	idx_t total_rows = 0;
-};
-
 //! Per-group, per-thread scan state. Row windows are driven by the global
 //! cursor; all groups are read in lockstep over the same logical row range
-//! (the core alignment invariant — never verified by key comparison).
+//! (the core alignment invariant 鈥?never verified by key comparison).
 struct AlignedGroupScanState {
 	idx_t part_idx = 0;
 	bool part_ready = false;
@@ -54,7 +47,7 @@ struct AlignedGroupScanState {
 	// immovable and break vector<AlignedGroupScanState> reallocation).
 	unique_ptr<DataChunk> chunk;
 	// Phase 3: row-group plan of the current window. RGs whose statistics
-	// contradict a pushed-down filter are skipped (their rows are NULL-filled —
+	// contradict a pushed-down filter are skipped (their rows are NULL-filled 鈥?
 	// they can never match the filter) instead of being read from parquet.
 	// Coordinates: "flow" positions are row offsets in the parquet stream of
 	// the read row groups (each RG contributes its FULL row count, including
@@ -68,7 +61,7 @@ struct AlignedGroupScanState {
 		idx_t win_len;    // number of wanted rows in this segment
 	};
 	vector<RgPlanSeg> rg_plan;              // read segments (mapped into the parquet window)
-	vector<pair<idx_t, idx_t>> rg_skip;     // skipped segments (win_start, win_len) — NULL filled
+	vector<pair<idx_t, idx_t>> rg_skip;     // skipped segments (win_start, win_len) 鈥?NULL filled
 	idx_t rg_plan_rows = 0;                 // total stream rows of the read segments
 	idx_t parquet_pos = 0;                  // rows consumed from the parquet stream (current window)
 	idx_t rg_seg_idx = 0;                   // current read segment index
@@ -120,6 +113,9 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	idx_t next_row = 0; // cursor within the current active interval
 	// Projection pushdown (Phase 2): full schema position -> output chunk position
 	vector<idx_t> projected_pos;
+	// Virtual rowid column (catalog integration / DELETE-UPDATE): output chunk
+	// position of the logical row number, INVALID_INDEX when not requested.
+	idx_t rowid_pos = DConstants::INVALID_INDEX;
 	// Per-group flag: does this group contribute any requested column?
 	vector<bool> group_active;
 	// Filters (Phase 3): shared filter definitions (states are per-thread, see
@@ -130,7 +126,7 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	vector<vector<PartInfo>> kept_parts;
 	// Active row intervals: intersection of kept-part intervals over active
 	// groups. The scan cursor only walks these intervals (pruned partitions
-	// are skipped entirely — all groups agree on the inactive ranges).
+	// are skipped entirely 鈥?all groups agree on the inactive ranges).
 	vector<pair<idx_t, idx_t>> active_intervals;
 	// Filter-column removal (projection_ids): which scanned columns the final
 	// output keeps (indexes into the scanned column list)
@@ -168,14 +164,14 @@ unique_ptr<ParquetReader> OpenPartReader(ClientContext &context, const PartInfo 
 
 //! Builds the table schema (names/types in table order) and fills each group's
 //! output_positions. Types are resolved from the first part containing a column.
-//! Column-name rules (contract §2.2), implemented in two passes:
+//! Column-name rules (contract 搂2.2), implemented in two passes:
 //!  pass 1: count which (non-index) groups contain each bare column name;
-//!  pass 2: register columns —
+//!  pass 2: register columns 鈥?
 //!   - index columns: bare names (index is authoritative);
 //!   - non-index columns whose name also exists in index: ignored entirely;
 //!   - non-index columns whose name exists in >= 2 non-index groups: registered
 //!     under the qualified name "lv1.lv2.col_name" in EVERY such group (the
-//!     bare name is not registered at all → querying it reports "column not
+//!     bare name is not registered at all 鈫?querying it reports "column not
 //!     found");
 //!   - other non-index columns: bare names.
 static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<string> &names,
@@ -220,8 +216,8 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 		auto &group = plan.groups[gi];
 		// Column types come from the group schema (the group's last part's
 		// footer, captured at plan time). The group schema is the LAST part's
-		// schema — older parts lacking evolution columns read as NULL at scan
-		// time (contract §8). O(1) lookup, no per-column part scan.
+		// schema 鈥?older parts lacking evolution columns read as NULL at scan
+		// time (contract 搂8). O(1) lookup, no per-column part scan.
 		for (idx_t ci = 0; ci < group.column_order.size(); ci++) {
 			auto &col = group.column_order[ci];
 			auto &col_type = group.schema_types[ci];
@@ -233,14 +229,14 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 				continue;
 			}
 			if (index_columns.count(col) > 0) {
-				// Contract §2.2e.1: duplicate of an index column — ignored
+				// Contract 搂2.2e.1: duplicate of an index column 鈥?ignored
 				group.output_positions.push_back(DConstants::INVALID_INDEX);
 				continue;
 			}
 			auto owners = col_groups.find(col);
 			bool duplicated = owners != col_groups.end() && owners->second.size() > 1;
 			if (duplicated) {
-				// Contract §2.2e.2: duplicated across non-index groups — the
+				// Contract 搂2.2e.2: duplicated across non-index groups 鈥?the
 				// qualified name is the ONLY way to reference it
 				auto qualified = group.lv1 + "." + group.lv2 + "." + col;
 				group.output_positions.push_back(names.size());
@@ -270,6 +266,10 @@ static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, cons
 	return std::move(result);
 }
 
+unique_ptr<FunctionData> AlignedBindForCatalog(ClientContext &context, const string &root, const string &table,
+                                               vector<LogicalType> &return_types, vector<string> &names) {
+	return AlignedBindInternal(context, root, table, return_types, names);
+}
 unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindInput &input,
                                      vector<LogicalType> &return_types, vector<string> &names) {
 	string root;
@@ -322,7 +322,7 @@ static void CollectConstantFilters(const TableFilter &filter, vector<const Const
 }
 
 //! Prunes the kept parts of a group by a pushed-down filter on a partition
-//! source column (contract §4). Only safe when the filter's column is a
+//! source column (contract 搂4). Only safe when the filter's column is a
 //! partition source AND its templates form a prefix of the partitioning list.
 static void ApplyPartitionPruning(const AlignedTableBindData &bind, idx_t gi, const string &column_name,
                                   const TableFilter &filter, vector<PartInfo> &kept) {
@@ -406,13 +406,15 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 
 	// Projection pushdown: input.column_ids are the requested columns (indexes
 	// into the full bind schema). An empty list means no columns at all are
-	// requested (e.g. count(*)) — the output chunk then has no vectors and the
+	// requested (e.g. count(*)) 鈥?the output chunk then has no vectors and the
 	// scan only reports cardinality.
 	result->projected_pos.assign(bind.names.size(), DConstants::INVALID_INDEX);
 	for (idx_t i = 0; i < input.column_ids.size(); i++) {
 		auto col_id = input.column_ids[i];
 		if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
-			throw NotImplementedException("aligned_table: virtual row id column is not supported");
+			// Virtual rowid = logical row number (aligned row space position).
+			result->rowid_pos = i;
+			continue;
 		}
 		if (col_id >= bind.names.size()) {
 			throw InternalException("aligned_table: column id %llu out of range (schema has %llu columns)", col_id,
@@ -544,7 +546,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	// Defensive check (v6): the open file's footer row count must equal the
 	// self-describing value parsed from the file name. The plan's row counts
 	// come from file names ONLY (no footer reads), so a mismatch means the
-	// file was written without the v6 naming contract or was truncated —
+	// file was written without the v6 naming contract or was truncated 鈥?
 	// fail fast instead of misaligning the file-name-derived row intervals.
 	if (g.reader->NumRows() != part.row_count) {
 		throw IOException("Aligned table '%s' group '%s' part '%s': file holds %llu rows but its name declares %llu "
@@ -556,7 +558,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	// Build the read mapping in group column order; only requested columns
 	// are read from the parquet file (projection pushdown). File columns are
 	// resolved against the OPEN reader's schema (the plan only stores the
-	// group schema — the last part's — so older schema-evolution parts find
+	// group schema 鈥?the last part's 鈥?so older schema-evolution parts find
 	// their columns here and newer columns are NULL-filled as missing).
 	g.read_cols.clear();
 	g.out_positions.clear();
@@ -584,7 +586,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 		// types; every part must agree on a column's type (schema evolution
 		// only adds/removes columns, never changes a type). A mismatch would
 		// otherwise crash cryptically inside VectorOperations::Copy via
-		// ConstantVector::VerifyVectorType — fail fast with a clear message.
+		// ConstantVector::VerifyVectorType 鈥?fail fast with a clear message.
 		if (group.schema_types[i] != g.reader->columns[file_idx].type) {
 			throw InternalException(
 			    "Aligned table '%s' group '%s' column '%s' has type %s in this part "
@@ -625,7 +627,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 //! current part and initializes the parquet scan on the row groups that pass
 //! the pushed-down filters' statistics. Row groups whose statistics prove the
 //! filters can never match are skipped (their rows are NULL-filled by the
-//! caller — they are guaranteed to be rejected by the row-level filters).
+//! caller 鈥?they are guaranteed to be rejected by the row-level filters).
 static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState &g, idx_t local_start,
                                   idx_t local_end, const PartInfo &part,
                                   const vector<AlignedGroupFilter> &group_filters) {
@@ -680,7 +682,7 @@ auto it = std::find_if(g.reader->columns.begin(), g.reader->columns.end(),
 				// The plan segment covers the ENTIRE row group (flow_off = 0,
 				// win range = the full RG). The copy loop clamps to the wanted
 				// [w_start, w_end) itself, so a window can be reused for any
-				// later range inside the same RG(s) — clamping the segment to
+				// later range inside the same RG(s) 鈥?clamping the segment to
 				// the originally-wanted range instead would discard every
 				// vector of a later chunk (rows outside the segment) until the
 				// stream ends, failing with "scan ended early".
@@ -846,7 +848,7 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 			// If rg_plan is empty the entire row-group window is stats-skipped
 			// (all rows are NULL-filled and never match the pushed-down filter).
 			// There is nothing to read, so the stream position is irrelevant and
-			// no recompute is needed — accessing rg_plan[0] here would be OOB.
+			// no recompute is needed 鈥?accessing rg_plan[0] here would be OOB.
 			if (g.carry_count > 0) {
 				idx_t unplaced_from = g.carry_win_start_row;
 				if (local_start - g.rg_window_start < unplaced_from) {
@@ -934,7 +936,7 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			idx_t chunk_rows = g.chunk->size();
 			if (chunk_rows == 0) {
 				// Parquet Scan returns an empty HAVE_MORE_OUTPUT chunk once per
-				// row-group switch (setup call) — skip it, not an error
+				// row-group switch (setup call) 鈥?skip it, not an error
 				continue;
 			}
 			// Map the parquet stream position to the window position via the
@@ -955,7 +957,7 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			idx_t valid_from = MaxValue<idx_t>(seg.flow_off, rg_off);
 			idx_t valid_to = MinValue<idx_t>(seg.flow_off + seg.win_len, rg_off + chunk_rows);
 			if (valid_from >= valid_to) {
-				// Entire chunk lies outside the wanted window — discard
+				// Entire chunk lies outside the wanted window 鈥?discard
 				g.parquet_pos += chunk_rows;
 				continue;
 			}
@@ -965,7 +967,7 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			// Overlap of the vector's window range [win_pos, win_end) with the
 			// wanted range [w_start, w_end). copy_from >= copy_to means no
 			// overlap (the vector lies entirely before OR entirely after the
-			// wanted rows) — discard. Clamp against BOTH ends so copy_count can
+			// wanted rows) 鈥?discard. Clamp against BOTH ends so copy_count can
 			// never underflow.
 			idx_t copy_from = MaxValue<idx_t>(w_start, win_pos);
 			idx_t copy_to = MinValue<idx_t>(w_end, win_end);
@@ -1015,7 +1017,7 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			}
 		}
 
-		// Columns absent from this part read as NULL (schema evolution, contract §8)
+		// Columns absent from this part read as NULL (schema evolution, contract 搂8)
 		for (auto out_pos : g.missing_positions) {
 			auto &vec = output.data[out_pos];
 			vec.SetVectorType(VectorType::FLAT_VECTOR);
@@ -1153,7 +1155,7 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 		}
 
 		// Produce the final output chunk. If a scratch chunk ends up empty
-		// (all rows rejected by the filters), do NOT emit it — advance to the
+		// (all rows rejected by the filters), do NOT emit it 鈥?advance to the
 		// next logical chunk instead (loop continues).
 		if (use_scratch) {
 			if (target.size() == 0) {
@@ -1167,6 +1169,27 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 		}
 		// When not using scratch there are no row filters, so the output chunk
 		// is always non-empty (chunk_rows > 0); fall through to return.
+
+		// Virtual rowid: absolute logical row number of every surviving row.
+		if (gstate.rowid_pos != DConstants::INVALID_INDEX) {
+			auto &vec = output.data[gstate.rowid_pos];
+			vec.SetVectorType(VectorType::FLAT_VECTOR);
+			auto ids = FlatVector::GetData<int64_t>(vec);
+			if (!use_scratch || target.ColumnCount() == 0) {
+				// Identity mapping over [chunk_start, chunk_start + out_count)
+				const idx_t out_count = use_scratch ? target.size() : chunk_rows;
+				for (idx_t i = 0; i < out_count; i++) {
+					ids[i] = static_cast<int64_t>(chunk_start + i);
+				}
+			} else {
+				// Surviving rows follow the scratch chunk's post-filter selection
+				UnifiedVectorFormat vdata;
+				target.data[0].ToUnifiedFormat(target.size(), vdata);
+				for (idx_t i = 0; i < output.size(); i++) {
+					ids[i] = static_cast<int64_t>(chunk_start + vdata.sel->get_index(i));
+				}
+			}
+		}
 		return;
 	}
 }
@@ -1177,3 +1200,7 @@ unique_ptr<NodeStatistics> AlignedCardinality(ClientContext &context, const Func
 }
 
 } // namespace duckdb
+
+
+
+
