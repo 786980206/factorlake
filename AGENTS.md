@@ -912,7 +912,18 @@ tive'）→ 断言 pattern 必须用
   - mapping 可选：已存在的表省略 mapping 时，按每个源列名在其所属 group 的 column_order 中自动推断（大小写不敏感）；空表首写仍必须显式给 mapping（无 schema 可推断，BinderException）。extension.cpp 用 `aligned_upsert_fn.varargs = LogicalType::VARCHAR`（v1.5.4 无 `max_argument_count` 成员）支持 2~3 个入参
   - 修复 append 碰撞：key_resolver.cpp `Resolve` 的 append part 索引原只取 index 组 max+1，当某非 index 组（如 alpha101 缺号 0000,0002）max 更大时新 part 与该组现有同号 part 行数冲突 → IO Error "shared indexes must agree on row counts"。改为跨**所有组**取分区内 max 索引 +1，对齐布局表正常；人造缺号测试布局（index 连续但 alpha 缺号到 0002）仍会因 index 连续索引契约失败（属 fixture 产物，mutator 写的真实表保持索引对齐，不受影响）
   - 验收：test_upsert 30/30（新增 auto-derive upsert + 空表首写缺 mapping 拒绝）、test_aligned 42/42、test_compaction 14/14、test_parallel 8/8 全 PASS
-- [ ] **Phase 8：标准 DML（INSERT/UPDATE/DELETE INTO aligned_table('t')）**：函数形式（非 catalog 裸名），UPDATE 走 upsert 式（键缺失则插入）；复用 mutator，输入由 parquet 文件改为内存 DataChunk 流
+- [x] **Phase 8（部分）：aligned_attach / aligned_detach —— catalog 集成 + 标准 DML（2026-08）**：
+  - **调研结论（重要，勿重踩）**：v1.5.4 的标准 DML 算子硬绑定 `DuckTableEntry`+`DataTable`——`PhysicalInsert` 的 GlobalState 直接收 `DuckTableEntry&`，`PhysicalDelete/Update` 走 `table.GetStorage()`（`DataTable&`），且 `DataTable` 的 Insert/Delete/Update **均非 virtual**；`TableFunction` 无 insert/update/delete 钩子，`in_out_function` 只用于 COPY/table-in-out；INSERT binder（bind_insert.cpp:538）要求 `Catalog::GetEntry<TableCatalogEntry>`。**结论：自定义存储引擎无法作为 v1.5.4 扩展承接标准 DML 写**；ATTACH 外部引擎同样不行（attached catalog 返回的是引擎自己的 entry，非 DuckTableEntry）
+  - **交付形态**：`aligned_attach('table'|空=全部, root=...)` 把逻辑表物化成**真正的 DuckDB catalog 表**（`CREATE OR REPLACE TABLE name AS SELECT * FROM aligned_table(name)`），之后裸表名即可跑标准 SELECT / INSERT / UPDATE / DELETE；`aligned_detach(...)` 反向 DROP。attach 出的表是**会话内物化快照**：DML 写入 DuckDB 自身存储、不回写 parquet 列组；持久化到列组仍走 aligned_upsert/aligned_delete（未来可加 sync 命令）。大表 attach 会全量物化（bench_ixday 1M×127 很慢），建议按表 attach
+  - **实现**：src/catalog/aligned_attach.cpp——DDL 在 init_global 里用**独立 Connection + 独立线程**执行（见下教训）；bind 只做 root 解析 + 目录发现（跳过 `.`/`_` 前缀）；函数输出 (table_name, status)，错误逐表报告不中断
+  - **验收**：scripts/test_attach.ps1 7/7 PASS（attach、裸名 SELECT、标准 INSERT 6000→6001、UPDATE 可见、DELETE 回 6000、detach、attach/detach 不动列组数据）；test_aligned 42 / test_upsert 30 / test_compaction 14 全 PASS
+- [ ] **Phase 8（后续）**：DML 写入回写列组的 sync 命令；attach 大表的分块物化
+
+### Phase 8 关键经验
+
+1. **嵌套查询死锁三连坑**：① 在 bind 里对同一 ClientContext 执行 Query → 死锁（context 忙）；② 换独立 Connection 仍在 bind/init_global 同线程执行 → 死锁（外层查询占着当前线程的执行栈）；③ 放独立线程才通。但真正让 CLI 卡死的元凶是第 ④ 个坑——
+2. **表函数必须以「输出 0 行」结束**：AttachFunction 每次调用都输出全部行且不置结束 → DuckDB 无限重复调用该函数 → 表现为"挂死"。加 `finished` 标志，第二次调用 `SetCardinality(0)` 返回。诊断手段：往临时文件打 Trace 日志定位到"内层 DDL 其实已完成"，才暴露是外层扫描死循环。
+3. v1.5.4 细节：`Connection(DatabaseInstance::GetDatabase(context))`（需 include database.hpp）；表函数可选位置参数用 `varargs = LogicalType::VARCHAR` 且首参声明 `{LogicalType::VARCHAR}`；同名 TableFunctionSet 内两个同签名函数会报 "Could not choose a best candidate"。
 
 ### v7 Mutator 关键经验
 

@@ -1,5 +1,6 @@
 #include "aligned_extension.hpp"
 
+#include "catalog/aligned_attach.hpp"
 #include "compaction/aligned_compactor.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
@@ -72,6 +73,14 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	                                 AlignedCompactFunction, AlignedCompactBind, AlignedCompactInitGlobal, nullptr);
 	aligned_compact_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_compact_fn);
+
+	// aligned_attach(root=...) / aligned_detach(root=...)
+	// Phase 8: register every logical table under the data root as a real
+	// DuckDB catalog table (CREATE TABLE ... AS SELECT * FROM aligned_table).
+	// After attach, standard SQL DML (INSERT/UPDATE/DELETE) works on the bare
+	// table name; writes live in DuckDB-native storage until synced back.
+	loader.RegisterFunction(CreateAlignedAttachFunctions());
+	loader.RegisterFunction(CreateAlignedDetachFunctions());
 
 	// Phase 4: Parquet metadata cache (footer / schema / row-group stats, LRU
 	// via DuckDB's ObjectCache, 8 GiB, validity-checked on access). The parquet

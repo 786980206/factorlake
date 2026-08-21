@@ -14,6 +14,7 @@ include_directories(
 set(ALIGNED_EXTENSION_FILES
     src/extension.cpp
     src/catalog/manifest.cpp
+    src/catalog/aligned_attach.cpp
     src/resolver/row_space.cpp
     src/resolver/partition_resolver.cpp
     src/resolver/key_resolver.cpp
