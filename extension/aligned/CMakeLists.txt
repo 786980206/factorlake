@@ -22,6 +22,7 @@ set(ALIGNED_EXTENSION_FILES
     src/rewriter/part_rewriter.cpp
     src/mutator/aligned_mutator.cpp
     src/scan/aligned_scan.cpp
+    src/execution/aligned_dml.cpp
     src/transaction/aligned_transaction.cpp
     src/compaction/aligned_compactor.cpp
 )

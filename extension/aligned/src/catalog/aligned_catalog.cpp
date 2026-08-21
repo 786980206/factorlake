@@ -9,6 +9,7 @@
 #include "catalog/aligned_catalog.hpp"
 
 #include "catalog/manifest.hpp"
+#include "execution/aligned_dml.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
@@ -242,7 +243,20 @@ PhysicalOperator &AlignedCatalog::PlanCreateTableAs(ClientContext &context, Phys
 
 PhysicalOperator &AlignedCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalInsert &op, optional_ptr<PhysicalOperator> plan) {
-	throw NotImplementedException("aligned attach: INSERT is not implemented yet");
+	D_ASSERT(plan);
+	if (!op.column_index_map.empty()) {
+		plan = planner.ResolveDefaultsProjection(op, *plan);
+	}
+	auto &entry = op.table.Cast<AlignedTableEntry>();
+	vector<string> col_names;
+	for (auto &col : entry.GetColumns().Physical()) {
+		col_names.push_back(col.Name());
+	}
+	auto row_types = entry.GetTypes();
+	auto &insert = planner.Make<PhysicalAlignedInsert>(op.types, std::move(row_types), std::move(col_names),
+	                                                   entry.name, entry.GetRoot(), op.estimated_cardinality);
+	insert.children.push_back(*plan);
+	return insert;
 }
 
 PhysicalOperator &AlignedCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner,
@@ -295,5 +309,6 @@ void RegisterAlignedStorageExtension(DatabaseInstance &db) {
 }
 
 } // namespace duckdb
+
 
 
