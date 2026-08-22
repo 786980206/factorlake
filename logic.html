@@ -126,55 +126,55 @@ body{
 }
 .group-more .group-label{font-size:2.5vh;justify-content:center;margin:0}
 
-/* ===== Partition band — height proportional to row count (inline flex-grow) ===== */
+/* ===== Partition band — L1: partition level ===== */
 .partition{
-  border:1px dashed var(--line);border-radius:7px;padding:1vh 1vw;
-  margin-bottom:1vh;background:rgba(0,0,0,.01);
+  border:1px solid var(--line);border-radius:8px;padding:.8vh .8vw;
+  margin-bottom:.8vh;background:rgba(0,0,0,.015);
   display:flex;flex-direction:column;
   flex-basis:0;flex-shrink:1;min-height:0;
 }
 .partition:last-child{margin-bottom:0}
 .part-label{
-  font-family:Consolas,monospace;font-size:1.6vh;color:var(--mut);
-  margin-bottom:.5vh;display:flex;justify-content:space-between;
+  font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);
+  margin-bottom:.4vh;display:flex;justify-content:space-between;
 }
-.part-label .tag{color:var(--dim);font-size:1.4vh}
+.part-label .tag{color:var(--dim);font-size:1.2vh}
 
-/* ===== Part file — height proportional to its row count ===== */
+/* ===== Part file — L2: parquet file level ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;
-  background:#f0f3f6;padding:.8vh .8vw;margin-bottom:.6vh;
+  background:var(--panel);padding:.6vh .6vw;margin-bottom:.5vh;
   display:flex;flex-direction:column;
   flex-basis:0;flex-shrink:1;min-height:0;
 }
 .part:last-child{margin-bottom:0}
 .part-name{
-  font-family:Consolas,monospace;font-size:1.5vh;color:var(--tx);
-  margin-bottom:.4vh;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);
+  margin-bottom:.3vh;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
-.part-name .rows{color:var(--mut);font-size:1.3vh}
+.part-name .rows{color:var(--mut);font-size:1.1vh}
 
-/* ===== Row groups (RG) ===== */
-.rgs{display:flex;gap:4px;align-items:stretch;flex:1}
+/* ===== Row groups — L3: RG level (same visual weight as L1/L2) ===== */
+.rgs{display:flex;gap:3px;align-items:stretch;flex:1}
 .rg{
-  flex:1;border-radius:4px;min-width:10px;
+  flex:1;border-radius:3px;min-width:10px;
   display:flex;align-items:center;justify-content:center;
-  font-size:1.1vh;font-family:Consolas,monospace;color:var(--tx);
+  font-size:1vh;font-family:Consolas,monospace;font-weight:500;
   cursor:default;transition:transform .15s;position:relative;
   overflow:hidden;white-space:nowrap;
 }
-.rg:hover{transform:scale(1.15);z-index:2}
+.rg:hover{transform:scale(1.12);z-index:2}
 .rg[data-tip]:hover::after{
   content:attr(data-tip);position:absolute;bottom:130%;
   left:50%;transform:translateX(-50%);
   background:#1f2328;border:1px solid var(--teal);border-radius:6px;
-  padding:5px 10px;font-size:1.4vh;white-space:nowrap;z-index:10;
+  padding:4px 8px;font-size:1.2vh;white-space:nowrap;z-index:10;
   color:#fff;pointer-events:none;
 }
-.rg-A{background:rgba(9,105,218,.3);border:1px solid rgba(9,105,218,.6);color:var(--cyan)}
-.rg-B{background:rgba(188,76,0,.25);border:1px solid rgba(188,76,0,.55);color:var(--org)}
-.rg-C{background:rgba(26,127,55,.25);border:1px solid rgba(26,127,55,.55);color:var(--grn)}
-.rg-D{background:rgba(130,80,223,.25);border:1px solid rgba(130,80,223,.55);color:var(--prp)}
+.rg-A{background:rgba(9,105,218,.12);border:1px solid rgba(9,105,218,.3);color:var(--cyan)}
+.rg-B{background:rgba(188,76,0,.10);border:1px solid rgba(188,76,0,.25);color:var(--org)}
+.rg-C{background:rgba(26,127,55,.10);border:1px solid rgba(26,127,55,.25);color:var(--grn)}
+.rg-D{background:rgba(130,80,223,.10);border:1px solid rgba(130,80,223,.25);color:var(--prp)}
 
 /* ===== Manifest badge ===== */
 .manifest{
