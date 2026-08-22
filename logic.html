@@ -10,6 +10,7 @@
   --tx:#1f2328; --mut:#656d76; --dim:#8c959f;
   --cyan:#0969da; --teal:#0a7b83; --org:#bc4c00; --grn:#1a7f37;
   --prp:#8250df; --red:#cf222e; --yel:#9a6700;
+  --sel:rgba(9,105,218,.08);
 }
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;overflow:hidden}
@@ -35,7 +36,7 @@ body{
 /* ===== Table box ===== */
 .table-box{
   border:2px solid var(--org);border-radius:14px;
-  background:var(--panel);padding:3vh 2vw;flex:1;
+  background:var(--panel);padding:2.5vh 2vw;flex:1;
   display:flex;flex-direction:column;position:relative;
   box-shadow:0 4px 24px rgba(0,0,0,.06);min-height:0;
 }
@@ -44,13 +45,13 @@ body{
   background:var(--bg);padding:0 10px;font-size:1.8vh;
   font-family:Consolas,monospace;color:var(--org);letter-spacing:.5px;
 }
-.desc{font-size:1.6vh;color:var(--mut);margin-bottom:1.5vh}
+.desc{font-size:1.5vh;color:var(--mut);margin-bottom:1.2vh}
 .desc code{color:var(--teal);font-family:Consolas,monospace}
 
-/* ===== Main area: row-axis + groups ===== */
+/* ===== Main area ===== */
 .main-area{display:flex;flex:1;min-height:0}
 
-/* ===== Row axis (vertical, left) ===== */
+/* ===== Row axis ===== */
 .row-axis{
   display:flex;flex-direction:column;align-items:center;
   width:3.5vw;flex-shrink:0;justify-content:space-between;
@@ -66,81 +67,77 @@ body{
 /* ===== Groups row ===== */
 .groups{display:flex;gap:1vw;flex:1;align-items:stretch;min-width:0}
 
-/* ===== L0: Column Group (clickable) ===== */
+/* ===== L0: Column Group — always shows its partitions ===== */
 .group{
   flex:1;min-width:0;border-radius:10px;
-  display:flex;flex-direction:column;cursor:pointer;
+  display:flex;flex-direction:column;
   transition:all .3s;overflow:hidden;
 }
 .group-header{
-  padding:1.5vh 1vw;display:flex;align-items:center;justify-content:space-between;
+  padding:1.2vh 1vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.8vh;font-weight:600;
-  transition:all .2s;user-select:none;
+  user-select:none;
 }
-.group-header .gpath{font-weight:400;font-size:1.3vh;color:var(--mut)}
-.group-header .expand-icon{font-size:1.4vh;color:var(--dim);transition:transform .3s}
-.group.expanded .group-header .expand-icon{transform:rotate(90deg)}
-.group-body{display:none;flex-direction:column;gap:.6vh;padding:0 1vw 1vh;flex:1;min-height:0;overflow:auto}
-.group.expanded .group-body{display:flex}
+.group-body{
+  display:flex;flex-direction:column;gap:.6vh;padding:0 1vw 1vh;
+  flex:1;min-height:0;overflow:auto;
+}
 
 .g-index{background:rgba(188,76,0,.06);border:1.5px solid rgba(188,76,0,.3)}
 .g-index .group-header{color:var(--org)}
-.g-index:hover{border-color:rgba(188,76,0,.5)}
 .g-factor{background:rgba(130,80,223,.05);border:1.5px solid rgba(130,80,223,.25)}
 .g-factor .group-header{color:var(--prp)}
-.g-factor:hover{border-color:rgba(130,80,223,.4)}
 .g-fieldset{background:rgba(26,127,55,.05);border:1.5px solid rgba(26,127,55,.25)}
 .g-fieldset .group-header{color:var(--grn)}
-.g-fieldset:hover{border-color:rgba(26,127,55,.4)}
 
 .group-more{
   flex:0 0 3vw;border:1.5px dashed var(--line);background:transparent;
-  align-items:center;justify-content:center;cursor:default;
+  align-items:center;justify-content:center;
 }
 .group-more span{font-size:2.5vh;color:var(--dim)}
 
-/* ===== L1: Partition (clickable) ===== */
+/* ===== L1: Partition — visible by default, click to select+expand ===== */
 .partition{
   border:1px solid var(--line);border-radius:8px;
-  background:rgba(0,0,0,.012);overflow:hidden;transition:border-color .2s;
+  background:rgba(0,0,0,.012);overflow:hidden;cursor:pointer;
+  transition:all .25s;
 }
-.partition:hover{border-color:var(--mut)}
+.partition:hover{border-color:var(--mut);background:rgba(0,0,0,.025)}
+.partition.selected{
+  border:2px solid var(--cyan);background:var(--sel);
+  box-shadow:0 0 12px rgba(9,105,218,.12);transform:scale(1.015);
+}
 .partition-header{
-  padding:.8vh .8vw;display:flex;align-items:center;justify-content:space-between;
-  font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);cursor:pointer;
-  user-select:none;transition:background .15s;
+  padding:.7vh .8vw;display:flex;align-items:center;justify-content:space-between;
+  font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);
+  user-select:none;
 }
-.partition-header:hover{background:rgba(0,0,0,.03)}
-.partition-header .ph-left{display:flex;align-items:center;gap:6px}
-.partition-header .expand-icon{font-size:1.2vh;color:var(--dim);transition:transform .3s}
-.partition.expanded .partition-header .expand-icon{transform:rotate(90deg)}
 .partition-header .tag{color:var(--dim);font-size:1.2vh}
 .partition-body{display:none;flex-direction:column;gap:.5vh;padding:0 .6vw .6vh}
-.partition.expanded .partition-body{display:flex}
+.partition.selected .partition-body{display:flex}
 
-/* ===== L2: Part file (clickable) ===== */
+/* ===== L2: Part file — click to select+expand ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;background:var(--panel);
-  overflow:hidden;transition:border-color .2s;
+  overflow:hidden;cursor:pointer;transition:all .25s;
 }
 .part:hover{border-color:var(--mut)}
-.part-header{
-  padding:.6vh .6vw;display:flex;align-items:center;justify-content:space-between;
-  font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);cursor:pointer;
-  user-select:none;transition:background .15s;
+.part.selected{
+  border:2px solid var(--cyan);background:var(--sel);
+  box-shadow:0 0 10px rgba(9,105,218,.1);
 }
-.part-header:hover{background:rgba(0,0,0,.02)}
-.part-header .ph-left{display:flex;align-items:center;gap:6px}
-.part-header .expand-icon{font-size:1.1vh;color:var(--dim);transition:transform .3s}
-.part.expanded .part-header .expand-icon{transform:rotate(90deg)}
+.part-header{
+  padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
+  font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);user-select:none;
+}
 .part-header .rows{color:var(--mut);font-size:1.1vh}
 .part-body{display:none;padding:.4vh .6vw .5vh}
-.part.expanded .part-body{display:block}
+.part.selected .part-body{display:block}
 
 /* ===== L3: Row Group blocks ===== */
 .rgs{display:flex;gap:4px;align-items:stretch}
 .rg{
-  flex:1;height:4vh;border-radius:4px;min-width:14px;
+  flex:1;height:3.5vh;border-radius:4px;min-width:14px;
   display:flex;align-items:center;justify-content:center;
   font-size:1.1vh;font-family:Consolas,monospace;font-weight:500;
   cursor:default;position:relative;transition:transform .15s;
@@ -159,7 +156,7 @@ body{
 .rg-C{background:rgba(26,127,55,.10);border:1px solid rgba(26,127,55,.25);color:var(--grn)}
 .rg-D{background:rgba(130,80,223,.10);border:1px solid rgba(130,80,223,.25);color:var(--prp)}
 
-/* ===== Empty partition (no part) ===== */
+/* ===== Empty partition ===== */
 .partition-empty{
   padding:.5vh .8vw;text-align:center;font-size:1.2vh;
   color:var(--dim);font-style:italic;
@@ -183,7 +180,7 @@ body{
 
 <div class="topbar">
   <div class="logo">AlignedTable<span>目录结构</span></div>
-  <div class="hint">点击展开各层级 · <b>Group → Partition → Part → Row Group</b></div>
+  <div class="hint">点击分区或文件 · <b>所有列组同步展开</b></div>
 </div>
 
 <div class="slide">
@@ -203,21 +200,18 @@ body{
 
         <!-- ===== index group ===== -->
         <div class="group g-index" data-g="index">
-          <div class="group-header">
-            <span>🔑 index</span>
-            <span class="expand-icon">▶</span>
-          </div>
+          <div class="group-header"><span>🔑 index</span></div>
           <div class="group-body">
 
             <div class="partition" data-p="2026-07">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-07</span>
-                <span class="tag">5998 行</span>
+                <span>month=2026-07</span>
+                <span class="tag">2 parts · 5998 行</span>
               </div>
               <div class="partition-body">
                 <div class="part" data-part="0000">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000002998.parquet</span>
+                    <span>0000-0000002998.parquet</span>
                     <span class="rows">2998 rows</span>
                   </div>
                   <div class="part-body">
@@ -229,7 +223,7 @@ body{
                 </div>
                 <div class="part" data-part="0001">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0001-0000003000.parquet</span>
+                    <span>0001-0000003000.parquet</span>
                     <span class="rows">3000 rows</span>
                   </div>
                   <div class="part-body">
@@ -244,13 +238,13 @@ body{
 
             <div class="partition" data-p="2026-09">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-09</span>
-                <span class="tag">5998 行</span>
+                <span>month=2026-09</span>
+                <span class="tag">1 part · 5998 行</span>
               </div>
               <div class="partition-body">
                 <div class="part" data-part="0000">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000005998.parquet</span>
+                    <span>0000-0000005998.parquet</span>
                     <span class="rows">5998 rows</span>
                   </div>
                   <div class="part-body">
@@ -264,15 +258,15 @@ body{
               </div>
             </div>
 
-            <div class="partition" data-p="2026-10" style="border-color:rgba(26,127,55,.3)">
+            <div class="partition" data-p="2026-10">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> <span style="color:var(--grn)">month=2026-10</span></span>
+                <span style="color:var(--grn)">month=2026-10</span>
                 <span class="tag" style="color:var(--grn)">新分区 · 1 行</span>
               </div>
               <div class="partition-body">
-                <div class="part" data-part="0000" style="border-color:rgba(26,127,55,.2)">
+                <div class="part" data-part="0000">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000000001.parquet</span>
+                    <span>0000-0000000001.parquet</span>
                     <span class="rows">1 row</span>
                   </div>
                   <div class="part-body">
@@ -289,21 +283,18 @@ body{
 
         <!-- ===== alpha101 group ===== -->
         <div class="group g-factor" data-g="alpha101">
-          <div class="group-header">
-            <span>🧮 alpha101</span>
-            <span class="expand-icon">▶</span>
-          </div>
+          <div class="group-header"><span>🧮 alpha101</span></div>
           <div class="group-body">
 
             <div class="partition" data-p="2026-07">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-07</span>
-                <span class="tag">5998 行</span>
+                <span>month=2026-07</span>
+                <span class="tag">2 parts · 5998 行</span>
               </div>
               <div class="partition-body">
                 <div class="part" data-part="0000">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000002998.parquet</span>
+                    <span>0000-0000002998.parquet</span>
                     <span class="rows">2998 rows</span>
                   </div>
                   <div class="part-body">
@@ -315,7 +306,7 @@ body{
                 </div>
                 <div class="part" data-part="0001">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0001-0000003000.parquet</span>
+                    <span>0001-0000003000.parquet</span>
                     <span class="rows">3000 rows</span>
                   </div>
                   <div class="part-body">
@@ -330,13 +321,13 @@ body{
 
             <div class="partition" data-p="2026-09">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-09</span>
-                <span class="tag">5998 行</span>
+                <span>month=2026-09</span>
+                <span class="tag">1 part · 5998 行</span>
               </div>
               <div class="partition-body">
                 <div class="part" data-part="0000">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000005998.parquet</span>
+                    <span>0000-0000005998.parquet</span>
                     <span class="rows">5998 rows</span>
                   </div>
                   <div class="part-body">
@@ -352,7 +343,7 @@ body{
 
             <div class="partition" data-p="2026-10">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-10</span>
+                <span>month=2026-10</span>
                 <span class="tag">无 part · NULL</span>
               </div>
               <div class="partition-body">
@@ -365,21 +356,18 @@ body{
 
         <!-- ===== ma group ===== -->
         <div class="group g-fieldset" data-g="ma">
-          <div class="group-header">
-            <span>📐 ma</span>
-            <span class="expand-icon">▶</span>
-          </div>
+          <div class="group-header"><span>📐 ma</span></div>
           <div class="group-body">
 
             <div class="partition" data-p="2026-07">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-07</span>
-                <span class="tag">5998 行</span>
+                <span>month=2026-07</span>
+                <span class="tag">2 parts · 5998 行</span>
               </div>
               <div class="partition-body">
                 <div class="part" data-part="0000">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000002998.parquet</span>
+                    <span>0000-0000002998.parquet</span>
                     <span class="rows">2998 rows</span>
                   </div>
                   <div class="part-body">
@@ -391,7 +379,7 @@ body{
                 </div>
                 <div class="part" data-part="0001">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0001-0000003000.parquet</span>
+                    <span>0001-0000003000.parquet</span>
                     <span class="rows">3000 rows</span>
                   </div>
                   <div class="part-body">
@@ -406,13 +394,13 @@ body{
 
             <div class="partition" data-p="2026-09">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-09</span>
-                <span class="tag">5998 行</span>
+                <span>month=2026-09</span>
+                <span class="tag">1 part · 5998 行</span>
               </div>
               <div class="partition-body">
                 <div class="part" data-part="0000">
                   <div class="part-header">
-                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000005998.parquet</span>
+                    <span>0000-0000005998.parquet</span>
                     <span class="rows">5998 rows</span>
                   </div>
                   <div class="part-body">
@@ -428,7 +416,7 @@ body{
 
             <div class="partition" data-p="2026-10">
               <div class="partition-header">
-                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-10</span>
+                <span>month=2026-10</span>
                 <span class="tag">无 part · NULL</span>
               </div>
               <div class="partition-body">
@@ -478,26 +466,70 @@ body{
 <script>
 "use strict";
 (function(){
-  // Click to toggle expand/collapse at each level
-  document.querySelectorAll(".group-header").forEach(function(h){
-    h.addEventListener("click", function(e){
+  var selPartition = null;  // currently selected partition key
+  var selPart = null;       // currently selected part key
+
+  // Click partition → toggle all groups' same-data-p partition in sync
+  document.querySelectorAll(".partition").forEach(function(p){
+    p.addEventListener("click", function(e){
       e.stopPropagation();
-      var g = h.closest(".group");
-      g.classList.toggle("expanded");
+      var key = p.getAttribute("data-p");
+      var isOn = p.classList.contains("selected");
+
+      // Clear all partition selections across all groups
+      document.querySelectorAll(".partition.selected").forEach(function(x){
+        x.classList.remove("selected");
+      });
+      // Clear all part selections too
+      document.querySelectorAll(".part.selected").forEach(function(x){
+        x.classList.remove("selected");
+      });
+      selPart = null;
+
+      if (isOn) {
+        selPartition = null;
+      } else {
+        // Select the same partition in ALL groups
+        document.querySelectorAll('.partition[data-p="'+key+'"]').forEach(function(x){
+          x.classList.add("selected");
+        });
+        selPartition = key;
+      }
     });
   });
-  document.querySelectorAll(".partition-header").forEach(function(h){
-    h.addEventListener("click", function(e){
+
+  // Click part → toggle all groups' same-data-p+data-part parts in sync
+  document.querySelectorAll(".part").forEach(function(pt){
+    pt.addEventListener("click", function(e){
       e.stopPropagation();
-      var p = h.closest(".partition");
-      p.classList.toggle("expanded");
-    });
-  });
-  document.querySelectorAll(".part-header").forEach(function(h){
-    h.addEventListener("click", function(e){
-      e.stopPropagation();
-      var p = h.closest(".part");
-      p.classList.toggle("expanded");
+      var pKey = pt.closest(".partition").getAttribute("data-p");
+      var partKey = pt.getAttribute("data-part");
+      var isOn = pt.classList.contains("selected");
+
+      // Clear all part selections
+      document.querySelectorAll(".part.selected").forEach(function(x){
+        x.classList.remove("selected");
+      });
+
+      if (isOn) {
+        selPart = null;
+      } else {
+        // Make sure parent partition is selected
+        if (selPartition !== pKey) {
+          document.querySelectorAll(".partition.selected").forEach(function(x){
+            x.classList.remove("selected");
+          });
+          document.querySelectorAll('.partition[data-p="'+pKey+'"]').forEach(function(x){
+            x.classList.add("selected");
+          });
+          selPartition = pKey;
+        }
+        // Select the same part in ALL groups under the same partition
+        document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"]').forEach(function(x){
+          x.classList.add("selected");
+        });
+        selPart = partKey;
+      }
     });
   });
 })();
