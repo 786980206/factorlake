@@ -169,10 +169,32 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::LookupEntry(CatalogTransaction tr
 		if (transaction.HasContext()) {
 			EnsureTablesLoaded(transaction.GetContext());
 		}
-		std::lock_guard<std::mutex> lock(tables_mutex);
-		auto it = tables.find(lookup_info.GetEntryName());
-		if (it != tables.end()) {
-			return optional_ptr<CatalogEntry>(it->second.get());
+		{
+			std::lock_guard<std::mutex> lock(tables_mutex);
+			auto it = tables.find(lookup_info.GetEntryName());
+			if (it != tables.end()) {
+				return optional_ptr<CatalogEntry>(it->second.get());
+			}
+		}
+		// Table not found in the cached catalog. The on-disk state may have
+		// changed since ATTACH (aligned_create created a new table, or
+		// aligned_drop removed one). Check if the table directory exists
+		// on disk and, if so, force a full catalog reload.
+		auto &catalog_ref = catalog.Cast<AlignedCatalog>();
+		const string &root = catalog_ref.GetRoot();
+		auto fs = FileSystem::CreateLocal();
+		string table_dir = root + "/" + lookup_info.GetEntryName();
+		if (fs->DirectoryExists(table_dir)) {
+			// Force a full reload on the next EnsureTablesLoaded call.
+			tables_loaded = false;
+			if (transaction.HasContext()) {
+				EnsureTablesLoaded(transaction.GetContext());
+			}
+			std::lock_guard<std::mutex> lock(tables_mutex);
+			auto it2 = tables.find(lookup_info.GetEntryName());
+			if (it2 != tables.end()) {
+				return optional_ptr<CatalogEntry>(it2->second.get());
+			}
 		}
 		// Return nullptr instead of throwing — DuckDB calls LookupEntry to check
 		// for conflicts during CREATE TABLE and expects nullptr for "not found".

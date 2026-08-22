@@ -1,0 +1,40 @@
+# name: test/aligned/aligned_catalog_refresh.test
+# description: Regression test — ATTACH catalog must discover new tables created
+#              after ATTACH (aligned_create + aligned_drop stale catalog bug)
+# Each statement batch includes ATTACH to preserve session scope.
+
+# --- create table 1, ATTACH, insert, verify ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; SELECT * FROM aligned_create('t1', 'index', 'sym VARCHAR, date DATE, close DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); INSERT INTO al.t1 (sym, date, close) VALUES ('000001', DATE '2024-01-01', 10.5); SELECT sym, date, close FROM al.t1
+
+# --- drop table 1 ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); SELECT * FROM aligned_drop('t1', 'index'); DETACH al
+
+# --- create table 2 (after ATTACH was first done) — catalog must discover it ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; SELECT * FROM aligned_create('t2', 'index', 'sym VARCHAR, date DATE, close DOUBLE')
+
+# INSERT into the new table via a fresh ATTACH — must succeed
+statement ok
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); INSERT INTO al.t2 (sym, date, close) VALUES ('000002', DATE '2024-01-02', 20.0)
+
+query TTD
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); SELECT sym, date, close FROM al.t2
+----
+000002,2024-01-02,20.0
+
+# --- create a third table, also discoverable ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; SELECT * FROM aligned_create('t3', 'index', 'sym VARCHAR, date DATE, val DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); INSERT INTO al.t3 (sym, date, val) VALUES ('000003', DATE '2024-01-03', 30.0)
+
+query TTD
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); SELECT sym, date, val FROM al.t3
+----
+000003,2024-01-03,30.0

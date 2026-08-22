@@ -144,6 +144,10 @@ con.execute("SELECT * FROM aligned_scan('dg5')")
 | 2026-08-23 | FactorLake 侧修复 commit 0fe5aa6，重新编译扩展，回复问题 1/2/3 | 已回复 |
 | 2026-08-23 | stkoe-cli 验证修复：FORCE INSTALL 新扩展，全部验证通过 | ✅ 已确认 |
 | 2026-08-23 | stkoe-cli 全量 280 测试通过（FactorLake 引擎活跃，双路径回退机制就绪） | ✅ |
+| 2026-08-23 | stkoe-cli 发现问题 4/5（表名 `_` 前缀 + DROP TABLE），写入此文件 | 待处理 |
+| 2026-08-23 | FactorLake 侧回复发现 4/5（commit 3d5a6ff 修复 `_` 前缀，DROP 是设计决策） | 已回复 |
+| 2026-08-23 | stkoe-cli 重新安装扩展（发现 4 修复），验证通过 | ✅ |
+| 2026-08-23 | stkoe-cli 发现发现 6（aligned_drop 后 ATTACH catalog 变 stale），写入此文件 | 待处理 |
 | 2026-08-23 | stkoe-cli 发现 4/5（表名 `_` 开头 + DROP TABLE）写入此文件 | 待处理 |
 | 2026-08-23 | FactorLake 侧修复发现 4（commit 3d5a6ff），确认发现 5 为预期行为 | ✅ 已回复 |
 
@@ -287,3 +291,40 @@ SQLLogicTest 132/132 + 4 PS 套件全 PASS。扩展已重新编译。
 
 正确。`aligned_drop(table, group_name)` 是删除列组/整表的唯一方式。
 `DROP TABLE` 不支持逻辑 Parquet 表，这是设计决策而非 bug。
+
+---
+
+## stkoe-cli 新发现（2026-08-23，第二轮）
+
+### 发现 6：aligned_drop 后 ATTACH catalog 变 stale —— 后续 aligned_create 创建的新表 INSERT 失败（🔴 阻断）
+
+**发现时间**：2026-08-23
+
+**现象**：
+
+```
+1. aligned_create('smoke_test', 'index', '...')  → OK
+2. aligned_groups('smoke_test')                   → [('index', ...)]  OK
+3. INSERT INTO al.smoke_test ...                   → OK
+4. aligned_drop('smoke_test', 'index')             → OK
+5. aligned_groups('smoke_test')                   → [('index', ..., partition_count=0)]  OK（列组仍在？）
+6. aligned_create('ix1', 'index', '...')           → OK
+7. aligned_groups('ix1')                          → [('index', ...)]  OK
+8. INSERT INTO al.ix1 ...                           → ❌ Catalog Error: Table with name ix1 does not exist!
+```
+
+**根因推测**：
+
+`aligned_drop` 后 ATTACH catalog 的表注册表变为 stale——后续 `aligned_create` 创建的新表虽然 `aligned_groups` 能发现（函数直接扫描物理目录），但 ATTACH 的 SQL catalog（`al.<table>`）看不到新表。
+
+注意：步骤 5 中 `aligned_groups('smoke_test')` 仍返回 `('index', ..., partition_count=0)`——`aligned_drop` 似乎没有完全删除列组，只清了分区。
+
+**影响**：
+
+阻断 `aligned_drop` + `aligned_create` 序列操作。stkoe 的冒烟测试在 `_create_engine` 中创建+写入+删除临时表，之后所有 `index_add` 同步到 FactorLake 都失败。
+
+**当前 workaround**：冒烟测试不再 `aligned_drop` 临时表。
+
+**期望行为**：
+
+`aligned_drop` 后 ATTACH catalog 应正确刷新，后续 `aligned_create` 创建的新表能通过 `INSERT INTO al.<table>` 写入。或者 `aligned_drop` 应完全删除列组（而非保留 partition_count=0 的空壳）。
