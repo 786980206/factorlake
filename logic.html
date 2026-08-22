@@ -176,12 +176,12 @@ body{
 }
 .rg.selected .rg-body{display:flex;flex-direction:row}
 .rg-body .col-chip{
-  flex:0 0 auto;
+  flex:1 1 0;min-width:0;
   font-family:Consolas,monospace;font-size:1.1vh;
-  padding:4px 10px;border-radius:4px;
+  padding:4px 4px;border-radius:4px;
   background:var(--panel2);border:1px solid var(--line2);
-  white-space:nowrap;
-  display:flex;align-items:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  display:flex;align-items:center;justify-content:center;
 }
 
 /* ===== Empty partition ===== */
