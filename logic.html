@@ -207,20 +207,12 @@ body{
   width:3vw;flex-shrink:0;
 }
 .col-axis .col-block{
-  flex:1;display:flex;flex-direction:column;align-items:center;
-  padding:.4vh .3vw;border-radius:0 0 8px 8px;
-  font-family:Consolas,monospace;font-size:1.2vh;
+  flex:1;display:flex;flex-wrap:wrap;gap:4px;align-items:center;justify-content:center;
+  padding:.8vh .5vw;border-radius:0 0 8px 8px;
 }
-.col-axis .col-block .col-title{
-  font-weight:600;font-size:1.2vh;margin-bottom:.3vh;
-}
-.col-axis .col-block .col-fields{
-  display:flex;flex-wrap:wrap;gap:3px;justify-content:center;
-}
-.col-axis .col-block .col-fields .field{
-  border:1px solid var(--line);border-radius:3px;
-  padding:1px 5px;font-size:1vh;color:var(--mut);
-  background:var(--panel);white-space:nowrap;
+.col-axis .col-block .field{
+  border-radius:4px;padding:3px 8px;font-size:1.3vh;
+  font-family:Consolas,monospace;white-space:nowrap;font-weight:500;
 }
 .col-axis .col-more{
   flex:0 0 3vw;
@@ -450,22 +442,25 @@ body{
         <div class="col-axis">
           <div class="col-spacer"></div>
           <div class="col-block" style="background:rgba(188,76,0,.05);border-top:2px solid var(--org)">
-            <div class="col-title" style="color:var(--org)">index</div>
-            <div class="col-fields">
-              <span class="field">date</span><span class="field">symbol</span><span class="field">close</span><span class="field">volume</span><span class="field">amount</span>
-            </div>
+            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">date</span>
+            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">symbol</span>
+            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">close</span>
+            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">volume</span>
+            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">amount</span>
           </div>
           <div class="col-block" style="background:rgba(130,80,223,.04);border-top:2px solid var(--prp)">
-            <div class="col-title" style="color:var(--prp)">alpha101</div>
-            <div class="col-fields">
-              <span class="field">alpha001</span><span class="field">alpha002</span><span class="field">…</span><span class="field">alpha101</span>
-            </div>
+            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha001</span>
+            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha002</span>
+            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">…</span>
+            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha101</span>
           </div>
           <div class="col-block" style="background:rgba(26,127,55,.04);border-top:2px solid var(--grn)">
-            <div class="col-title" style="color:var(--grn)">ma</div>
-            <div class="col-fields">
-              <span class="field">ma5</span><span class="field">ma10</span><span class="field">ma20</span><span class="field">ma60</span><span class="field">ma120</span><span class="field">ma250</span>
-            </div>
+            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma5</span>
+            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma10</span>
+            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma20</span>
+            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma60</span>
+            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma120</span>
+            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma250</span>
           </div>
           <div class="col-more" style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:2vh">⋯</div>
         </div>
