@@ -208,9 +208,20 @@ aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewri
   part），减少 part 碎片化。跨组一致性：预检所有组末 part（同索引 + 同行数 +
   低于阈值 + 含全部映射列），任一不满足则**整分区回退新建 part**。单 batch 可
   小幅超限（不做硬截断）。
+- **并发写互斥**（`.aligned_write.lock`）：mutator/compactor 执行前在表目录创建
+  lock 文件，完成后删除（RAII）。已有 lock 则报错拒绝。crash 后残留 lock 用户可
+  手动删除。TableWriteLock 类在 aligned_mutator.hpp 共享给 mutator + compactor。
+- **写入路径优化**（7 项）：
+  1. 向量化 Source 读取（key building）：逐 chunk 扫 + ToUnifiedFormat 直取 date/symbol。
+  2. 分区 symbol 边界索引（RG stats）：超范围 key 跳过全量 LoadPartition。
+  3. 多 part 并行重写：std::thread 池并行执行 RewritePart。
+  4. 标准 INSERT 消除双写：AlignedUpsertFromCollection C++ API 跳过 temp parquet。
+  5. 并发写 lock 文件（见上）。
+  6. 向量化 Synth 填充：STANDARD_VECTOR_SIZE 行批量替代逐行。
+  7. DML worker 线程池：DmlWorkerPool 持久线程替代每语句 std::thread。
 - **Sparse**：靠 Parquet RLE/Dictionary/Compression 天然压缩；未来极端 sparse 列
   再考虑独立 Group（如 `sparse/alpha999`）。
-- **不做**：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。
+- **不做**：Tombstone/Delta、类型升级。
 
 ---
 
@@ -1046,3 +1057,43 @@ tive'）→ 断言 pattern 必须用
     test_aligned、test_compaction、test_parallel、test_dml 全 PASS
   - **文档**：STORAGE_CONTRACT §1 术语表加 Part File 行数软上限、§5 不持久化信息加
     `ALIGNED_DEFAULT_PART_ROWS`、§9 加 Append-to-Last-Part 行为；AGENTS §9 加条目
+
+- [x] **写入路径 7 项优化完成（2026-08）**：
+  - **#1 向量化 Source 读取**（key building）：step 3（upsert）+ step 2（delete）改逐
+    chunk 扫 ColumnDataCollection + `ToUnifiedFormat` 直取 date（int32/int64 指针）+
+    symbol，替代逐行 `SourceReader::GetValue`（省 N 次 Value 堆分配 + chunk 反复 fetch）。
+    symbol 仍走 `GetValue`（变长列难向量化而不拷贝）；date 列全向量化（热路径：分区模板
+    求值）。committed `2204aaf`
+  - **#2 分区 symbol 边界索引**（Parquet RG stats）：`KeyResolver::LoadPartitionBoundaries`
+    从 RG min/max stats 构建轻量 boundary（无数据读），`Resolve` 先检查 symbol 是否
+    超出分区 [min,max] 范围 → 直接返回 append 位置，跳过全量 `LoadPartition`。
+    `StringStats::Min/Max` 截断到 8 字节 → 保守检查（假阳性走慢路径，假阴性不可能）。
+    `NumericStats::Min/Max` 对数值列。committed `25ee62f`
+  - **#3 多 part 并行重写**：`ExecuteAndCommit` Pass A 用 `std::thread` 池
+    （`hardware_concurrency()`）并行执行 `RewritePart`（各自独立 reader/writer/buffer，
+    BufferManager + FileSystem 线程安全）。work-stealing（atomic task index），error
+    propagation（atomic flag + mutex-protected error msg），`removed_partitions` 专用
+    mutex。单任务/单核走串行。committed `f784eed`
+  - **#4 标准 INSERT 消除双写**：`PhysicalAlignedInsert::Finalize` 原路径
+    buffer→temp parquet→SQL `aligned_upsert` 读回；新路径 `AlignedUpsertFromCollection`
+    C++ API 直接从内存 `ColumnDataCollection` 调 mutator（`bind.source_collection` 字段
+    跳过 `ReadSourceColumns`）。`BuildUpsertBindFromCollection` 从 collection types+names
+    推 schema，不打开 ParquetReader。跳过 temp parquet + SQL 字符串 + 嵌套 Connection。
+    committed `0ca535f`
+  - **#5 并发写 lock 文件**（`.aligned_write.lock`）：`TableWriteLock` RAII 类（在
+    `aligned_mutator.hpp` 共享给 mutator + compactor）。执行前创建 lock 文件（+ 确保表
+    目录存在），完成删除。已有 lock → IOException 拒绝。crash 残留用户手动删。
+    committed `d6a02a7`
+  - **#6 向量化 Synth 填充**：step 5.5 改 `STANDARD_VECTOR_SIZE` 行批量（position 列
+    批量写 int64 + mapped 列 `SetAllInvalid(n)` + 仅 keyed 位置 `SetValue`），替代逐行
+    `SetValue` + `Append`。committed `bfa0057`
+  - **#7 DML worker 线程池**：`DmlWorkerPool` 单持久线程（static singleton）替代每语句
+    `std::thread`。`Submit(task)+Wait()` API，condvar 同步。Insert/Delete/Update 三路共用。
+    初始实现有 race（worker 循环未 reset `has_task_` → 任务重复执行），已修复。
+    committed `b35bf04`
+  - **验收**：SQLLogicTest 97/97（+3 lock 测试）、test_upsert 50/50（+5 lock 测试）、
+    test_aligned 42/42、test_compaction 16/16、test_parallel 8/8、test_dml 7/7 全 PASS
+  - **经验**：`TableFunctionInput` 无默认构造函数（需 `TableFunctionInput(bind, local, global)`）；
+    `ConstantVector::IsNull` 需 include `vector.hpp`；`FileHandle::Write(void*, idx_t)` 无
+    position 参数（vs `Write(QueryContext, void*, idx_t, idx_t)`）；`std::set` 非线程安全
+    需 mutex 保护；DML worker pool 的 `Wait()` 谓词只需 `done_==true`（不需要 `!has_task_`）；
