@@ -1,0 +1,164 @@
+# name: test/aligned/aligned_scan.test
+# description: Aligned scan correctness (v6 contract) — counts, alignment, projection, pruning, errors
+# Covers: test_aligned.ps1 (42 assertions)
+
+# --- counts + cross-group alignment (5) ---
+query IIIII
+SET aligned_data_root='{DATA_ROOT}'; WITH t AS (SELECT * FROM aligned_table('cnstk_ixday')) SELECT count(*) AS c, count(alpha001) AS a1, count(alpha099) AS a99, count(rowid_ma) AS ma, sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) AS mis FROM t
+----
+6000,1200,666,4000,0
+
+# --- missing partition NULL fill (1) ---
+query II
+SET aligned_data_root='{DATA_ROOT}'; SELECT rowid, ma5 FROM aligned_table('cnstk_ixday') WHERE rowid IN (0, 1999, 2000, 5999) ORDER BY rowid
+----
+0,NULL
+1999,NULL
+2000,0.0
+5999,1.9
+
+# --- alpha 08 gap (0000+0002) aligns with index 08 (0000+0001) (1) ---
+query II
+SET aligned_data_root='{DATA_ROOT}'; SELECT count(*), sum(rowid_alpha) FROM aligned_table('cnstk_ixday') WHERE rowid >= 2000
+----
+4000,15998000
+
+# --- schema evolution: alpha099 NULL in old partition (1) ---
+query I
+SET aligned_data_root='{DATA_ROOT}'; SELECT alpha099 FROM aligned_table('cnstk_ixday') WHERE rowid = 0
+----
+NULL
+
+# --- schema evolution: alpha099 value in evolution part (1) ---
+query R
+SET aligned_data_root='{DATA_ROOT}'; SELECT alpha099 FROM aligned_table('cnstk_ixday') WHERE rowid = 4500
+----
+4.501
+
+# --- partition/part boundary rows (1) ---
+query T rowsort
+SET aligned_data_root='{DATA_ROOT}'; SELECT symbol FROM aligned_table('cnstk_ixday') WHERE rowid IN (1999, 2000, 3999, 4000) ORDER BY rowid
+----
+002000
+002001
+004000
+004001
+
+# --- aligned_scan variant (1) ---
+query I
+SELECT count(*) FROM aligned_scan('{DATA_ROOT}', 'cnstk_ixday')
+----
+6000
+
+# --- aggregates + repeat queries (1) ---
+query RI
+SET aligned_data_root='{DATA_ROOT}'; SELECT max(close), count(*) FROM aligned_table('cnstk_ixday')
+----
+3000.0,6000
+
+query I
+SET aligned_data_root='{DATA_ROOT}'; SELECT count(*) FROM aligned_table('cnstk_ixday')
+----
+6000
+
+# --- projection pushdown (3) ---
+query RRR
+SET aligned_data_root='{DATA_ROOT}'; SELECT alpha001, ma20, date FROM aligned_table('cnstk_ixday') WHERE rowid IN (2000, 4095) ORDER BY rowid
+----
+20.02,0.5,2026-08-01
+40.97,0.375,2026-08-01
+
+query I
+SET aligned_data_root='{DATA_ROOT}'; SELECT count(rowid_ma) FROM aligned_table('cnstk_ixday')
+----
+4000
+
+query R
+SET aligned_data_root='{DATA_ROOT}'; SELECT alpha099 FROM aligned_table('cnstk_ixday') WHERE rowid = 4500
+----
+4.501
+
+# --- partition pruning (4) ---
+query I
+SET aligned_data_root='{DATA_ROOT}'; SELECT count(*) FROM aligned_table('cnstk_ixday') WHERE date = DATE '2026-08-01'
+----
+4000
+
+query I
+SET aligned_data_root='{DATA_ROOT}'; SELECT count(*) FROM aligned_table('cnstk_ixday') WHERE date = DATE '2026-07-01'
+----
+2000
+
+query I
+SET aligned_data_root='{DATA_ROOT}'; SELECT count(*) FROM aligned_table('cnstk_ixday') WHERE date = DATE '2026-08-01' AND rowid < 100
+----
+0
+
+query I
+SET aligned_data_root='{DATA_ROOT}'; SELECT count(*) FROM aligned_table('cnstk_ixday') WHERE date = DATE '2026-08-01' AND rowid >= 2000
+----
+4000
+
+# --- parallel scan (3) ---
+query IIIII
+SET aligned_data_root='{DATA_ROOT}'; SET threads=1; SELECT count(*), count(alpha001), count(alpha099), count(rowid_ma), sum(rowid) FROM aligned_table('cnstk_ixday')
+----
+6000,1200,666,4000,17997000
+
+query I
+SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(*) FROM aligned_table('cnstk_ixday') WHERE rowid BETWEEN 3000 AND 3010
+----
+11
+
+query II
+SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(rowid_ma), count(alpha099) FROM aligned_table('cnstk_ixday')
+----
+4000,666
+
+# --- metadata cache default (1) ---
+query T
+SET aligned_data_root='{DATA_ROOT}'; SELECT current_setting('parquet_metadata_cache')
+----
+true
+
+# --- column-name rules (5) ---
+# e1: bare close = index (authoritative)
+query R
+SET aligned_data_root='{DATA_ROOT}'; SELECT close FROM aligned_table('cnstk_ixday') WHERE rowid = 100
+----
+50.5
+
+# e1: qualified alpha101.close rejected (column not found in group)
+statement error
+SET aligned_data_root='{DATA_ROOT}'; SELECT "factor.alpha101.close" FROM aligned_table('cnstk_ixday') LIMIT 1
+----
+not found
+
+# e2: bare vwap rejected (cross-group duplicate)
+statement error
+SET aligned_data_root='{DATA_ROOT}'; SELECT vwap FROM aligned_table('cnstk_ixday') LIMIT 1
+----
+not found
+
+# e2: qualified vwap per group
+query RR
+SET aligned_data_root='{DATA_ROOT}'; SELECT "factor.alpha101.vwap" AS a, "fieldset.ma.vwap" AS m FROM aligned_table('cnstk_ixday') WHERE rowid = 2000
+----
+250.125,62.53125
+
+# e3: bare non-duplicated columns
+query IR
+SET aligned_data_root='{DATA_ROOT}'; SELECT rowid_alpha, ma5 FROM aligned_table('cnstk_ixday') WHERE rowid = 2000
+----
+2000,0.0
+
+# --- error cases (2) ---
+statement error
+SELECT * FROM aligned_table('no_such_table')
+----
+no data root configured
+
+statement error
+SET aligned_data_root='{DATA_ROOT}'; SELECT * FROM aligned_table('no_such_table')
+----
+does not exist

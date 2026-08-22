@@ -1,0 +1,40 @@
+# name: test/aligned/aligned_dml.test
+# description: Standard DML on ATTACH ... TYPE ALIGNED catalog tables
+# Covers: test_dml.ps1 (6 assertions)
+# Self-contained: creates its own upserttest table with gen_testdata-style data.
+# All DML must run in one duckdb process (ATTACH is session-scoped).
+
+# --- setup: staging parquet ---
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(0, 100)) SELECT DATE '2026-09-10' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001 FROM r) TO '{TEST_DIR}/dml_stage.parquet' (FORMAT PARQUET)
+
+# --- setup: create upserttest table ---
+mkdir {TEST_DIR}/dml_data/upserttest
+writejson {TEST_DIR}/dml_data/upserttest/_table.json {"groups":["index","factor/alpha101","fieldset/ma"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"factor/alpha101":[{"template":"month=%Y-%m","source":"date"}],"fieldset/ma":[{"template":"month=%Y-%m","source":"date"}]}}
+
+statement ok
+SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT rows_inserted, rows_updated FROM aligned_upsert('upserttest', '{TEST_DIR}/dml_stage.parquet', 'index:date,symbol,close,rowid;factor/alpha101:rowid_alpha,alpha001;fieldset/ma:rowid_ma,ma5')
+
+# --- ATTACH + INSERT + verify (all in one batch) ---
+query RRR
+SET aligned_data_root='{TEST_DIR}/dml_data'; ATTACH '{TEST_DIR}/dml_data' AS al (TYPE ALIGNED); INSERT INTO al.upserttest (date, symbol, close, alpha001, ma5) VALUES (DATE '2026-09-12', '009991', 10.0, 2.0, 3.0); SELECT close, alpha001, ma5 FROM al.upserttest WHERE symbol = '009991'
+----
+10.0,2.0,3.0
+
+# --- UPDATE + verify (attach in same batch) ---
+query R
+SET aligned_data_root='{TEST_DIR}/dml_data'; ATTACH '{TEST_DIR}/dml_data' AS al (TYPE ALIGNED); UPDATE al.upserttest SET close = 555.5 WHERE symbol = '009991'; SELECT close FROM al.upserttest WHERE symbol = '009991'
+----
+555.5
+
+# --- DELETE + verify (attach in same batch) ---
+query I
+SET aligned_data_root='{TEST_DIR}/dml_data'; ATTACH '{TEST_DIR}/dml_data' AS al (TYPE ALIGNED); DELETE FROM al.upserttest WHERE symbol = '009991'; SELECT count(*) FROM al.upserttest WHERE symbol = '009991'
+----
+0
+
+# --- aligned_table sees same state (uses aligned_data_root, not the attached catalog) ---
+query I
+SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT count(*) FROM aligned_table('upserttest')
+----
+100

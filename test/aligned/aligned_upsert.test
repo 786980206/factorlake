@@ -1,0 +1,191 @@
+# name: test/aligned/aligned_upsert.test
+# description: aligned_upsert / aligned_delete (v7 mutator) — write, append, update, delete, errors
+# Covers: test_upsert.ps1 (30 assertions)
+
+# --- setup: staging parquet files ---
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(0, 3000)) SELECT DATE '2026-09-10' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r % 11 = 0 THEN CAST((r + 3) * 0.03 AS DOUBLE) ELSE NULL END AS alpha003, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CAST((r % 60) * 0.025 AS DOUBLE) AS ma20 FROM r) TO '{TEST_DIR}/s1.parquet' (FORMAT PARQUET)
+
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(3000, 6000)) SELECT DATE '2026-09-11' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r % 11 = 0 THEN CAST((r + 3) * 0.03 AS DOUBLE) ELSE NULL END AS alpha003, CASE WHEN r % 3 = 0 THEN CAST((r + 1) * 0.001 AS DOUBLE) ELSE NULL END AS alpha999, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CAST((r % 60) * 0.025 AS DOUBLE) AS ma20 FROM r) TO '{TEST_DIR}/s2.parquet' (FORMAT PARQUET)
+
+# --- setup: create upserttest table dir + _table.json ---
+mkdir {TEST_DIR}/upserttest_data/upserttest
+writejson {TEST_DIR}/upserttest_data/upserttest/_table.json {"groups":["index","factor/alpha101","fieldset/ma"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"factor/alpha101":[{"template":"month=%Y-%m","source":"date"}],"fieldset/ma":[{"template":"month=%Y-%m","source":"date"}]}}
+
+# --- batch 1: first write (empty table) ---
+query IIII
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s1.parquet', 'index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20')
+----
+3000,0,3,1
+
+query IIII
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*), count(alpha001), sum(rowid), sum(CASE WHEN rowid != rowid_alpha OR rowid != rowid_ma THEN 1 ELSE 0 END) FROM aligned_table('upserttest')
+----
+3000,600,4498500,0
+
+# --- batch 2: append (new part 0001) + alpha999 evolution column ---
+query IIII
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s2.parquet', 'index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003,alpha999;fieldset/ma:rowid_ma,ma5,ma20')
+----
+3000,0,3,1
+
+query IIII
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*), count(alpha001), count(alpha999), sum(rowid) FROM aligned_table('upserttest')
+----
+6000,1200,1000,17997000
+
+query T
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT alpha999 IS NULL FROM aligned_table('upserttest') WHERE rowid = 100
+----
+true
+
+query T
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT alpha999 IS NULL FROM aligned_table('upserttest') WHERE rowid = 3000
+----
+false
+
+# --- batch 3: in-place updates + new partition ---
+statement ok
+COPY (WITH t(date, symbol, close, volume, rowid, rowid_alpha, alpha001, alpha002, alpha003, rowid_ma, ma5, ma10, ma20) AS (VALUES (DATE '2026-09-10', '002500', 5555.5, 555, 499, 499, 77.7, 78.8, 79.9, 499, 9.9, 10.1, 10.2), (DATE '2026-09-11', '005000', 8888.5, 888, 4999, 4999, 88.8, 89.9, 90.1, 4999, 11.1, 12.1, 13.1), (DATE '2026-10-01', '000001', 111.1, 111, -1, -1, 1.1, 2.2, 3.3, -1, 3.3, 4.4, 5.5)) SELECT * FROM t) TO '{TEST_DIR}/s3.parquet' (FORMAT PARQUET)
+
+query IIII
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s3.parquet', 'index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20')
+----
+1,2,9,1
+
+query I
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*) FROM aligned_table('upserttest')
+----
+6001
+
+query RRR
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT close, alpha001, ma5 FROM aligned_table('upserttest') WHERE date = DATE '2026-09-10' AND symbol = '002500'
+----
+5555.5,77.7,9.9
+
+query RRR
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT close, alpha001, ma5 FROM aligned_table('upserttest') WHERE date = DATE '2026-09-11' AND symbol = '005000'
+----
+8888.5,88.8,11.1
+
+query II rowsort
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT date, count(*) FROM aligned_table('upserttest') GROUP BY date ORDER BY date
+----
+2026-09-10,3000
+2026-09-11,3000
+2026-10-01,1
+
+# --- delete: 002999, 006000, 002500 (existing), 999999 (missing) ---
+statement ok
+COPY (WITH t(date, symbol) AS (VALUES (DATE '2026-09-10', '002999'), (DATE '2026-09-11', '006000'), (DATE '2026-09-10', '002500'), (DATE '2026-10-01', '999999')) SELECT * FROM t) TO '{TEST_DIR}/s4.parquet' (FORMAT PARQUET)
+
+query III
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_deleted, parts_rewritten, txid FROM aligned_delete('upserttest', '{TEST_DIR}/s4.parquet')
+----
+3,6,1
+
+query I
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*) FROM aligned_table('upserttest')
+----
+5998
+
+query I
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*) FROM aligned_table('upserttest') WHERE symbol IN ('002999','006000','002500')
+----
+0
+
+# --- delete the only row of 2026-10 partition (single-part removal) ---
+statement ok
+COPY (WITH t(date, symbol) AS (VALUES (DATE '2026-10-01', '000001')) SELECT * FROM t) TO '{TEST_DIR}/s5.parquet' (FORMAT PARQUET)
+
+query III
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_deleted, parts_rewritten, txid FROM aligned_delete('upserttest', '{TEST_DIR}/s5.parquet')
+----
+1,0,1
+
+query I
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*) FROM aligned_table('upserttest')
+----
+5997
+
+# --- error: emptying a multi-part partition ---
+statement ok
+COPY (SELECT i.date, i.symbol, i.close, i.volume, i.rowid, a.rowid_alpha, a.alpha001, a.alpha002, a.alpha003, m.ma5, m.ma20 FROM read_parquet('{TEST_DIR}/upserttest_data/upserttest/index/month=2026-09/0000-*.parquet') i JOIN read_parquet('{TEST_DIR}/upserttest_data/upserttest/factor/alpha101/month=2026-09/0000-*.parquet') a ON i.rowid = a.rowid_alpha JOIN read_parquet('{TEST_DIR}/upserttest_data/upserttest/fieldset/ma/month=2026-09/0000-*.parquet') m ON i.rowid = m.rowid_ma) TO '{TEST_DIR}/s6.parquet' (FORMAT PARQUET)
+
+statement error
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT * FROM aligned_delete('upserttest', '{TEST_DIR}/s6.parquet')
+----
+run aligned_compact first
+
+query I
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*) FROM aligned_table('upserttest')
+----
+5997
+
+# --- error: unknown group in mapping ---
+statement error
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT * FROM aligned_upsert('upserttest', '{TEST_DIR}/s1.parquet', 'no_such_group:date')
+----
+unknown group
+
+# --- error: missing mapped column ---
+statement error
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT * FROM aligned_upsert('upserttest', '{TEST_DIR}/s1.parquet', 'index:date,symbol,no_such_col')
+----
+not found in source
+
+# --- error: delete source missing key columns ---
+statement ok
+COPY (SELECT 1 AS close) TO '{TEST_DIR}/s7.parquet' (FORMAT PARQUET)
+
+statement error
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT * FROM aligned_delete('upserttest', '{TEST_DIR}/s7.parquet')
+----
+primary key columns
+
+# --- auto-derive mapping (no explicit mapping) ---
+statement ok
+COPY (SELECT DATE '2026-09-10' AS date, '009999' AS symbol, 77.7::DOUBLE AS close, 8.8::DOUBLE AS alpha001, 9.9::DOUBLE AS ma5) TO '{TEST_DIR}/s8.parquet' (FORMAT PARQUET)
+
+query III
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten FROM aligned_upsert('upserttest', '{TEST_DIR}/s8.parquet')
+----
+1,0,3
+
+query RRR
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT close, alpha001, ma5 FROM aligned_table('upserttest') WHERE symbol='009999'
+----
+77.7,8.8,9.9
+
+# --- error: empty-table first write without mapping ---
+mkdir {TEST_DIR}/upserttest_data/upsert_empty
+statement error
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT * FROM aligned_upsert('upsert_empty', '{TEST_DIR}/s8.parquet')
+----
+mandatory group
+
+# --- two-phase partial-group insert (M1 first, M2 later) ---
+mkdir {TEST_DIR}/upsert_m12/t
+writejson {TEST_DIR}/upsert_m12/t/_table.json {"groups":["index","f/m1","g/m2"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"f/m1":[{"template":"month=%Y-%m","source":"date"}],"g/m2":[{"template":"month=%Y-%m","source":"date"}]}}
+
+statement ok
+COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 1.0::DOUBLE AS v UNION ALL SELECT DATE '2026-01-01', 'b', 2.0) TO '{TEST_DIR}/s9.parquet' (FORMAT PARQUET)
+
+statement ok
+COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 10::BIGINT AS w UNION ALL SELECT DATE '2026-01-01', 'b', 20) TO '{TEST_DIR}/s10.parquet' (FORMAT PARQUET)
+
+query II
+SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '{TEST_DIR}/s9.parquet', 'index:date,symbol;f/m1:v')
+----
+2,0
+
+query II
+SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '{TEST_DIR}/s10.parquet', 'index:date,symbol;g/m2:w')
+----
+0,2
+
+query RI
+SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT v, w FROM aligned_table('t') WHERE symbol='b'
+----
+2.0,20

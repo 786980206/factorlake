@@ -1,0 +1,40 @@
+# name: test/aligned/aligned_compact.test
+# description: aligned_compact — merge multi-part partition to single part, verify correctness
+# Covers: test_compaction.ps1 (14 assertions)
+
+# --- setup: create table dir + _table.json ---
+mkdir {TEST_DIR}/compacttest_data/compacttest/index/month=2026-07
+mkdir {TEST_DIR}/compacttest_data/compacttest/factor/alpha101/month=2026-07
+
+writejson {TEST_DIR}/compacttest_data/compacttest/_table.json {"groups":["index","factor/alpha101"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"factor/alpha101":[{"template":"month=%Y-%m","source":"date"}]}}
+
+# --- seed 2 parts per group (same partition dir, 2 parts) ---
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(0, 2000)) SELECT DATE '2026-07-01' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/index/month=2026-07/0000-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
+
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(2000, 4000)) SELECT DATE '2026-07-01' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/index/month=2026-07/0001-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
+
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(0, 2000)) SELECT CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 11 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002 FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/factor/alpha101/month=2026-07/0000-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
+
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(2000, 4000)) SELECT CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 11 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002 FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/factor/alpha101/month=2026-07/0001-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
+
+# --- verify read-back BEFORE compaction ---
+query IIII
+SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT count(*), count(alpha001), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('compacttest')
+----
+4000,800,7998000,0
+
+# --- compact ALL groups ---
+query III
+SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT dirs_compacted, parts_before, parts_after FROM aligned_compact('compacttest', 'all')
+----
+2,4,2
+
+# --- verify read-back AFTER compaction ---
+query IIIIII
+SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT count(*), count(alpha001), count(alpha002), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('compacttest')
+----
+4000,800,364,7998000,0

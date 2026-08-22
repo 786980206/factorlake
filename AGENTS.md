@@ -953,3 +953,16 @@ tive'）→ 断言 pattern 必须用
 
 > 规则：每完成一项，把本节的 `[ ]` 改为 `[x]` 并记录日期/要点；
 > 新决策必须写回对应小节，禁止只存在于对话里。
+
+- [x] **SQLLogicTest 基础设施（2026-08）**：
+  - 新增 `test/run_sqllogictest.py`（Python 运行器，解析 DuckDB `.test` 格式，批处理执行保持
+    会话状态）、`test/aligned/*.test`（6 个测试文件，91 断言，覆盖原有 6 个 PS 测试脚本）
+  - 测试文件：`aligned_scan.test`（27 断言）、`aligned_upsert.test`（37 断言）、
+    `aligned_compact.test`（7 断言）、`aligned_parallel.test`（7 断言）、
+    `aligned_attach.test`（7 断言）、`aligned_dml.test`（6 断言）
+  - 运行器特性：`{DATA_ROOT}`/`{TEST_DIR}` 占位符、`mkdir`/`writejson`/`writefile` 自定义指令
+    （DuckDB COPY TO 不创建嵌套目录）、批处理执行（SET 保留为 preamble，保持 session state）、
+    `statement error` 用 `----` 分隔 SQL 与预期错误文本、`query <types> [rowsort]` + expected
+  - 验收：91/91 PASS；`python test/run_sqllogictest.py`（默认跑 test/aligned/*.test）
+  - 与 PS 脚本对比：PS 5.1 的 78 列 stderr 折行、`-c` 引号 mangle 等痛点全部消除（Python 运行器
+    用 subprocess + temp file stdin）；attach/dml 测试需同进程批处理（preamble 机制）
