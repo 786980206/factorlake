@@ -57,7 +57,7 @@ body{
 .slide-title .sub{color:var(--mut);font-weight:400;font-size:1.6vh;margin-left:6px}
 
 /* ===== Slide body (scrollable if needed) ===== */
-.slide-body{flex:1;overflow:auto;display:flex;flex-direction:column}
+.slide-body{flex:1;overflow:visible;display:flex;flex-direction:column}
 
 /* ===== Compact concept strip (replaces large cards) ===== */
 .concepts{
@@ -75,7 +75,7 @@ body{
 
 /* ===== Table box (top-level, no database wrapper) ===== */
 .db-wrap{
-  flex:1;display:flex;align-items:stretch;justify-content:center;overflow:hidden;
+  flex:1;display:flex;align-items:stretch;justify-content:center;overflow:visible;
 }
 .table-box{
   border:2px solid var(--org);border-radius:14px;
