@@ -929,6 +929,20 @@ tive'）→ 断言 pattern 必须用
   - 实现：MutateTarget 加 `remove_part` 标志 + ExecuteAndCommit Pass D（RemoveFile + parts_removed++）；Pass A 跳过 staging
   - **重要教训：不要用 aligned_compact 做 DELETE 回退** —— compact 在 schema-evolution 目录（同目录新旧列集混布）会失败，且失败时已 compact 的组不回滚（原子性缺口），曾把 upserttest 弄成 index 已压缩/alpha 未压缩的不一致状态。已知问题：aligned_compactor 的跨组原子性待加固
   - 验收：E2E attach→INSERT→UPDATE→DELETE→DETACH 全通；5 套件全 PASS
+- [x] **两阶段部分组插入 + UPDATE 跳过未映射组 + manifest 声明组保留（2026-08）**：
+  - 用户场景：先只写 M1 组的列插入键，再只写 M2 组的列更新同键——两次都须落盘。两个 bug 阻塞：
+  - Bug 1（manifest 丢弃声明组）：BuildTablePlan 用「仅发现的组」覆盖 plan.table.groups → 重写的 _table.json 永久丢失声明但无 part 的组（g/m2 变成 "unknown group"）。修复：保留 **声明 ∪ 发现** 的并集
+  - Bug 2（mutator 不合成缺失分区的 part）：MutateBind 现在将 manifest 声明但无 part 的组物化为空 GroupPlan 条目；UPDATE 路径（键已存在）合成该组的第一个对齐 part（R_i 行镜像 index 分区——除键行携带映射值外全 NULL；MutateTarget.synth/synth_rows/synth_values + 填充 pass 5.5）。首写空表回退源类型
+  - 额外优化：UPDATE 跳过没有映射列的组（之前即使内容相同也重写它们的 parts——如更新一个 index 列时重写了所有 3 个组的 parts）
+  - 验收：test_upsert 33/33（新增 M1/M2 两阶段块）；aligned 42 / attach 7 / compaction 14 / dml 7 / parallel 8 全 PASS
+- [x] **DataChunk 复用损坏修复 + AppendRowToBuffer 性能优化（2026-08）**：
+  - AppendRowToBuffer 原先每源行分配一个新 DataChunk（逐行堆分配，大批量时的主要成本）。改为 caller-owned 复用 chunk 暴露了 DataChunk API 陷阱：Initialize() **追加**向量（其 D_ASSERT(data.empty()) 在 release 中是 noop）——复用已用过的 chunk 静默增长并留下旧类型向量（BIGINT SetValue 进 DATE 向量 → "Unimplemented type for cast (BIGINT -> DATE)"）。修复：当目标 buffer 变化时**原地重建** chunk（析构 + placement new）；稳态行用 Reset()/SetCardinality
+  - 同 commit 清理：docs/STORAGE_CONTRACT.md 移除 §14 历史 v2–v7 清单（替换为当前状态列表），移除版本前缀历史叙述，新增 §9 标准-DML + upsert + 两阶段合成 + 最高索引 part 移除语义；logic.html（单文件交互式解释器 v3）；删除 scripts/run_bench.ps1（引用已删除的 build/duckdb_aligned.exe）；删除 .commandcode/ 垃圾目录
+  - 验收：upsert 33 / dml 7 / aligned 42 / attach 7 / compaction 14 / parallel 8 全 PASS
+- [x] **读+写基准完成（2026-08-22）**：
+  - **读基准**（bench_ixday 1M×127 列，4 引擎×5 工作负载×3 线程数）：aligned vs join 在 p100 1 线程 2.06s vs 1.79s（aligned 1.15× 慢——位置组装固定开销），4 线程 1.04s vs 0.93s（差距收窄）；aligned 在 s25 分区剪枝上 **快于** join（0.159s vs 0.177s 1t——3 组独立剪枝 vs join 仍需开 3 文件）；wide（单 parquet）在此规模最快；polars 在小投影最快但 p100 仍付 hstack 代价。详见 docs/BENCHMARK.md
+  - **写基准**（bench_write.ps1，600k 基础行单分区最坏情况）：append 1k 新键 aligned 4× 快（0.088s vs 0.356s——只写新分区）；append 100k native 追平（0.402s vs 0.505s——aligned 须重写基础分区 part）；update 300k/600k aligned 慢（2.4s vs 0.5s——per-part 重写 O(part_size) 与改行数无关；native LEFT JOIN+COPY O(n) 常数更低）。**aligned 写优势 = 多分区 part 级粒度**（单分区布局隐藏此优势）
+  - 产物：docs/BENCHMARK.md（读+写完整分析）、docs/bench_write_results.csv、scripts/bench_write.ps1、scripts/bench_output.csv
 - [ ] **Phase 8（后续）**：aligned_compactor 跨组原子性加固（单组失败时回滚已移动的组）；DML 大批量写入的分块物化
 
 ### Phase 8 关键经验
