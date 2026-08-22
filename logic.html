@@ -114,12 +114,13 @@ body{
 /* ===== L1: Partition — teal accent ===== */
 .partition{
   border:1px solid var(--line);border-radius:8px;
-  background:rgba(0,0,0,.012);overflow:hidden;cursor:pointer;
+  background:rgba(0,0,0,.012);overflow:hidden;
   transition:all .25s;
   display:flex;flex-direction:column;min-height:0;flex-shrink:1;
 }
 .partition:not(.selected){flex:0 0 auto}
 .partition.selected{flex:1 1 0;min-height:0}
+.partition-header{cursor:pointer}
 .partition:hover{border-color:var(--mut);background:rgba(0,0,0,.025)}
 .partition.selected{
   border:2px solid var(--l1bd);background:var(--l1bg);
@@ -138,7 +139,7 @@ body{
 /* ===== L2: Part file — amber accent ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;background:var(--panel);
-  overflow:hidden;cursor:pointer;transition:all .25s;
+  overflow:hidden;transition:all .25s;
   display:flex;flex-direction:column;min-height:0;flex-shrink:1;
 }
 .part:not(.selected){flex:0 0 auto}
@@ -149,6 +150,7 @@ body{
   box-shadow:0 0 10px rgba(154,103,0,.15);
 }
 .part.selected .part-header{color:var(--l2)}
+.part-header{cursor:pointer}
 .part-header{
   padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);user-select:none;
@@ -162,11 +164,12 @@ body{
 .rgs{display:flex;flex-direction:column;gap:5px;align-items:stretch;flex:1}
 .rg{
   border:1px solid var(--line2);border-radius:6px;background:var(--panel);
-  overflow:hidden;cursor:pointer;transition:all .25s;
+  overflow:hidden;transition:all .25s;
   display:flex;flex-direction:column;min-height:0;flex-shrink:1;
 }
 .rg:not(.selected){flex:0 0 auto}
 .rg.selected{flex:1 1 0;min-height:0}
+.rg-label{cursor:pointer}
 .rg:hover{border-color:var(--mut)}
 .rg.selected{
   border:2px solid var(--l3bd);background:var(--l3bg);
@@ -712,10 +715,11 @@ body{
     else if (selPartition) tableBox.classList.add("has-sel");
   }
 
-  // Click partition → toggle all groups' same-data-p partition in sync
-  document.querySelectorAll(".partition").forEach(function(p){
-    p.addEventListener("click", function(e){
+  // Click partition HEADER → toggle (only header triggers, not body)
+  document.querySelectorAll(".partition-header").forEach(function(h){
+    h.addEventListener("click", function(e){
       e.stopPropagation();
+      var p = h.closest(".partition");
       var key = p.getAttribute("data-p");
       var isOn = p.classList.contains("selected");
 
@@ -743,10 +747,11 @@ body{
     });
   });
 
-  // Click part → toggle all groups' same-data-p+data-part parts in sync
-  document.querySelectorAll(".part").forEach(function(pt){
-    pt.addEventListener("click", function(e){
+  // Click part HEADER → toggle
+  document.querySelectorAll(".part-header").forEach(function(h){
+    h.addEventListener("click", function(e){
       e.stopPropagation();
+      var pt = h.closest(".part");
       var pKey = pt.closest(".partition").getAttribute("data-p");
       var partKey = pt.getAttribute("data-part");
       var isOn = pt.classList.contains("selected");
@@ -780,10 +785,11 @@ body{
     });
   });
 
-  // Click RG → toggle all groups' same-data-rg RGs in sync
-  document.querySelectorAll(".rg").forEach(function(rg){
-    rg.addEventListener("click", function(e){
+  // Click RG LABEL → toggle
+  document.querySelectorAll(".rg-label").forEach(function(h){
+    h.addEventListener("click", function(e){
       e.stopPropagation();
+      var rg = h.closest(".rg");
       var rgKey = rg.getAttribute("data-rg");
       var isOn = rg.classList.contains("selected");
 
