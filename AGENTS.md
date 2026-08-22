@@ -226,11 +226,13 @@ aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewri
   5. 并发写 lock 文件（见上）。
   6. 向量化 Synth 填充：STANDARD_VECTOR_SIZE 行批量替代逐行。
   7. ~~DML worker 线程池~~（已删除：直接 pipeline 线程调用不再需要线程池）。
-- **CREATE TABLE**（标准建表 + 分区创建）：
+- **CREATE TABLE**（标准建表 + 分区创建 + 列组扩展）：
   `CREATE TABLE al.<table> (symbol VARCHAR, date DATE, ...) WITH (groups='index:close;factor/alpha:alpha001', partition_template='date=%Y-%m-%d')`
   → 前两列必须 (symbol VARCHAR, date DATE/TIMESTAMP)（v8 主键契约）；`groups` 指定列到 group 的映射（不指定时所有非 key 列默认放 index）；`partition_template` 默认 `month=%Y-%m`。
   建表写 0 行占位 parquet（`0000-0000000000.parquet`）到每个 group 的默认分区目录，footer 携带 schema → Reader 可发现表结构。
   分区创建：`CREATE TABLE al.<table> (cols...) WITH (partition='month=2026-10')` → 表已存在时在指定分区目录写占位 parquet。
+  **列组扩展**：表已存在时 `CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,ma20')`
+  → 为已有表添加新列组（不指定 symbol/date）；新 group 的每个已存在分区写 N 行全 NULL 占位 parquet（N = index 分区行数，满足分区对齐契约）。
   无 `_table.json`（所有元数据从 footer + 目录推导）。
 - **Sparse**：靠 Parquet RLE/Dictionary/Compression 天然压缩；未来极端 sparse 列
   再考虑独立 Group（如 `sparse/alpha999`）。
@@ -945,12 +947,13 @@ tive'）→ 断言 pattern 必须用
   - **读基准**（bench_ixday 1M×127 列，4 引擎×5 工作负载×3 线程数）：aligned vs join 在 p100 1 线程 2.06s vs 1.79s（aligned 1.15× 慢——位置组装固定开销），4 线程 1.04s vs 0.93s（差距收窄）；aligned 在 s25 分区剪枝上 **快于** join（0.159s vs 0.177s 1t——3 组独立剪枝 vs join 仍需开 3 文件）；wide（单 parquet）在此规模最快；polars 在小投影最快但 p100 仍付 hstack 代价。详见 docs/BENCHMARK.md
   - **写基准**（bench_write.ps1，600k 基础行单分区最坏情况）：append 1k 新键 aligned 4× 快（0.088s vs 0.356s——只写新分区）；append 100k native 追平（0.402s vs 0.505s——aligned 须重写基础分区 part）；update 300k/600k aligned 慢（2.4s vs 0.5s——per-part 重写 O(part_size) 与改行数无关；native LEFT JOIN+COPY O(n) 常数更低）。**aligned 写优势 = 多分区 part 级粒度**（单分区布局隐藏此优势）
   - 产物：docs/BENCHMARK.md（读+写完整分析，手写）、scripts/bench_write.ps1、scripts/bench_aligned.ps1
-- [x] **CREATE TABLE 标准 DDL + 分区创建完成（2026-08）**：
+- [x] **CREATE TABLE 标准 DDL + 分区创建 + 列组扩展完成（2026-08）**：
   - `CREATE TABLE al.<table> (symbol VARCHAR, date DATE, ...) WITH (groups='...', partition_template='...')` 建表，或 `WITH (partition='month=2026-10')` 在已有表上创建空分区
   - 前两列必须 (symbol VARCHAR, date DATE/TIMESTAMP)（v8 主键契约）；`groups` 指定列到 group 的映射（不指定时所有非 key 列默认放 index）；`partition_template` 默认 `month=%Y-%m`
   - 建表写 0 行占位 parquet（`0000-0000000000.parquet`）到每个 group 的默认分区目录，footer 携带 schema → Reader 可发现表结构
-  - 实现：src/catalog/aligned_create.cpp（WriteEmptyParquet + AlignedCreateTable + AlignedCreatePartition）；aligned_catalog.cpp 的 CreateTable 从 NotImplemented 改为调用建表/建分区；SupportsCreateTable override 允许 WITH clause（v1.5.4 默认拒绝）；LookupEntry 改为 not-found 返回 nullptr（原 throw 阻止 CREATE TABLE）；EnsureTablesLoaded 允许空 root（原 throw 阻止首次 ATTACH）
-  - 验收：SQLLogicTest 111/111（新增 14 测试）；test_aligned 42/42、test_upsert 50/50、test_dml 7/7、test_compaction 16/16、test_parallel 8/8 全 PASS
+  - **列组扩展**：表已存在时 `CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,ma20')` → 为已有表添加新列组（不指定 symbol/date）；新 group 的每个已存在分区写 N 行全 NULL 占位 parquet（N = index 分区行数，满足分区对齐契约）；`WriteNullParquet` 写 N 行全 NULL 数据（`FlatVector::Validity(vec).SetAllInvalid(batch)`）
+  - 实现：src/catalog/aligned_create.cpp（WriteEmptyParquet + WriteNullParquet + AlignedCreateTable + AlignedCreatePartition）；aligned_catalog.cpp 的 CreateTable 从 NotImplemented 改为调用建表/建分区/扩展；SupportsCreateTable override 允许 WITH clause（v1.5.4 默认拒绝）；LookupEntry 改为 not-found 返回 nullptr（原 throw 阻止 CREATE TABLE）；EnsureTablesLoaded 允许空 root（原 throw 阻止首次 ATTACH）+ 重加载前 `tables.clear()` 清除旧 schema 缓存（否则扩展后的表仍看到旧列集）
+  - 验收：SQLLogicTest 119/119（新增 22 测试：14 建表/分区 + 8 列组扩展）；test_aligned 42/42、test_upsert 50/50、test_dml 7/7、test_compaction 16/16、test_parallel 8/8 全 PASS
 - [ ] **Phase 8（后续）**：aligned_compactor 跨组原子性加固（单组失败时回滚已移动的组）；DML 大批量写入的分块物化
 
 ### Phase 8 关键经验

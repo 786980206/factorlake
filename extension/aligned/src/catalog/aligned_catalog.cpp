@@ -101,6 +101,7 @@ void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
 		return;
 	}
 	tables_loaded = true;
+	tables.clear(); // Clear stale entries before re-loading from disk.
 	const string &root = catalog.Cast<AlignedCatalog>().GetRoot();
 
 	auto fs = FileSystem::CreateLocal();

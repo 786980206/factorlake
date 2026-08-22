@@ -84,3 +84,50 @@ query I
 ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.date_tbl (symbol VARCHAR, date DATE, close DOUBLE) WITH (partition = 'date=2026-10-15'); SELECT count(*) FROM al.date_tbl
 ----
 1
+
+# === extend column group ===
+
+# create a table with only index group, insert data
+statement ok
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (symbol VARCHAR, date DATE, close DOUBLE) WITH (groups = 'index:close'); INSERT INTO al.ext_tbl VALUES ('000001', DATE '2026-09-01', 10.5); INSERT INTO al.ext_tbl VALUES ('000002', DATE '2026-09-01', 20.5)
+
+# extend: add a new column group 'fieldset/ma' to existing table
+# columns in CREATE TABLE define the new group's columns (no symbol/date needed)
+statement ok
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (ma5 DOUBLE, ma20 DOUBLE) WITH (groups = 'fieldset/ma:ma5,ma20')
+
+# after extend: table has 6 columns (symbol, date, close, ma5, ma20)
+query I
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.ext_tbl
+----
+2
+
+# new columns are NULL for existing rows
+query RRRR
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); SELECT symbol, close, ma5, ma20 FROM al.ext_tbl WHERE symbol = '000001'
+----
+000001,10.5,NULL,NULL
+
+# insert a new row with all columns (including the new group's columns)
+query RRRR
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); INSERT INTO al.ext_tbl VALUES ('000003', DATE '2026-09-01', 30.5, 0.1, 0.2); SELECT symbol, close, ma5, ma20 FROM al.ext_tbl WHERE symbol = '000003'
+----
+000003,30.5,0.1,0.2
+
+# extend: add another group 'factor/alpha'
+statement ok
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (alpha001 DOUBLE, alpha002 DOUBLE) WITH (groups = 'factor/alpha:alpha001,alpha002')
+
+# all groups visible
+query IIIIII
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); SELECT count(*), count(close), count(ma5), count(ma20), count(alpha001), count(alpha002) FROM al.ext_tbl
+----
+3,3,1,1,0,0
+
+# extend error: group already exists
+statement error
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (x DOUBLE) WITH (groups = 'index:x')
+
+# extend error: no non-index group specified (table already exists)
+statement error
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (x DOUBLE) WITH (groups = 'index:x')
