@@ -167,11 +167,38 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 	ResolveRoot(context, input, fn, root);
 	BuildTablePlan(context, root, result->table_name, result->plan);
 
+	// Materialize manifest-declared groups that have no parts yet (declared in
+	// _table.json at create time, first written later). Without this the
+	// mutator would reject them as "unknown group"; with it, an UPDATE for
+	// existing keys synthesizes the group's first aligned part (all-NULL rows
+	// plus the mapped values). The reader keeps ignoring part-less groups
+	// until that first write.
+	bool table_has_parts = !result->plan.groups.empty() && !result->plan.groups[0].parts.empty();
+	if (table_has_parts) {
+		for (auto &decl : result->plan.table.groups) {
+			bool found = false;
+			for (auto &g : result->plan.groups) {
+				if (StringUtil::CIEquals(g.manifest.group, decl)) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				GroupPlan gp;
+				gp.manifest.group = decl;
+				gp.group_path = result->plan.table_path + "/" + decl;
+				result->plan.groups.push_back(std::move(gp));
+			}
+		}
+	}
+
+
 	// The index group is the first plan group; its primary key columns define
 	// the (date, symbol) contract (v7).
 	auto &index_group = result->plan.groups[0];
 	bool empty_table = index_group.parts.empty();
 	result->empty_table = empty_table;
+
 
 	// Resolve the group mapping (upsert only). When `mapping` is omitted the
 	// columns are auto-assigned to the group that already owns them (by name),
@@ -885,9 +912,15 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 		bool fresh = FindPartition(index_group, loc.partition_key) == nullptr;
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &group = bind.plan.groups[gi];
+			// UPDATE that touches none of this group's columns: the rewrite
+			// would be byte-identical — skip the group entirely.
+			if (gi > 0 && loc.found && bind.group_mapping[gi].col_names.empty()) {
+				continue;
+			}
 			const PartInfo *part = nullptr;
 			idx_t local = 0;
 			idx_t target_idx = 0;
+			bool do_synth = false;
 			if (gi == 0) {
 				part = FindIndexPart(group, loc.partition_key, loc.part_index);
 				local = loc.part_local_row;
@@ -908,11 +941,37 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 				target_idx = 0;
 				// new partition: mapped groups create a fresh part (unmapped
 				// groups get nothing — the reader NULL-fills their rows)
+			} else if (loc.found && !bind.group_mapping[gi].col_names.empty()) {
+				// Key exists in index but this group has never seen this
+				// partition (it predates the group's first mapping): synthesize
+				// an aligned part mirroring the index partition.
+				target_idx = 0;
+				do_synth = true;
 			} else {
 				continue; // group lacks this partition (subset) or is unmapped
 			}
 			auto &target = GetCreateTarget(context, bind, gi, loc.partition_key, target_idx, part, targets);
+			if (do_synth && !target.synth) {
+				idx_t ri = 0;
+				for (auto &ip : index_group.parts) {
+					if (ip.partition_key == loc.partition_key) {
+						ri += ip.row_count;
+					}
+				}
+				target.synth = true;
+				target.synth_rows = ri;
+			}
 			if (loc.found) {
+				if (target.synth) {
+					// Capture the keyed row; the full R_i-row fill happens in
+					// sorted order after the key loop.
+					vector<Value> vals;
+					for (idx_t c = 0; c < bind.group_mapping[gi].src_pos.size(); c++) {
+						vals.push_back(reader.GetValue(bind.group_mapping[gi].src_pos[c], src_row));
+					}
+					target.synth_values[p] = std::move(vals);
+					continue;
+				}
 				AppendRowToBuffer(context, *target.update_buffer, target.update_append, local,
 				                  bind.group_mapping[gi].src_pos, reader, src_row);
 			} else {
@@ -921,6 +980,32 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 				                  bind.group_mapping[gi].src_pos, reader, src_row);
 				target.inserts_count++;
 			}
+		}
+	}
+
+	// 5.5 Fill synthesized parts: append R_i rows in sorted position order —
+	// keyed rows carry the captured mapped values, everything else NULL.
+	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
+		for (auto &kv : targets[gi]) {
+			auto &t = *kv.second;
+			if (!t.synth) {
+				continue;
+			}
+			const auto &mtypes = bind.group_mapping[gi].col_types;
+			DataChunk row;
+			row.Initialize(context, t.insert_buffer->Types());
+			for (idx_t pos = 0; pos < t.synth_rows; pos++) {
+				row.Reset();
+				row.SetCardinality(1);
+				row.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(pos)));
+				auto it = t.synth_values.find(pos);
+				for (idx_t c = 0; c < mtypes.size(); c++) {
+					row.SetValue(1 + c, 0, it != t.synth_values.end() ? it->second[c] : Value(mtypes[c]));
+				}
+				t.insert_buffer->Append(t.insert_append, row);
+			}
+			t.inserts_count = t.synth_rows;
+			t.synth_values.clear();
 		}
 	}
 

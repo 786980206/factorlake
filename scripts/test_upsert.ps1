@@ -1,4 +1,4 @@
-# test_upsert.ps1
+﻿# test_upsert.ps1
 # Phase 8 acceptance: aligned_upsert / aligned_delete (the v7 mutator replacing
 # aligned_write). Covers: empty-table first write, append to an existing
 # partition (new part), in-place update, new partition, delete, delete-emptied
@@ -225,8 +225,30 @@ if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM ali
 } else { Write-Host 'FAIL: empty-table first write should require mapping'; $script:failures++ }
 Remove-Item $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
 
+# ---- two-phase partial-group insert (M1 first, M2 later) ----------------------
+# Two-phase partial-group insert: index holds ONLY the key columns;
+# f/m1 owns v, g/m2 owns w. Same keys written twice - first with f/m1
+# mapping (g/m2 partition does not exist yet), then with g/m2 mapping.
+# The mutator must synthesize g/m2's first aligned part (R_i NULL rows,
+# keyed rows carry w).
+$m12dir = 'D:/proj/factorlake/testdata/upsert_m12'
+Remove-Item $m12dir -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path "$m12dir/t" | Out-Null
+[IO.File]::WriteAllText("$m12dir/t/_table.json", '{"name":"t","version":1,"groups":["index","f/m1","g/m2"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"f/m1":[{"template":"month=%Y-%m","source":"date"}],"g/m2":[{"template":"month=%Y-%m","source":"date"}]}}')
+$s9f = 'D:/proj/factorlake/testdata/upsert_s9.parquet'
+$s10f = 'D:/proj/factorlake/testdata/upsert_s10.parquet'
+& $duckdb -c "COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 1.0::DOUBLE AS v UNION ALL SELECT DATE '2026-01-01', 'b', 2.0) TO '$s9f' (FORMAT PARQUET);" 2>&1 | Out-Null
+& $duckdb -c "COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 10::BIGINT AS w UNION ALL SELECT DATE '2026-01-01', 'b', 20) TO '$s10f' (FORMAT PARQUET);" 2>&1 | Out-Null
+$out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '$s9f', 'index:date,symbol;f/m1:v');"
+Expect-Equal 'M1 phase inserts' $out.Trim() '2,0'
+$out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '$s10f', 'index:date,symbol;g/m2:w');"
+Expect-Equal 'M2 phase updates existing keys' $out.Trim() '0,2'
+$out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT v, w FROM aligned_table('t') WHERE symbol='b';"
+Expect-Equal 'M1+M2 values merged' $out.Trim() '2.0,20'
+
 # ---- cleanup -----------------------------------------------------------------
 Remove-Item $s1, $s2, $s3, $s4, $s5, $s6, $s7, $s8 -Force -ErrorAction SilentlyContinue
+Remove-Item $s9f, $s10f -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
 if ($failures -eq 0) { Write-Host 'ALL TESTS PASSED' } else { Write-Host "$failures TEST(S) FAILED"; exit 1 }

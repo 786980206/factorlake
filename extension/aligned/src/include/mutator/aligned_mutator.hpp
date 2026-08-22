@@ -45,6 +45,13 @@ struct MutateTarget {
 	// part file is removed outright (remaining indexes stay consecutive);
 	// unlike `removed` the partition directory itself survives.
 	bool remove_part = false;
+	// Synthesized part (UPDATE on keys that exist in index, but this group
+	// has never seen that partition — e.g. M1 columns inserted first, M2
+	// later): the part mirrors the index partition with R_i all-NULL rows;
+	// keyed rows carry the mapped values. Filled after the key loop.
+	bool synth = false;
+	idx_t synth_rows = 0;
+	std::map<idx_t, vector<Value>> synth_values;
 	// Fresh-part insert position counter (positions are assigned sequentially
 	// in sorted-key order).
 	idx_t insert_next = 0;

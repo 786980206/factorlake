@@ -672,9 +672,25 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		plan.groups.push_back(std::move(group));
 	}
 	plan.groups.insert(plan.groups.begin(), std::move(index_group));
+	// Declared groups survive even when they have no parts yet (their first
+	// write happens later): every writer rewrites _table.json from this list,
+	// so dropping an empty declared group here would lose it permanently.
+	vector<string> declared = std::move(plan.table.groups);
 	plan.table.groups.clear();
+	for (auto &name : declared) {
+		plan.table.groups.push_back(name);
+	}
 	for (auto &g : group_list) {
-		plan.table.groups.push_back(g.name);
+		bool dup = false;
+		for (auto &existing : plan.table.groups) {
+			if (StringUtil::CIEquals(existing, g.name)) {
+				dup = true;
+				break;
+			}
+		}
+		if (!dup) {
+			plan.table.groups.push_back(g.name);
+		}
 	}
 }
 
