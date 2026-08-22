@@ -617,7 +617,7 @@ bash scripts/test_aligned.sh
     ④ 探测零额外 IO；⑤ p100 t8 ≈ t4（120 列聚合并行饱和，与 v2 趋势一致）
 - [x] **整体审视 + 文档补齐（2026-08）**：
   - `README.md`（新增）：项目定位/用法/核心概念/功能矩阵/构建/性能结论/文档索引/路线图
-  - `docs/READ_OPTIMIZATIONS.md`（新增 + 实测修正）：读取链路优化计划。**初版分析
+  - `docs/READ_OPTIMIZATIONS.md`（已删除，优化已落地）：读取链路优化计划。**初版分析
     的 P0-A/P0-B 是误判（已修正）**：读 remove_unused_columns.cpp 源码确认过滤列
     **总是**保留在 column_ids（filter 列被注入 column_references 防剪除，
     `filter_prune` 只控制 projection_ids 输出剪枝）→ `SELECT alpha001 WHERE
@@ -625,9 +625,13 @@ bash scripts/test_aligned.sh
     **已实施**：① `filter_prune=true`（extension.cpp ×2，过滤列不进 scan 输出 →
     EXPLAIN 里多余 PROJECTION 层消失；scan 侧 scratch+ReferenceColumns 路径本就
     完整，只开开关）；② P1-A 列类型解析复用（`PartInfo.types` 存 footer 类型，
-    ResolveColumnTypes 不再逐 part 开 reader）。P1-C 聚合 stats 快速路径
-    **依赖 DuckDB ≥ v1.6 的 AggregatePushdown API**（v1.5.4 无），标记待升级。
-    回归：test_aligned 30 / test_writer 17 / test_compaction 16 / test_parallel 全 PASS
+    ResolveColumnTypes 不再逐 part 开 reader）；③ P2-B NULL 填充向量化（首行
+    `SetInvalid` 初始化 mask，后续 `SetInvalidUnsafe` 跳过 AllValid 分支检查）。
+    **未实施**：P2-C reader 缓存（DuckDB `MultiFileLocalColumnIds` 无 clear 接口，
+    无法重置 column_ids → reader 不可跨 OpenPart 复用）、P1-B 批量 footer 读取
+    （ObjectCache 已缓解热查询，冷查询收益不值得改动量）、P1-C 聚合 stats 快速路径
+    （**依赖 DuckDB ≥ v1.6 的 AggregatePushdown API**，v1.5.4 无）。文档已删除，
+    结论并路线图。
   - `docs/WRITE_PLAN.md`（新增）：写入增强计划（Phase 8）。W-1 目录源（glob 多文件）、
     W-2 part_rows 上限切分（同分区多 part，不破坏探测公式）、W-3 并发写互斥
     （last_txid CAS）、W-4 写后校验（validate=true）、W-5 group 间并行、

@@ -168,14 +168,13 @@ Windows 验收（全量回归）：`test_aligned.ps1` 42/42、`test_upsert.ps1` 
 | `docs/STORAGE_CONTRACT.md` | 存储契约 v7（目录规则、列名规则、分区对齐契约、行区间、Manifest、写入协议） |
 | `docs/BENCHMARK*.md` | 各轮基准测试方法与结论 |
 | `docs/EXTENSION_RELEASE.md` | 扩展发布机制（INSTALL/LOAD、签名、GitHub Release） |
-| `docs/READ_OPTIMIZATIONS.md` | 读取链路现状分析与优化计划 |
 
 ## 路线图
 
-1. **读取链路优化**（见 `docs/READ_OPTIMIZATIONS.md`）：✅ filter_prune=true
-   （过滤列不投影也可剪枝、省掉多余 PROJECTION 层）、✅ 列类型解析复用；
-   待做：NULL 填充向量化、reader 缓存、批量 footer、聚合 stats 快速路径
-   （依赖 DuckDB ≥ v1.6）。
+1. **读取链路优化**：✅ filter_prune=true（过滤列不投影也可剪枝、省掉多余
+   PROJECTION 层）、✅ 列类型解析复用、✅ NULL 填充向量化（SetInvalidUnsafe）。
+   待做：reader 缓存（受限于 DuckDB MultiFileLocalColumnIds 无 clear 接口）、
+   批量 footer 读取、聚合 stats 快速路径（依赖 DuckDB ≥ v1.6）。
 2. **写入增强**（v7 mutator 已完成核心）：目录源（多文件 glob）、并发写互斥
    （last_txid CAS）、写后校验。
 3. **Catalog Integration**：最终目标 `SELECT * FROM cnstk_ixday;` 直接可用。

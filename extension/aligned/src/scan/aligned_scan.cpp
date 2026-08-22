@@ -792,8 +792,13 @@ static void NullFillGroupRange(DataChunk &output, idx_t output_offset, const Gro
 		auto &vec = output.data[projected];
 		vec.SetVectorType(VectorType::FLAT_VECTOR);
 		auto &mask = FlatVector::Validity(vec);
-		for (idx_t r = from; r < to; r++) {
-			mask.SetInvalid(output_offset + (r - window_start));
+		idx_t first = output_offset + (from - window_start);
+		idx_t last = output_offset + (to - window_start);
+		// First SetInvalid initializes the mask (AllValid → explicit bits);
+		// subsequent calls use SetInvalidUnsafe to skip the branch.
+		mask.SetInvalid(first);
+		for (idx_t r = first + 1; r < last; r++) {
+			mask.SetInvalidUnsafe(r);
 		}
 	}
 }
@@ -934,8 +939,11 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 				auto &vec = output.data[out_pos];
 				vec.SetVectorType(VectorType::FLAT_VECTOR);
 				auto &mask = FlatVector::Validity(vec);
-				for (idx_t r = fill_from; r < fill_to; r++) {
-					mask.SetInvalid(output_offset + placed + (r - w_start));
+				idx_t first = output_offset + placed + (fill_from - w_start);
+				idx_t last = output_offset + placed + (fill_to - w_start);
+				mask.SetInvalid(first);
+				for (idx_t r = first + 1; r < last; r++) {
+					mask.SetInvalidUnsafe(r);
 				}
 			}
 		}
@@ -1073,8 +1081,11 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			auto &vec = output.data[out_pos];
 			vec.SetVectorType(VectorType::FLAT_VECTOR);
 			auto &mask = FlatVector::Validity(vec);
-			for (idx_t r = 0; r < need; r++) {
-				mask.SetInvalid(output_offset + placed + r);
+			idx_t first = output_offset + placed;
+			idx_t last = first + need;
+			mask.SetInvalid(first);
+			for (idx_t r = first + 1; r < last; r++) {
+				mask.SetInvalidUnsafe(r);
 			}
 		}
 
