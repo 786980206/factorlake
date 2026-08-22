@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bench_scenarios.sh — ONE-COMMAND, RESOURCE-MONITORED, STAGED benchmark driver.
 #
-# Runs the standardized multi-scenario benchmarks from bench/multi_bench_config.sh
+# Runs the standardized multi-scenario benchmarks from scripts/multi_bench_config.sh
 # in INCREASING data scale (so any resource issue surfaces early and never
 # surprises you), monitoring memory before/after each stage and saving every
 # stage's CSV to a unique path (never clobbered).
@@ -21,7 +21,7 @@
 # Env: DUCKDB, ALIGNED_DATA_ROOT, BENCH_OUT (default bench/out)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT/bench/multi_bench_config.sh"
+source "$ROOT/scripts/multi_bench_config.sh"
 DUCKDB="${DUCKDB:-$ROOT/duckdb/build/duckdb}"
 OUT="${ALIGNED_DATA_ROOT:-$ROOT/testdata}"
 BENCH_OUT="${BENCH_OUT:-$ROOT/bench/out}"

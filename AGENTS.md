@@ -368,7 +368,7 @@ bash scripts/test_aligned.sh
 > 运行示例 SQL 时用 `SET aligned_data_root='<abs-path>/testdata';`（见 §17 各 Phase 的基线命令）。
 
 #### 多场景基准（Linux，Phase 6+）
-- Group Settings 事实来源：`bench/multi_bench_config.sh`（引擎组 D-WIDE/D-JOIN/
+- Group Settings 事实来源：`scripts/multi_bench_config.sh`（引擎组 D-WIDE/D-JOIN/
   P-CONCAT/P-JOIN/A-ALIGNED/A-NORMAL、规模 R1..R4×W1..W3、稀疏、Q1..Q5、F1..F5、
   S0..S3、环境、Tier A/B/C 组合）
 - 参数化数据生成：`scripts/gen_multi_bench.sh`（`--rows --width --sparsity --aligned`
@@ -514,7 +514,7 @@ bash scripts/test_aligned.sh
     (400K, aligned) s25(1/4 扫描) threads=1 ≈ 0.06s vs s100(全扫) ≈ 0.14-0.21s，**≈2-3× 收益**；
     aligned 相对 wide/join 的优势需在更大/冷缓存数据上才显现（见 docs/BENCHMARK.md）。
 - [x] **Phase 6+ 多场景基准 + 一键复现框架（2026-08）**：
-  - **Group Settings 事实来源** `bench/multi_bench_config.sh`（6 引擎组 D-WIDE/D-JOIN/
+  - **Group Settings 事实来源** `scripts/multi_bench_config.sh`（6 引擎组 D-WIDE/D-JOIN/
     P-CONCAT/P-JOIN/A-ALIGNED/A-NORMAL、R1..R4×W1..W3、DENSE/SPARSE-90/99、Q1..Q5、
     F1..F5、S0..S3、COLD/WARM、线程/文件数/分区、Tier A/B/C）
   - **参数化生成器** `scripts/gen_multi_bench.sh`（`--rows/--width/--sparsity/--aligned`，

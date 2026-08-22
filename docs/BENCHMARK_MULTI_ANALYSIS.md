@@ -14,7 +14,7 @@
 
 ## 1. 评测矩阵（Group Settings）
 
-见 `bench/multi_bench_config.sh`（唯一事实来源），六大类：
+见 `scripts/multi_bench_config.sh`（唯一事实来源），六大类：
 
 | 类 | 内容 |
 |----|------|

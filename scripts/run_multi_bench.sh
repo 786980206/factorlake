@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_multi_bench.sh — multi-scenario benchmark harness (Phase 6+).
 #
-# Reads the standardized Group Settings from bench/multi_bench_config.sh and
+# Reads the standardized Group Settings from scripts/multi_bench_config.sh and
 # executes a Tier (A smoke / B main / C stress) or an explicit selection across
 # the engine groups, measuring COLD + WARM per test point.
 #
@@ -21,7 +21,7 @@
 #      REPEATS=5 bash scripts/run_multi_bench.sh --tier A ...
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="$ROOT/bench/multi_bench_config.sh"
+CONFIG="$ROOT/scripts/multi_bench_config.sh"
 source "$CONFIG"
 
 DUCKDB="${DUCKDB:-$ROOT/duckdb/build/duckdb_aligned.exe}"
