@@ -47,7 +47,7 @@ foreach ($batch in 1000, 10000, 100000) {
     # base data via aligned_create + INSERT (setup, not timed)
     $setupA = @"
 SET aligned_data_root='$root/aligned';
-SELECT * FROM aligned_create('t', 'symbol VARCHAR, date DATE, v DOUBLE', groups => 'index:v');
+SELECT * FROM aligned_create('t', 'index', 'symbol VARCHAR, date DATE, v DOUBLE');
 ATTACH '$root/aligned' AS al (TYPE ALIGNED);
 INSERT INTO al.t SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, i::DOUBLE AS v FROM range($baseRows) t(i);
 "@

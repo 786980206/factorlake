@@ -45,7 +45,7 @@ SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT * FROM aligned_compa
 
 # --- setup: table with 0-row middle part (from delete) ---
 statement ok
-SET aligned_data_root='{TEST_DIR}/compact2'; SELECT * FROM aligned_create('ct2', 'symbol VARCHAR, date DATE, v DOUBLE', groups => 'index:v')
+SET aligned_data_root='{TEST_DIR}/compact2'; SELECT * FROM aligned_create('ct2', 'index', 'symbol VARCHAR, date DATE, v DOUBLE')
 
 mkdir {TEST_DIR}/compact2/ct2/index/month=2026-01
 

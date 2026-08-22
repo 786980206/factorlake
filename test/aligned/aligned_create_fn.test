@@ -1,16 +1,12 @@
 # name: test/aligned/aligned_create_fn.test
-# description: aligned_create table function — create tables via function call
+# description: aligned_create table function — create table or add column group
 
-# --- basic create with groups ---
-# 5 dirs (table + index + factor + factor/alpha + 2 partition dirs for
-# index, minus table dir which is the root = 4 sub-dirs, but actually the
-# count includes all subdirectories: table_dir itself is the root, so
-# index, factor, factor/alpha, month=1970-01 (index), month=1970-01 (alpha)
-# = 5 dirs, 2 parquet files (one per group's placeholder partition)
+# --- create new table (group='index') ---
+# table dir + index dir + 1 placeholder partition dir = 2 dirs, 1 parquet file
 query III
-SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE, alpha001 DOUBLE', groups => 'index:close;factor/alpha:alpha001')
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE')
 ----
-5,2,1
+2,1,1
 
 # verify table exists and is empty
 query I
@@ -20,43 +16,50 @@ ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al
 
 # insert + verify
 query RR
-ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5, 0.32); SELECT close, alpha001 FROM al.mytable WHERE symbol = '000001'
+ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5); SELECT close FROM al.mytable WHERE symbol = '000001'
 ----
-10.5,0.32
+10.5
 
-# --- create without groups (all columns default to index) ---
-# index group + 1 placeholder partition dir = 2 dirs, 1 parquet file
-query III
-SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('simple_tbl', 'symbol VARCHAR, date DATE, close DOUBLE')
-----
-2,1,1
-
-query R
-ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); INSERT INTO al.simple_tbl VALUES ('000002', DATE '2026-02-01', 20.0); SELECT close FROM al.simple_tbl WHERE symbol = '000002'
-----
-20.0
-
-# --- with partition_template (date=%Y-%m-%d) ---
-# index group dir + 1 placeholder partition dir = 2 dirs, 1 parquet file
+# --- add a column group to existing table ---
+# factor/alpha has 2 partition dirs (month=1970-01 placeholder + month=2026-01)
+# = 2 dirs, 2 parquet files
 query II
-SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT dirs_created, files_created FROM aligned_create('ptbl', 'symbol VARCHAR, date DATE, close DOUBLE', groups => 'index:close', partition_template => 'date=%Y-%m-%d')
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT dirs_created, files_created FROM aligned_create('mytable', 'factor/alpha', 'alpha001 DOUBLE, alpha002 DOUBLE')
+----
+2,2
+
+# verify alpha columns are NULL for existing rows (new group placeholder)
+query RR
+ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); SELECT alpha001, alpha002 FROM al.mytable WHERE symbol = '000001'
+----
+NULL,NULL
+
+# insert + verify alpha columns
+query RR
+ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); INSERT INTO al.mytable VALUES ('000002', DATE '2026-02-01', 20.0, 0.3, 0.5); SELECT alpha001, alpha002 FROM al.mytable WHERE symbol = '000002'
+----
+0.3,0.5
+
+# --- create with partition_template (date=%Y-%m-%d) ---
+query II
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT dirs_created, files_created FROM aligned_create('ptbl', 'index', 'symbol VARCHAR, date DATE, close DOUBLE', partition_template => 'date=%Y-%m-%d')
 ----
 2,1
 
-# --- error: two VARCHAR columns ---
+# --- error: two VARCHAR columns (new table, PK validation) ---
 statement error
-SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('bad_tbl', 'col1 VARCHAR, col2 VARCHAR')
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('bad_tbl', 'index', 'col1 VARCHAR, col2 VARCHAR')
 ----
 two VARCHAR
 
 # --- error: no data root ---
 statement error
-SELECT * FROM aligned_create('noroot_tbl', 'symbol VARCHAR, date DATE')
+SELECT * FROM aligned_create('noroot_tbl', 'index', 'symbol VARCHAR, date DATE')
 ----
 no data root
 
-# --- error: table already exists ---
+# --- error: extend non-existent table ---
 statement error
-SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE')
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('nonexist', 'factor/beta', 'beta001 DOUBLE')
 ----
-already exists
+does not exist

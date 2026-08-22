@@ -6,7 +6,13 @@
 
 # --- setup: create upserttest table with column groups ---
 statement ok
-SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT * FROM aligned_create('upserttest', 'symbol VARCHAR, date DATE, close DOUBLE, rowid BIGINT, rowid_alpha BIGINT, rowid_ma BIGINT, ma5 DOUBLE, alpha001 DOUBLE', groups => 'index:close,rowid;factor/alpha101:rowid_alpha,alpha001;fieldset/ma:rowid_ma,ma5')
+SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT * FROM aligned_create('upserttest', 'index', 'symbol VARCHAR, date DATE, close DOUBLE, rowid BIGINT')
+
+statement ok
+SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT * FROM aligned_create('upserttest', 'factor/alpha101', 'rowid_alpha BIGINT, alpha001 DOUBLE')
+
+statement ok
+SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT * FROM aligned_create('upserttest', 'fieldset/ma', 'rowid_ma BIGINT, ma5 DOUBLE')
 
 # --- setup: insert 100 rows of test data ---
 statement ok

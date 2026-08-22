@@ -5,28 +5,30 @@
 
 namespace duckdb {
 
-// aligned_create(table_name, columns, groups, root=..., partition_template=...)
+// aligned_create(table_name, group_name, columns, root=..., partition_template=...)
 //
-// Creates an AlignedTable on disk via a table function (instead of CREATE TABLE
-// DDL). Creates the table directory, column-group subdirectories, and writes
-// one empty (0-row) placeholder parquet per group so the reader can discover
-// the schema from the footer.
+// Creates or extends an AlignedTable on disk via a table function.
 //
 // Parameters (positional):
-//   table_name    — logical table name (subdirectory of root)
-//   columns       — column definition string, e.g. "symbol VARCHAR, date DATE,
-//                   close DOUBLE, alpha001 DOUBLE"
-//   groups        — column→group mapping (optional), e.g.
-//                   "index:close;factor/alpha:alpha001". Columns not listed
-//                   default to the index group. May be empty.
+//   table_name   — logical table name (subdirectory of root)
+//   group_name   — column group path: "index" or "lv1/lv2" (e.g. "factor/alpha")
+//   columns      — column definition string, e.g. "symbol VARCHAR, date DATE,
+//                  close DOUBLE, alpha001 DOUBLE"
 //
 // Named parameters:
-//   root                 — data root directory (default: aligned_data_root)
-//   partition_template   — partition template (default: month=%Y-%m)
+//   root                — data root directory (default: aligned_data_root)
+//   partition_template  — partition template (default: month=%Y-%m)
+//                         Only used when group_name="index" (new table creation)
 //
-// Rules:
-//   - First two columns must be (symbol VARCHAR, date DATE/TIMESTAMP) — v8 PK.
-//   - Non-index group names must be lv1/lv2 two-level paths.
+// Behavior:
+//   - group_name="index": create a NEW table. First two columns must be
+//     (symbol VARCHAR, date DATE/TIMESTAMP). All columns go into the index
+//     group. A placeholder parquet is written so the reader can discover
+//     the schema.
+//   - group_name!="index": EXTEND an existing table by adding a new column
+//     group. The columns define this group's schema. A placeholder parquet
+//     (N all-NULL rows, N = index partition row count) is written in every
+//     existing partition to satisfy the partition-aligned contract.
 //
 // Returns one row: (dirs_created BIGINT, files_created BIGINT, txid BIGINT)
 unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunctionBindInput &input,

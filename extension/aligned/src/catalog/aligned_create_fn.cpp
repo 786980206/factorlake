@@ -20,9 +20,9 @@ namespace duckdb {
 
 struct AlignedCreateBindData : public TableFunctionData {
 	string table_name;
+	string group_name;
 	string root;
 	vector<ColumnDefinition> columns;
-	string groups_option;
 	string partition_template;
 	vector<LogicalType> types;
 	vector<string> names;
@@ -37,11 +37,11 @@ struct AlignedCreateGlobalState : public GlobalTableFunctionState {
 //===----------------------------------------------------------------------===//
 
 unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<AlignedCreateBindData>();
 
-	if (input.inputs.size() != 2) {
-		throw BinderException("aligned_create: expected (table_name, columns)");
+	if (input.inputs.size() != 3) {
+		throw BinderException("aligned_create: expected (table_name, group_name, columns)");
 	}
 
 	result->table_name = StringValue::Get(input.inputs[0]);
@@ -49,9 +49,13 @@ unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunction
 		throw BinderException("aligned_create: table_name must not be empty");
 	}
 
+	result->group_name = StringValue::Get(input.inputs[1]);
+	if (result->group_name.empty()) {
+		throw BinderException("aligned_create: group_name must not be empty");
+	}
+
 	// Parse the column definition string using DuckDB's SQL parser.
-	// e.g. "symbol VARCHAR, date DATE, close DOUBLE" → ColumnList
-	string columns_str = StringValue::Get(input.inputs[1]);
+	string columns_str = StringValue::Get(input.inputs[2]);
 	if (columns_str.empty()) {
 		throw BinderException("aligned_create: columns definition must not be empty");
 	}
@@ -64,12 +68,6 @@ unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunction
 			col_copy.SetType(TransformStringToLogicalType(col_copy.Type().ToString(), context));
 		}
 		result->columns.push_back(std::move(col_copy));
-	}
-
-	// Optional groups mapping (named parameter)
-	auto groups_entry = input.named_parameters.find("groups");
-	if (groups_entry != input.named_parameters.end() && !groups_entry->second.IsNull()) {
-		result->groups_option = StringValue::Get(groups_entry->second);
 	}
 
 	// Named parameters
@@ -109,7 +107,6 @@ unique_ptr<GlobalTableFunctionState> AlignedCreateInitGlobal(ClientContext &cont
 //! Skips the `.aligned_write.lock` file (transient, created by TableWriteLock).
 static void CountRecursive(FileSystem &fs, const string &path, idx_t &dirs_count, idx_t &files_count) {
 	fs.ListFiles(path, [&](OpenFileInfo &info) {
-		// Skip the write lock file
 		if (StringUtil::CIEquals(info.path, ".aligned_write.lock")) {
 			return;
 		}
@@ -135,20 +132,76 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 	auto &fs = FileSystem::GetFileSystem(context);
 	string table_dir = bind.root + "/" + bind.table_name;
 
+	// Check if the table already exists (has committed parquet files).
+	bool table_exists = false;
+	if (fs.DirectoryExists(table_dir)) {
+		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
+		for (auto &p : parts) {
+			if (p.path.find("/_tmp/") == string::npos) {
+				table_exists = true;
+				break;
+			}
+		}
+	}
+
 	// Acquire write lock for mutual exclusion with concurrent writers.
 	TableWriteLock write_lock(fs, table_dir);
 
 	idx_t txid = NextTransactionId();
 
-	// Delegate to the existing AlignedCreateTable helper (new-table mode).
-	AlignedCreateTable(context, bind.root, bind.table_name, bind.columns,
-	                   bind.groups_option, bind.partition_template);
+	if (StringUtil::CIEquals(bind.group_name, "index")) {
+		// --- New table creation ---
+		// All columns go into the index group. Build a groups option string
+		// "index:col1,col2,..." and delegate to AlignedCreateTable.
+		if (table_exists) {
+			throw BinderException("aligned_create: table '%s' already exists at '%s'",
+			                       bind.table_name, table_dir);
+		}
+		string groups_option = "index:";
+		for (idx_t i = 0; i < bind.columns.size(); i++) {
+			if (i > 0) {
+				groups_option += ",";
+			}
+			groups_option += bind.columns[i].Name();
+		}
+		AlignedCreateTable(context, bind.root, bind.table_name, bind.columns,
+		                   groups_option, bind.partition_template);
+	} else {
+		// --- Column group extension ---
+		// Add a new column group to an existing table. Build a groups option
+		// "group_name:col1,col2,..." and delegate to AlignedCreateTable (extend mode).
+		if (!table_exists) {
+			throw BinderException("aligned_create: table '%s' does not exist at '%s' — "
+			                       "cannot add column group '%s' to a non-existent table",
+			                       bind.table_name, table_dir, bind.group_name);
+		}
+		string groups_option = bind.group_name + ":";
+		for (idx_t i = 0; i < bind.columns.size(); i++) {
+			if (i > 0) {
+				groups_option += ",";
+			}
+			groups_option += bind.columns[i].Name();
+		}
+		// partition_template is not used in extend mode (existing table already
+		// has one), but pass it anyway for API consistency.
+		AlignedCreateTable(context, bind.root, bind.table_name, bind.columns,
+		                   groups_option, bind.partition_template);
+	}
 
 	// Count the created dirs and files.
+	// For new table: count the entire table directory.
+	// For column group extension: count only the new group's directory.
 	idx_t dirs_created = 0;
 	idx_t files_created = 0;
-	if (fs.DirectoryExists(table_dir)) {
-		CountRecursive(fs, table_dir, dirs_created, files_created);
+	if (StringUtil::CIEquals(bind.group_name, "index")) {
+		if (fs.DirectoryExists(table_dir)) {
+			CountRecursive(fs, table_dir, dirs_created, files_created);
+		}
+	} else {
+		string group_dir = table_dir + "/" + bind.group_name;
+		if (fs.DirectoryExists(group_dir)) {
+			CountRecursive(fs, group_dir, dirs_created, files_created);
+		}
 	}
 
 	// Emit one result row.

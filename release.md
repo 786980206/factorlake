@@ -406,3 +406,33 @@ SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE
 - 新增测试：`test/aligned/aligned_compact.test` 新增 9 个断言（0-row middle part
   合并、幂等性、skip 优化、error case）。
 - 当前总：SQLLogicTest 115/115 + 4 PS 套件全 PASS。
+
+## v0.17-create-group-param — aligned_create 参数重构
+
+将 `aligned_create` 从 `groups => 'index:close;factor/alpha:alpha001'` 的复杂
+映射语法改为与 `aligned_drop` 对称的简单路径参数：
+
+```sql
+-- 旧签名
+SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE, alpha001 DOUBLE',
+                             groups => 'index:close;factor/alpha:alpha001');
+
+-- 新签名
+SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE');
+SELECT * FROM aligned_create('mytable', 'factor/alpha', 'alpha001 DOUBLE');
+```
+
+- **参数变更**：从 2 位置 + 3 命名参数改为 3 位置 + 2 命名参数。
+  - `group_name`（位置参数 2）：`'index'`（建表）或 `'lv1/lv2'`（扩展列组）。
+  - `columns`（位置参数 3）：该组的列定义字符串。
+  - 移除 `groups` 命名参数。
+  - 保留 `root` 和 `partition_template` 命名参数。
+- **两种模式**：
+  - `group_name='index'`：建表。所有列写入 index 组。检查表不存在 + PK 校验。
+  - `group_name='lv1/lv2'`：扩展列组。检查表已存在。委托 `AlignedCreateTable`
+    extend mode（每个已有分区写 N 行 NULL 占位）。
+- **计数优化**：建表模式计全表目录，扩展模式只计新组目录。
+- **更新测试**：`aligned_create_fn.test` 重写（新签名），`aligned_dml.test`、
+  `aligned_delete_empty.test`、`aligned_compact.test` 改用新签名。
+  `bench_write.ps1` 同步更新。
+- 当前总：SQLLogicTest 118/118 + 4 PS 套件全 PASS。

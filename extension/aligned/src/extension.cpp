@@ -66,15 +66,13 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	aligned_drop_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_drop_fn);
 
-	// aligned_create(table_name, columns, groups, root=..., partition_template=...)
-	// Create a new AlignedTable on disk. `columns` is a column-definition
-	// string (e.g. "symbol VARCHAR, date DATE, close DOUBLE"). `groups` is
-	// an optional column→group mapping. Returns (dirs_created, files_created,
-	// txid).
+	// aligned_create(table_name, group_name, columns, root=..., partition_template=...)
+	// Create a new AlignedTable (group_name='index') or extend an existing
+	// table with a new column group (group_name='factor/alpha'). `columns` is
+	// a column-definition string. Returns (dirs_created, files_created, txid).
 	TableFunction aligned_create_fn("aligned_create",
-	                                {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                AlignedCreateFunction, AlignedCreateBind, AlignedCreateInitGlobal, nullptr);
-	aligned_create_fn.named_parameters["groups"] = LogicalType::VARCHAR;
 	aligned_create_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	aligned_create_fn.named_parameters["partition_template"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_create_fn);

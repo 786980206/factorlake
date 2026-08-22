@@ -3,7 +3,7 @@
 
 # --- setup: create table with 3 partitions, each with 1 part ---
 statement ok
-SET aligned_data_root='{TEST_DIR}/del_empty_data'; SELECT * FROM aligned_create('del_tbl', 'symbol VARCHAR, date DATE, v DOUBLE', groups => 'index:v', partition_template => 'month=%Y-%m')
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; SELECT * FROM aligned_create('del_tbl', 'index', 'symbol VARCHAR, date DATE, v DOUBLE', partition_template => 'month=%Y-%m')
 
 # --- insert 10 rows in month=2026-01 ---
 statement ok

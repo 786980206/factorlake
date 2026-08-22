@@ -146,39 +146,36 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 除了标准 SQL DML，还提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
-### 4.0 `aligned_create` — 建表
+### 4.0 `aligned_create` — 建表 / 扩展列组
 
 ```sql
-SELECT * FROM aligned_create(table_name, columns [, groups => '...'] [, root => '...']
+SELECT * FROM aligned_create(table_name, group_name, columns [, root => '...']
                              [, partition_template => '...']);
 ```
 
 | 参数 | 位置 | 类型 | 必填 | 说明 |
 |------|------|------|------|------|
 | `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名（将成为数据根目录下的子目录）。 |
-| `columns` | 位置参数 2 | VARCHAR | 是 | 列定义字符串，如 `'symbol VARCHAR, date DATE, close DOUBLE'`。由 DuckDB SQL 解析器解析。 |
-| `groups` | 命名参数 | VARCHAR | 否 | 列→组映射。格式 `"index:close;factor/alpha:alpha001"`。省略时所有非 key 列默认放 index。 |
+| `group_name` | 位置参数 2 | VARCHAR | 是 | 列组路径：`'index'`（建表）或 `'lv1/lv2'`（扩展列组，如 `'factor/alpha'`）。 |
+| `columns` | 位置参数 3 | VARCHAR | 是 | 该组的列定义字符串，如 `'symbol VARCHAR, date DATE, close DOUBLE'`。由 DuckDB SQL 解析器解析。 |
 | `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root`。 |
-| `partition_template` | 命名参数 | VARCHAR | 否 | 分区模板，默认 `month=%Y-%m`。可选 `year=%Y` / `date=%Y-%m-%d`。 |
+| `partition_template` | 命名参数 | VARCHAR | 否 | 分区模板，默认 `month=%Y-%m`。可选 `year=%Y` / `date=%Y-%m-%d`。仅建表时生效。 |
 
 **返回**：单行 `(dirs_created BIGINT, files_created BIGINT, txid BIGINT)`。
 
-**规则**：
-- 前两列必须 `(symbol VARCHAR, date DATE/TIMESTAMP)`（v8 主键契约）。
-- `groups` 格式：`"index:close;factor/alpha:alpha001"`。非 index 组名必须是 `lv1/lv2` 两级路径。
-- 创建 0 行占位 parquet（footer 携带 schema），Reader 可自动发现。
+**两种模式**：
+- **`group_name='index'`**：**建表**。前两列必须 `(symbol VARCHAR, date DATE/TIMESTAMP)`（v8 主键契约）。所有列写入 index 组。创建 0 行占位 parquet。
+- **`group_name='lv1/lv2'`**：**扩展列组**。表必须已存在。新组的列定义不需含主键。每个已有分区写 N 行全 NULL 占位 parquet（N = index 分区行数），满足分区对齐契约。已有列组不受影响。
 
 ```sql
--- 建表（含列组映射）
-SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE, alpha001 DOUBLE',
-                             groups => 'index:close;factor/alpha:alpha001');
+-- 建表（index 组含所有列）
+SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE');
 
--- 建表（所有列默认放 index）
-SELECT * FROM aligned_create('simple_tbl', 'symbol VARCHAR, date DATE, close DOUBLE');
+-- 扩展列组（向已有表添加 factor/alpha 组）
+SELECT * FROM aligned_create('mytable', 'factor/alpha', 'alpha001 DOUBLE, alpha002 DOUBLE');
 
--- 指定分区模板
-SELECT * FROM aligned_create('ptbl', 'symbol VARCHAR, date DATE, close DOUBLE',
-                             groups => 'index:close',
+-- 建表 + 指定分区模板
+SELECT * FROM aligned_create('ptbl', 'index', 'symbol VARCHAR, date DATE, close DOUBLE',
                              partition_template => 'date=%Y-%m-%d');
 ```
 
