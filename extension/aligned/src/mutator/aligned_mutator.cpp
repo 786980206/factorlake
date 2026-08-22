@@ -9,6 +9,8 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "parquet_reader.hpp"
 
@@ -858,23 +860,65 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 	}
 
 	// 3. Build + sort + dedupe the key list ((partition, symbol, date) order).
+	// Vectorized: iterate the source ColumnDataCollection chunk-by-chunk
+	// instead of calling SourceReader::GetValue per row (which allocates a
+	// Value object and re-fetches the chunk on every call).
 	vector<SortedRow> rows;
 	rows.reserve(src->Count());
-	for (idx_t r = 0; r < src->Count(); r++) {
-		Value dv = reader.GetValue(date_pos, r);
-		if (dv.IsNull()) {
-			throw IOException("Aligned table: NULL in the partition source column '%s' at source row %llu",
-			                  bind.date_col, r);
+	{
+		ColumnDataScanState scan_state;
+		src->InitializeScan(scan_state);
+		DataChunk src_chunk;
+		src_chunk.Initialize(context, src->Types());
+		idx_t row_offset = 0;
+		while (true) {
+			src_chunk.Reset();
+			src->Scan(scan_state, src_chunk);
+			if (src_chunk.size() == 0) {
+				break;
+			}
+			idx_t n = src_chunk.size();
+			// Extract date column (may be DATE or TIMESTAMP)
+			auto &date_vec = src_chunk.data[date_pos];
+			bool date_is_null = date_vec.GetVectorType() == VectorType::CONSTANT_VECTOR &&
+			                    ConstantVector::IsNull(date_vec);
+			UnifiedVectorFormat date_fmt;
+			date_vec.ToUnifiedFormat(n, date_fmt);
+			auto date_sel = date_fmt.sel;
+			bool is_timestamp = date_vec.GetType().id() == LogicalTypeId::TIMESTAMP;
+			// Extract symbol column
+			auto &sym_vec = src_chunk.data[symbol_pos];
+			UnifiedVectorFormat sym_fmt;
+			sym_vec.ToUnifiedFormat(n, sym_fmt);
+			auto sym_sel = sym_fmt.sel;
+			for (idx_t i = 0; i < n; i++) {
+				idx_t r = row_offset + i;
+				auto di = date_sel->get_index(i);
+				if (date_is_null || !date_fmt.validity.AllValid() ||
+				    !date_fmt.validity.RowIsValid(di)) {
+					throw IOException("Aligned table: NULL in the partition source column '%s' at source row %llu",
+					                  bind.date_col, r);
+				}
+				SortedRow row;
+				date_t d;
+				if (is_timestamp) {
+					auto tptr = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
+					d = Timestamp::GetDate(timestamp_t(tptr[di]));
+				} else {
+					auto dptr = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
+					d = date_t(dptr[di]);
+				}
+				if (!template_str.empty() && !EvaluatePartitionTemplate(template_str, d, row.partition_key)) {
+					throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
+				}
+				auto si = sym_sel->get_index(i);
+				row.symbol = sym_vec.GetValue(si);
+				row.date = d;
+				row.src_row = r;
+				rows.push_back(std::move(row));
+			}
+			row_offset += n;
 		}
-		SortedRow row;
-		date_t d = dv.GetValue<date_t>();
-		if (!template_str.empty() && !EvaluatePartitionTemplate(template_str, d, row.partition_key)) {
-			throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
-		}
-		row.symbol = reader.GetValue(symbol_pos, r);
-		row.date = d;
-		row.src_row = r;
-		rows.push_back(std::move(row));
 	}
 	SortAndDedupe(rows);
 
@@ -1160,24 +1204,62 @@ void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, Dat
 	auto src = ReadSourceColumns(context, bind.source_path, key_names);
 	SourceReader reader(context, *src);
 
-	// 2. Build + sort + dedupe the key list.
+	// 2. Build + sort + dedupe the key list (vectorized chunk scan).
 	vector<SortedRow> rows;
 	rows.reserve(src->Count());
-	for (idx_t r = 0; r < src->Count(); r++) {
-		Value dv = reader.GetValue(0, r);
-		if (dv.IsNull()) {
-			throw IOException("Aligned table: NULL in the partition source column '%s' at source row %llu",
-			                  bind.date_col, r);
+	{
+		ColumnDataScanState scan_state;
+		src->InitializeScan(scan_state);
+		DataChunk src_chunk;
+		src_chunk.Initialize(context, src->Types());
+		idx_t row_offset = 0;
+		while (true) {
+			src_chunk.Reset();
+			src->Scan(scan_state, src_chunk);
+			if (src_chunk.size() == 0) {
+				break;
+			}
+			idx_t n = src_chunk.size();
+			// date is column 0, symbol is column 1 (key_names = {date_col, symbol_col})
+			auto &date_vec = src_chunk.data[0];
+			bool date_is_null = date_vec.GetVectorType() == VectorType::CONSTANT_VECTOR &&
+			                    ConstantVector::IsNull(date_vec);
+			UnifiedVectorFormat date_fmt;
+			date_vec.ToUnifiedFormat(n, date_fmt);
+			auto date_sel = date_fmt.sel;
+			bool is_timestamp = date_vec.GetType().id() == LogicalTypeId::TIMESTAMP;
+			auto &sym_vec = src_chunk.data[1];
+			UnifiedVectorFormat sym_fmt;
+			sym_vec.ToUnifiedFormat(n, sym_fmt);
+			auto sym_sel = sym_fmt.sel;
+			for (idx_t i = 0; i < n; i++) {
+				idx_t r = row_offset + i;
+				auto di = date_sel->get_index(i);
+				if (date_is_null || !date_fmt.validity.AllValid() ||
+				    !date_fmt.validity.RowIsValid(di)) {
+					throw IOException("Aligned table: NULL in the partition source column '%s' at source row %llu",
+					                  bind.date_col, r);
+				}
+				SortedRow row;
+				date_t d;
+				if (is_timestamp) {
+					auto tptr = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
+					d = Timestamp::GetDate(timestamp_t(tptr[di]));
+				} else {
+					auto dptr = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
+					d = date_t(dptr[di]);
+				}
+				if (!template_str.empty() && !EvaluatePartitionTemplate(template_str, d, row.partition_key)) {
+					throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
+				}
+				auto si = sym_sel->get_index(i);
+				row.symbol = sym_vec.GetValue(si);
+				row.date = d;
+				row.src_row = r;
+				rows.push_back(std::move(row));
+			}
+			row_offset += n;
 		}
-		SortedRow row;
-		date_t d = dv.GetValue<date_t>();
-		if (!template_str.empty() && !EvaluatePartitionTemplate(template_str, d, row.partition_key)) {
-			throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
-		}
-		row.symbol = reader.GetValue(1, r);
-		row.date = d;
-		row.src_row = r;
-		rows.push_back(std::move(row));
 	}
 	SortAndDedupe(rows);
 
