@@ -139,7 +139,9 @@ con.execute("SELECT * FROM aligned_scan('dg5')")
 |------|------|------|
 | 2026-08-23 | stkoe-cli 发现问题 1/2/3 并写入此文件 | 待处理 |
 | 2026-08-23 | stkoe-cli 严格按 API.md §2 顺序测试（先 aligned_create group='index' → ATTACH → INSERT），问题仍然存在 | 待处理 |
-| 2026-08-23 | 当前安装的扩展构建时间：2026-08-23 01:43:35（D:/proj/factorlake/release/aligned.duckdb_extension） | 请确认是否为最新编译版本 |
+| 2026-08-23 | stkoe-cli 当前安装的扩展构建时间：2026-08-23 01:43:35（D:/proj/factorlake/release/aligned.duckdb_extension） | 请确认是否为最新编译版本 |
+| 2026-08-23 | FactorLake 侧定位根因：HasIgnoredPathSegment 误过滤含 .stkoe 的数据根路径 | 已修复 |
+| 2026-08-23 | FactorLake 侧修复 commit 0fe5aa6，重新编译扩展，回复问题 1/2/3 | 已回复 |
 
 ### 补充说明（2026-08-23）
 
