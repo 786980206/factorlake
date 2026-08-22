@@ -169,17 +169,20 @@ body{
 .rg-C{border-left:3px solid rgba(26,127,55,.4)}
 .rg-D{border-left:3px solid rgba(130,80,223,.4)}
 
-/* L4: Column list inside RG — vertically stacked fields */
+/* L4: Column list inside RG — horizontal row of vertical column bars */
 .rg-body{
-  display:none;flex-direction:column;gap:4px;
-  padding:.5vh .6vw .6vh;flex:1;min-height:0;overflow-y:auto;
+  display:none;flex-direction:row;gap:4px;
+  padding:.5vh .6vw .6vh;flex:1;min-height:0;overflow-x:auto;align-items:stretch;
 }
-.rg.selected .rg-body{display:flex;flex-direction:column}
+.rg.selected .rg-body{display:flex;flex-direction:row}
 .rg-body .col-chip{
-  font-family:Consolas,monospace;font-size:1.1vh;
-  padding:3px 8px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  flex:1 1 0;min-width:0;
+  font-family:Consolas,monospace;font-size:1vh;
+  padding:4px 2px;border-radius:4px;text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   background:var(--panel2);border:1px solid var(--line2);
-  flex-shrink:0;width:100%;
+  writing-mode:vertical-rl;text-orientation:mixed;
+  line-height:1.2;
 }
 
 /* ===== Empty partition ===== */
