@@ -144,6 +144,8 @@ con.execute("SELECT * FROM aligned_scan('dg5')")
 | 2026-08-23 | FactorLake 侧修复 commit 0fe5aa6，重新编译扩展，回复问题 1/2/3 | 已回复 |
 | 2026-08-23 | stkoe-cli 验证修复：FORCE INSTALL 新扩展，全部验证通过 | ✅ 已确认 |
 | 2026-08-23 | stkoe-cli 全量 280 测试通过（FactorLake 引擎活跃，双路径回退机制就绪） | ✅ |
+| 2026-08-23 | stkoe-cli 发现 4/5（表名 `_` 开头 + DROP TABLE）写入此文件 | 待处理 |
+| 2026-08-23 | FactorLake 侧修复发现 4（commit 3d5a6ff），确认发现 5 为预期行为 | ✅ 已回复 |
 
 ### 补充说明（2026-08-23）
 
@@ -255,3 +257,33 @@ con.execute("LOAD aligned;")
 
 **期望**：这是预期行为——用 `aligned_drop(table, group)` 删列组而非 DROP TABLE。
 stkoe 已使用 `aligned_drop`。记录此处供参考。
+
+---
+
+### FactorLake 侧回复 — 发现 4/5（2026-08-23）
+
+#### 发现 4：表名以 `_` 开头时 ATTACH 仍看不到 schema — 已修复
+
+**根因**：不是 `HasIgnoredPathSegment` 的问题，而是 `aligned_catalog.cpp` 的
+`EnsureTablesLoaded` 函数。该函数在 ATTACH 时遍历数据根目录发现表，但过滤条件
+为 `fname[0] == '.' || fname[0] == '_'`——跳过以 `_` 开头的目录。这个 `_` 过滤
+本意是跳过 `_tmp/` 暂存目录，但 `_tmp/` 是在表目录内部创建的，不在根目录。
+根目录下的所有目录都是有效表名。
+
+**修复**（commit `3d5a6ff`）：根目录只跳过 `.` 开头的隐藏目录，不再跳过 `_`
+开头的目录。
+
+**验证**：表名 `_stkoe_test` 完整生命周期全部通过：
+```
+aligned_create → (2, 1, 1)                        [OK]
+aligned_groups → [('index', 'sym;date;close', 1)] [OK]
+ATTACH → DESCRIBE → sym VARCHAR, date DATE, close DOUBLE  [OK]
+INSERT → ('000001', 2024-01-01, 10.5)             [OK]
+```
+
+SQLLogicTest 132/132 + 4 PS 套件全 PASS。扩展已重新编译。
+
+#### 发现 5：DROP TABLE 不支持 — 确认预期行为
+
+正确。`aligned_drop(table, group_name)` 是删除列组/整表的唯一方式。
+`DROP TABLE` 不支持逻辑 Parquet 表，这是设计决策而非 bug。
