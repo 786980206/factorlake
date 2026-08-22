@@ -109,7 +109,7 @@ struct MutateGlobalState : public GlobalTableFunctionState {
 //!    reader NULL-fills); a new partition creates fresh parts only in mapped
 //!    groups
 //!  - all affected parts are rewritten atomically under
-//!    <table>/_tmp/transaction-<txid>/ and committed with one last_txid bump
+//!    <table>/_tmp/transaction-<txid>/ and committed by rewriting _table.json
 //! Returns one row: (rows_inserted, rows_updated, parts_rewritten, txid).
 unique_ptr<FunctionData> AlignedUpsertBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names);

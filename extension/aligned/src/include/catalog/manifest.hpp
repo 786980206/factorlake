@@ -24,35 +24,24 @@ struct GroupManifest {
 	vector<PartitionTemplate> partitioning;
 };
 
-// _table.json — the optional, table-level manifest of a logical table.
-// When the file is absent, the defaults below apply (auto-detected layout).
-// All fields are optional; unknown/legacy fields (key, row_count,
-// canonical_order, row_group_size, aligned, groups, ...) are ignored for
-// backwards compatibility. `groups` is NEVER read on the reader side: the
-// column-group list is always discovered from the file layout by one glob.
+// _table.json — the optional, table-level manifest of a logical table. It exists
+// ONLY for empty-table bootstrap: when the table has no part files yet, the
+// writer needs to know which Column Groups to create and what partition template
+// to use. Once the table has data, _table.json is not read by the reader (groups
+// are discovered via glob, partitioning is derived from the directory layout).
+// The writer still writes it back after each commit (preserving groups +
+// partitioning for the next bootstrap). Unknown/legacy fields (key, row_count,
+// canonical_order, row_group_size, aligned, name, version, rg_rows, part_rows,
+// last_txid, ...) are ignored for backwards compatibility.
 struct TableManifest {
-	string name; // optional, informational
-	int64_t version = 1;
-	// v6 (partition-aligned, self-describing part names): every group uses the
-	// SAME single-level partition kind (year= / month= / date= — one directory
-	// segment) and the group's partition-key set must be a SUBSET of the index
-	// group's keys. A group may omit partitions (its columns read as NULL over
-	// the missing row ranges). Part files are named "{idx:04d}-{rows:10d}.parquet"
-	// (index within the partition, total row count of the file) — row counts and
-	// start rows come from the FILE NAME, never from footers. The index group's
-	// partition indexes must be consecutive from 0000; non-index groups may skip
-	// indexes (deletion). Groups sharing a partition key must agree on the
-	// partition's TOTAL row count (sum of file-name rows) and on the row count
-	// of every shared index. The index schema's first two columns must contain a
-	// DATE or TIMESTAMP field — the partition source column (filter pushdown).
-	idx_t rg_rows = 16384;   // target row-group size (writer flush boundary)
-	idx_t part_rows = 4194304; // target part size (writer/compactor hint)
-	idx_t last_txid = 0;     // last transaction id (writer/compactor bookkeeping)
-	vector<string> groups;   // NOT read (legacy); written back by writer/compactor
-	// Optional explicit partition templates per group (group -> templates).
-	// Empty when partitioning must be derived from the directory layout.
-	// Used only for partition pruning (date filter pushdown), not for layout.
+	// Bootstrap config for empty tables only: which column groups to create.
+	vector<string> groups;
+	// Bootstrap config for empty tables only: partition templates per group.
 	case_insensitive_map_t<vector<PartitionTemplate>> partitioning;
+
+	// Compile-time Row Group size (writer/compactor flush boundary). Not stored
+	// in _table.json — it is a fixed constant.
+	static constexpr idx_t DEFAULT_RG_ROWS = 131072;
 };
 
 // A part file. The part order is the lexicographic order of the file's
@@ -120,6 +109,7 @@ struct GroupPlan {
 // The fully resolved scan plan of one logical table.
 struct TablePlan {
 	string table_path; // absolute path
+	string table_name; // the logical table name (directory name)
 	TableManifest table;
 	vector<GroupPlan> groups;
 	idx_t row_count = 0; // total row count (index partitions, from file names)
@@ -141,6 +131,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 
 //! Reads + validates _table.json only (used for lightweight lookups). Returns
 //! false when the file does not exist (the caller falls back to defaults).
+//! Only groups + partitioning are read (bootstrap config for empty tables).
 bool TryReadTableManifest(FileSystem &fs, const string &manifest_path, TableManifest &manifest);
 
 } // namespace duckdb

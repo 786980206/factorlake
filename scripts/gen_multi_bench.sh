@@ -74,7 +74,7 @@ echo "== gen $TABLE: rows=$ROWS width=$WIDTH (idx=$INDEX_COLS alpha=$ALPHA_COLS 
 
 # ---------------- aligned table manifest ----------------
 rm -rf "$tableDir"; mkdir -p "$tableDir"
-rj "$tableDir/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"part_rows\":$PART_ROWS,\"groups\":[\"index\",\"factor/alpha\",\"fieldset/fs\"]}"
+rj "$tableDir/_table.json" "{\"groups\":[\"index\",\"factor/alpha\",\"fieldset/fs\"]}"
 
 # ---------------- column definition helpers ----------------
 # index_cols returns a SQL select list for the given global row range [g0,g1)

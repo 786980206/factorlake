@@ -1,4 +1,4 @@
-﻿#include "scan/aligned_scan.hpp"
+#include "scan/aligned_scan.hpp"
 #include <fstream>
 
 #include "duckdb/common/exception.hpp"
@@ -592,7 +592,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	auto &part = parts[part_idx];
 
 	g.part_idx = part_idx;
-	g.reader = OpenPartReader(context, part, bind.plan.table.name, group.manifest.group);
+	g.reader = OpenPartReader(context, part, bind.plan.table_name, group.manifest.group);
 
 	// Defensive check (v6): the open file's footer row count must equal the
 	// self-describing value parsed from the file name. The plan's row counts
@@ -602,7 +602,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	if (g.reader->NumRows() != part.row_count) {
 		throw IOException("Aligned table '%s' group '%s' part '%s': file holds %llu rows but its name declares %llu "
 		                  "rows (self-describing part-name contract)",
-		                  bind.plan.table.name, group.manifest.group, part.part_name, g.reader->NumRows(),
+		                  bind.plan.table_name, group.manifest.group, part.part_name, g.reader->NumRows(),
 		                  part.row_count);
 	}
 
@@ -642,7 +642,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 			throw InternalException(
 			    "Aligned table '%s' group '%s' column '%s' has type %s in this part "
 			    "but %s in the group schema (cross-part type mismatch is not allowed)",
-			    bind.plan.table.name, group.manifest.group, col,
+			    bind.plan.table_name, group.manifest.group, col,
 			    g.reader->columns[file_idx].type.ToString(), group.schema_types[i].ToString());
 		}
 		g.read_cols.push_back(file_idx);
@@ -660,7 +660,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	g.reader->GetPartitionStats(g.rg_stats);
 	if (g.rg_stats.empty()) {
 		throw IOException("Aligned table '%s' group '%s' part '%s': file contains no row groups",
-		                  bind.plan.table.name, group.manifest.group, part.part_name);
+		                  bind.plan.table_name, group.manifest.group, part.part_name);
 	}
 	g.rg_window.clear();
 	g.rg_plan.clear();
@@ -982,7 +982,7 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
 				throw IOException("Aligned table '%s' group '%s': parquet scan ended early at row %llu (alignment "
 				                  "violation)",
-				                  bind.plan.table.name, group.manifest.group, cursor + segment_pos);
+				                  bind.plan.table_name, group.manifest.group, cursor + segment_pos);
 			}
 			idx_t chunk_rows = g.chunk->size();
 			if (chunk_rows == 0) {
@@ -1001,7 +1001,7 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			if (g.rg_seg_idx >= g.rg_plan.size()) {
 				throw IOException("Aligned table '%s' group '%s': parquet scan produced rows beyond the planned "
 				                  "window (alignment violation)",
-				                  bind.plan.table.name, group.manifest.group);
+				                  bind.plan.table_name, group.manifest.group);
 			}
 			auto &seg = g.rg_plan[g.rg_seg_idx];
 			idx_t rg_off = g.parquet_pos - seg.flow_start; // offset within the RG

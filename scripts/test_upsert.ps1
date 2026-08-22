@@ -1,4 +1,4 @@
-﻿# test_upsert.ps1
+# test_upsert.ps1
 # Phase 8 acceptance: aligned_upsert / aligned_delete (the v7 mutator replacing
 # aligned_write). Covers: empty-table first write, append to an existing
 # partition (new part), in-place update, new partition, delete, delete-emptied
@@ -75,7 +75,6 @@ COPY (
 if (Test-Path $tableDir) { Remove-Item $tableDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $tableDir | Out-Null
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    name = $table; version = 1
     groups = @('index', 'factor/alpha101', 'fieldset/ma')
     partitioning = @{
         'index' = @(@{ template = 'month=%Y-%m'; source = 'date' })
@@ -102,7 +101,7 @@ $s2 = Join-Path $dataRoot 'upsert_s2.parquet'
 Make-Staging $s2 3000 6000 '2026-09-11' -withAlpha999
 $mapping2 = "index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003,alpha999;fieldset/ma:rowid_ma,ma5,ma20"
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('$table', '$($s2.Replace('\','/'))', '$mapping2');"
-Expect-Equal 'write 2 summary (ins, upd, parts, txid)' $out.Trim() '3000,0,3,2'
+Expect-Equal 'write 2 summary (ins, upd, parts, txid)' $out.Trim() '3000,0,3,1'
 if ((Test-Path (Join-Path $tableDir 'index\month=2026-09\0001-0000003000.parquet')) -and
     (Test-Path (Join-Path $tableDir 'factor\alpha101\month=2026-09\0001-0000003000.parquet')) -and
     (Test-Path (Join-Path $tableDir 'fieldset\ma\month=2026-09\0001-0000003000.parquet'))) {
@@ -131,7 +130,7 @@ $s3 = Join-Path $dataRoot 'upsert_s3.parquet'
 ) TO '$($s3.Replace('\','/'))' (FORMAT PARQUET);" 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'staging 3 failed' }
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('$table', '$($s3.Replace('\','/'))', '$mapping');"
-Expect-Equal 'write 3 summary (ins, upd, parts, txid)' $out.Trim() '1,2,9,3'
+Expect-Equal 'write 3 summary (ins, upd, parts, txid)' $out.Trim() '1,2,9,1'
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*) FROM aligned_table('$table');"
 Expect-Equal 'after upsert 3 rows (6001)' $out.Trim() '6001'
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT close, alpha001, ma5 FROM aligned_table('$table') WHERE date = DATE '2026-09-10' AND symbol = '002500';"
@@ -152,7 +151,7 @@ $s4 = Join-Path $dataRoot 'upsert_s4.parquet'
 ) TO '$($s4.Replace('\','/'))' (FORMAT PARQUET);" 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'staging 4 failed' }
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_deleted, parts_rewritten, txid FROM aligned_delete('$table', '$($s4.Replace('\','/'))');"
-Expect-Equal 'delete summary (rows, parts, txid)' $out.Trim() '3,6,4'
+Expect-Equal 'delete summary (rows, parts, txid)' $out.Trim() '3,6,1'
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*) FROM aligned_table('$table');"
 Expect-Equal 'after delete rows (5998)' $out.Trim() '5998'
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*) FROM aligned_table('$table') WHERE symbol IN ('002999','006000','002500');"
@@ -163,7 +162,7 @@ $s5 = Join-Path $dataRoot 'upsert_s5.parquet'
 & $duckdb -c "COPY (WITH t(date, symbol) AS (VALUES (DATE '2026-10-01', '000001')) SELECT * FROM t) TO '$($s5.Replace('\','/'))' (FORMAT PARQUET);" 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'staging 5 failed' }
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_deleted, parts_rewritten, txid FROM aligned_delete('$table', '$($s5.Replace('\','/'))');"
-Expect-Equal 'empty-partition delete (rows, parts, txid)' $out.Trim() '1,0,5'
+Expect-Equal 'empty-partition delete (rows, parts, txid)' $out.Trim() '1,0,1'
 if (-not (Test-Path (Join-Path $tableDir 'index\month=2026-10')) -and
     -not (Test-Path (Join-Path $tableDir 'factor\alpha101\month=2026-10')) -and
     -not (Test-Path (Join-Path $tableDir 'fieldset\ma\month=2026-10'))) {
@@ -234,7 +233,7 @@ Remove-Item $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
 $m12dir = 'D:/proj/factorlake/testdata/upsert_m12'
 Remove-Item $m12dir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$m12dir/t" | Out-Null
-[IO.File]::WriteAllText("$m12dir/t/_table.json", '{"name":"t","version":1,"groups":["index","f/m1","g/m2"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"f/m1":[{"template":"month=%Y-%m","source":"date"}],"g/m2":[{"template":"month=%Y-%m","source":"date"}]}}')
+[IO.File]::WriteAllText("$m12dir/t/_table.json", '{"groups":["index","f/m1","g/m2"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"f/m1":[{"template":"month=%Y-%m","source":"date"}],"g/m2":[{"template":"month=%Y-%m","source":"date"}]}}')
 $s9f = 'D:/proj/factorlake/testdata/upsert_s9.parquet'
 $s10f = 'D:/proj/factorlake/testdata/upsert_s10.parquet'
 & $duckdb -c "COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 1.0::DOUBLE AS v UNION ALL SELECT DATE '2026-01-01', 'b', 2.0) TO '$s9f' (FORMAT PARQUET);" 2>&1 | Out-Null

@@ -60,8 +60,11 @@ static string JsonStringArray(const vector<string> &items) {
 	return out;
 }
 
-//! Bumps last_txid in _table.json (row counts and everything else unchanged).
-static void BumpLastTxid(FileSystem &fs, const TablePlan &plan, idx_t txid) {
+//! Writes _table.json with only the bootstrap config (groups + partitioning).
+//! The manifest is optional and only used for empty-table bootstrap; the
+//! writer still writes it back after each commit to preserve the group list
+//! and partition templates for the next bootstrap.
+static void WriteManifest(FileSystem &fs, const TablePlan &plan) {
 	auto &table = plan.table;
 	string partitioning;
 	if (!table.partitioning.empty()) {
@@ -84,18 +87,17 @@ static void BumpLastTxid(FileSystem &fs, const TablePlan &plan, idx_t txid) {
 		}
 		partitioning += "}";
 	}
-	string manifest = "{\"name\":\"" + JsonEscape(table.name) + "\",\"version\":" + to_string(table.version) +
-	                  ",\"rg_rows\":" + to_string(table.rg_rows);
-	if (table.part_rows > 0) {
-		manifest += ",\"part_rows\":" + to_string(table.part_rows);
-	}
-	manifest += ",\"last_txid\":" + to_string(txid) + ",\"groups\":" + JsonStringArray(table.groups) + partitioning + "}";
+	string manifest = "{\"groups\":" + JsonStringArray(table.groups) + partitioning + "}";
 	WriteTextFile(fs, plan.table_path + "/_table.json", manifest);
 }
 
-//! Next transaction id = last_txid + 1 (the only transaction record).
-static idx_t NextTransactionId(const TablePlan &plan) {
-	return plan.table.last_txid + 1;
+//! In-process transaction counter (starts at 1, increments each call). Not
+//! persisted — last_txid was removed from the manifest; the counter is only
+//! used for the txid return value and the _tmp/transaction-<txid>/ staging
+//! directory name (both transient).
+static idx_t NextTransactionId() {
+	static idx_t counter = 0;
+	return ++counter;
 }
 
 //! "group:col1,col2;group2:col3" -> map. Throws on malformed input.
@@ -715,11 +717,11 @@ static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buff
 //! Stage + commit one mutation: rewrite every affected part into
 //! _tmp/transaction-<txid>/, move the parts into place (atomic per move),
 //! delete the superseded parts, remove delete-emptied single-part partitions
-//! from every group, and bump last_txid.
+//! from every group, and rewrite _table.json (groups + partitioning only).
 static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind, MutateGlobalState &gstate,
                              vector<TargetMap> &targets) {
 	auto &fs = FileSystem::GetFileSystem(context);
-	idx_t txid = NextTransactionId(bind.plan);
+	idx_t txid = NextTransactionId();
 	gstate.txid = txid;
 	string tmp_root = bind.plan.table_path + "/_tmp/transaction-" + to_string(txid);
 	std::set<string> removed_partitions;
@@ -754,7 +756,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				in.updates = t.update_buffer.get();
 				in.update_cols = t.mapped_names;
 				in.deletes = &t.delete_rows;
-				in.rgs = bind.plan.table.rg_rows;
+				in.rgs = TableManifest::DEFAULT_RG_ROWS;
 				t.new_row_count = RewritePart(context, in);
 				if (t.new_row_count == 0) {
 					// Only a pre-checked single-part partition can be emptied
@@ -812,7 +814,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 			}
 		}
 		if (gstate.parts_rewritten > 0 || gstate.parts_removed > 0) {
-			BumpLastTxid(fs, bind.plan, txid);
+			WriteManifest(fs, bind.plan);
 		}
 	} catch (...) {
 		if (fs.DirectoryExists(tmp_root)) {

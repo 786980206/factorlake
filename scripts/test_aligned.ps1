@@ -1,4 +1,4 @@
-﻿# test_aligned.ps1
+# test_aligned.ps1
 # Acceptance tests for the aligned extension (v5 partition-aligned contract).
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\test_aligned.ps1
 # Requires: scripts\gen_testdata.ps1 has been run, duckdb_aligned.exe built.
@@ -150,7 +150,7 @@ if ($out -match '(?m)^2000,0\.0\r?$') { Write-Host 'PASS: e3 bare non-duplicated
 # §2.1b: a table without the mandatory index group must fail (no parts at all)
 $badIdx = Join-Path $dataRoot 'badidx\_table.json'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badIdx) | Out-Null
-'{"name":"badidx","version":1,"groups":["factor/alpha101"]}' | Set-Content -Path $badIdx -Encoding Ascii
+'{"groups":["factor/alpha101"]}' | Set-Content -Path $badIdx -Encoding Ascii
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badidx');" 2>&1 | Out-String

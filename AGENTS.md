@@ -104,18 +104,14 @@ fieldset/ma/      year=2026/month=08/
 
 ## 5. Manifest（轻量，不做 Catalog DB）
 
-目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**（v5 契约；
-**没有 `_group.json`、没有 part sidecar、没有 commit marker、没有 aligned 模式字段**）：
-缺失时全部用默认值（rg_rows=16384、part_rows=4194304），Group 列表从文件布局
-发现（glob `**/*.parquet` → 跳过 `name=value` 分区段 → 最长非分区段后缀即 Group）：
+目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**，仅用于
+**空表 bootstrap**——当表还没有任何 part 文件时，Writer 需要知道要创建哪些 Column
+Group 以及用什么分区模板。一旦表有了数据，所有信息从目录结构和 Parquet footer
+推导，`_table.json` 不再被读端使用。没有 `_group.json`、没有 part sidecar、
+没有 commit marker：
 
 ```json
 {
-  "name": "cnstk_ixday",
-  "version": 1,
-  "rg_rows": 16384,
-  "part_rows": 4194304,
-  "last_txid": 42,
   "groups": ["index", "factor/alpha101", "factor/alpha191", "fieldset/ema",
              "fieldset/ma", "fieldset/qoq", "fieldset/ttm", "fieldset/yoy",
              "panel/cnstk_icday", "panel/cnstk_ixday", "panel/cnstk_klday"],
@@ -126,39 +122,30 @@ fieldset/ma/      year=2026/month=08/
 }
 ```
 
-- **分区对齐（Partition Alignment）是唯一契约（v5）**：所有 Group（含 index）用
+- **分区对齐（Partition Alignment）是唯一契约**：所有 Group（含 index）用
   **同一种一层分区段**（`year=` / `month=` / `date=` 三选一）；分区键 = 完整
   `name=value` 段串（因此不同分区方式自动无法对齐）；Group 分区键集合 **⊆ index**
   （允许缺分区 → 该区行保留、该组列全 NULL；**绝不添加 index 没有的分区**，违反即
-  fail-fast）；共享分区**总行数**必须一致（末 part 行数可不同）。**无全对齐
-  （part 数相同）要求、无 group/none 模式、无探测降级链**；`aligned` 字段（v3）
-  读端忽略。
-- `rg_rows`（可选，默认 16384）：Writer flush 的 Row Group 大小。
-- `part_rows`（可选，默认 4194304）：目标 part 大小提示。**读端不用该值**——part
-  大小由 index **首分区首 part** 的 footer 行数决定（读 1 次）。
-- `last_txid`：最近成功提交的事务号（Writer/Compactor 每次 commit +1；无 marker 文件）。
-- `partitioning`（可选）：`group → 目录模板列表`。**每个 Group 恰好一个模板**（单层）；
-  模板只允许 `year=%Y` / `month=%Y-%m` / `date=%Y-%m-%d`，source 固定 `date`；
-  **所有 Group 必须同一种模板**。**空表起步必须显式给出**；否则从目录结构推导
-  （仅识别这三种单层段，多层 `name=value` 段 → 报错）；Writer 重写 manifest 必须
-  原样写回 partitioning 与 groups。
-- **`groups` 字段读端永不解析**（v5）：Group 发现唯一路径 = 一次 glob；唯一例外 =
+  fail-fast）；共享分区**总行数**必须一致（末 part 行数可不同）。
+- `groups`：Column Group 列表。**读端永不解析**——Group 发现唯一路径 = 一次 glob
+  （`**/*.parquet` → 跳过 `name=value` 分区段 → 最长非分区段后缀即 Group）；唯一例外 =
   空表（无任何 part）且 `groups` 非空时给 Writer 提供 Group 骨架。
-- **Canonical Key = index Group 的 schema 列**（v5，不再写进 manifest）。
-- **日期列契约（v6）**：index schema（rel_path 排序最后 1 个 part footer）**前两列
-  中必须至少有一列是 DATE/TIMESTAMP**，否则 fail-fast；该列即 partitioning
-  `source`（目录推导自动绑定实际列名，显式声明不匹配 fail-fast）；分区目录只由
-  该日期列求值（不再写死 `date`）；`IsConstantDateFilter` 支持 TIMESTAMP 等值剪枝。
-- **旧字段向后兼容忽略**：v3 的 `aligned`、v2 的 `key` / `schema_version` /
-  `canonical_order` / `row_count` / `row_group_size` 读端忽略，不参与计算。
-- 行区间契约（v5）：part 顺序 = **组内相对路径字符串排序，索引即 part_id**（不再
-  要求 `part-%06llu` 命名）；行区间按**分区公式** `start_row = S_i + j*part_rows`
-  （S_i = index 同键分区起始行；j = 分区内第 j part）；分区行数
-  `R_i = (分区 part 数-1) * part_rows + 分区最后 part 行数`（只读每分区最后 1 个
-  footer + index 首 part）；组内非最后 part 必须恰好 part_rows 行（**扫描时 OpenPart
-  防御校验**，违反 fail-fast）；共享分区 R_i 跨 Group 一致（fail-fast）。组 schema
-  = **组内 rel_path 排序最后 1 个 part** 的 footer（各 part 实际列集扫描时按 reader
-  实时匹配，schema evolution → 缺失列 NULL）。
+- `partitioning`：`group → 目录模板列表`。**每个 Group 恰好一个模板**（单层）；
+  模板只允许 `year=%Y` / `month=%Y-%m` / `date=%Y-%m-%d`，source = index schema 的
+  DATE/TIMESTAMP 列名；**所有 Group 必须同一种模板**。**空表起步必须显式给出**；
+  否则从目录结构推导（仅识别这三种单层段，多层 `name=value` 段 → 报错）；Writer
+  重写 manifest 必须原样写回 partitioning 与 groups。
+- **Canonical Key = index Group 的 schema 列**（从 Parquet footer 读取，不写入 manifest）。
+- **主键契约**：index schema（rel_path 排序最后 1 个 part footer）前两列 = 主键
+  `(date, symbol)`——**恰一列 DATE/TIMESTAMP**（分区源列）+ **一列 symbol**，
+  两日期列或无日期列均 fail-fast；分区目录只由该日期列求值。
+- **不存入 manifest 的信息**：表名（←目录名）、schema（←Parquet footer）、
+  行数/行区间（←part 文件名 `{idx:04d}-{rows:10d}`）、Row Group 大小（←编译常量
+  131072）、事务号（不持久化）。
+- 行区间契约：part 顺序 = 组内相对路径字符串排序，part_id = 文件名解析出的 `idx`；
+  行区间由文件名累加推导（`start_row = S_i + Σ(更小索引 part 的行数)`，零 footer IO）；
+  扫描时 OpenPart 防御校验 footer 行数 == 文件名行数。组 schema = 组内 rel_path
+  排序最后 1 个 part 的 footer。
 
 ---
 
@@ -226,7 +213,7 @@ aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewri
   只重写受影响 part；主键契约 = index schema 前两列（§5：恰一 DATE/TIMESTAMP + 一
   symbol）。
 - **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式 partition，
-  再原子重写 `_table.json`（last_txid+1，partitioning/groups 原样写回）；
+  再原子重写 `_table.json`（仅 `groups` + `partitioning`，原样写回）；
   崩溃则丢弃 transaction（`_tmp/` 对 Reader 永不可见），扫描时跨 Group 行数
   fail-fast 兜底。无 sidecar、无 marker 文件。
 - **映射列类型 = 组内已存类型**（组 schema），非源文件类型——跨 part 列类型必须

@@ -79,11 +79,11 @@ Scan:    AlignedScanFunction
 
 **方案**：
 1. 依赖 cache 是现状（可接受）；
-2. 中期：`part_rows`/`rg_rows` 探测所需的 footer 信息可走
+2. 中期：计划构建所需的 footer 信息可走
    `MultiFileReader`/parquet metadata 批量读取（DuckDB 有批量 metadata 读取
    路径，但要确认 ObjectCache 命中率）；
-3. 长期：目录级 `_meta.json`（每 part 一行数/列/统计摘要）——**注意 v3 契约
-   已砍掉 sidecar，新缓存文件属于"性能 cache"，缺失时必须可回退到 footer**，
+3. 长期：目录级 `_meta.json`（每 part 一行数/列/统计摘要）——**注意 sidecar
+   已砍掉，新缓存文件属于"性能 cache"，缺失时必须可回退到 footer**，
    与契约不冲突（cache 不是权威数据）。
 
 **影响**：冷启动/大表首次查询。

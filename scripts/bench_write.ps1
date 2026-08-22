@@ -1,4 +1,4 @@
-﻿# bench_write.ps1 - Write-path benchmark: aligned upsert vs DuckDB-native parquet rewrite
+# bench_write.ps1 - Write-path benchmark: aligned upsert vs DuckDB-native parquet rewrite
 #
 # Measures the cost of applying a batch of changes to an EXISTING table:
 #   aligned : aligned_upsert (only affected parts rewritten, atomic commit)
@@ -24,7 +24,7 @@ $day = '2026-05-01'  # all base rows in ONE partition month=2026-05 (worst case 
 Remove-Item $root.Replace('/', '\') -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
 [IO.File]::WriteAllText("$root/aligned/t/_table.json",
-  '{"name":"t","version":1,"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
+  '{"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
 
 function Run-SqlFile([string]$path) {
     cmd /c "`"$duckdb`" -unsigned < `"$path`"" 2>&1 | Out-Null
@@ -51,7 +51,7 @@ foreach ($batch in 1000, 10000, 100000) {
     Remove-Item "$root/aligned/t" -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
     [IO.File]::WriteAllText("$root/aligned/t/_table.json",
-      '{"name":"t","version":1,"rg_rows":262144,"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
+      '{"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
     # base data via one big upsert (setup, not timed)
     $setupA = @"
 SET aligned_data_root='$root/aligned';
@@ -105,7 +105,7 @@ COPY (
     Remove-Item "$root/aligned/t" -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
     [IO.File]::WriteAllText("$root/aligned/t/_table.json",
-      '{"name":"t","version":1,"rg_rows":262144,"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
+      '{"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
     Run-SqlFile $sf   # rebuild base (same setupA)
     $updKeys = [long]($baseRows / 2)
     $setupU = @"

@@ -77,8 +77,8 @@ static void WriteTextFile(FileSystem &fs, const string &path, const string &cont
 	handle->Close();
 }
 
-//! Bumps last_txid in _table.json (row counts and everything else unchanged).
-static void BumpLastTxid(FileSystem &fs, const TablePlan &plan, idx_t txid) {
+//! Writes _table.json with only the bootstrap config (groups + partitioning).
+static void WriteManifest(FileSystem &fs, const TablePlan &plan) {
 	auto &table = plan.table;
 	string partitioning;
 	if (!table.partitioning.empty()) {
@@ -101,20 +101,15 @@ static void BumpLastTxid(FileSystem &fs, const TablePlan &plan, idx_t txid) {
 		}
 		partitioning += "}";
 	}
-	string manifest = "{\"name\":\"" + JsonEscape(table.name) + "\",\"version\":" + to_string(table.version) +
-	                  ",\"rg_rows\":" + to_string(table.rg_rows);
-	if (table.part_rows > 0) {
-		manifest += ",\"part_rows\":" + to_string(table.part_rows);
-	}
-	manifest += ",\"last_txid\":" + to_string(txid) + ",\"groups\":" + JsonStringArray(table.groups) + partitioning + "}";
+	string manifest = "{\"groups\":" + JsonStringArray(table.groups) + partitioning + "}";
 	WriteTextFile(fs, plan.table_path + "/_table.json", manifest);
 }
 
-//! Next transaction id = last_txid + 1 (there are no commit markers anymore;
-//! _table.json's last_txid is the only transaction record, bumped on every
-//! successful commit).
-static idx_t NextTransactionId(const TablePlan &plan) {
-	return plan.table.last_txid + 1;
+//! In-process transaction counter (starts at 1, increments each call). Not
+//! persisted — only used for the staging directory name.
+static idx_t NextTransactionId() {
+	static idx_t counter = 0;
+	return ++counter;
 }
 
 static idx_t NextPartIndex(FileSystem &fs, const string &dir) {
@@ -217,8 +212,8 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 
 	auto &fs = FileSystem::GetFileSystem(context);
 
-	// txid = last committed txid + 1 (markers are gone)
-	idx_t txid = NextTransactionId(bind.plan);
+	// txid for the staging directory name (in-process counter, not persisted)
+	idx_t txid = NextTransactionId();
 	string tmp_root = bind.plan.table_path + "/_tmp/transaction-" + to_string(txid);
 
 	try {
@@ -267,7 +262,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 				if (i > 0 && parts[i]->start_row != parts[i - 1]->start_row + parts[i - 1]->row_count) {
 					throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts are not "
 					                  "contiguous (alignment violation)",
-					                  bind.plan.table.name, group.manifest.group, dir);
+					                  bind.plan.table_name, group.manifest.group, dir);
 				}
 				row_count += parts[i]->row_count;
 			}
@@ -278,11 +273,11 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			// cross-group indexes stay consistent). The staging path includes
 			// the partition's relative path so that multiple partitions of one
 			// group do not collide.
-			idx_t rgs = bind.plan.table.rg_rows > 0 ? bind.plan.table.rg_rows : 131072;
+			idx_t rgs = TableManifest::DEFAULT_RG_ROWS;
 			if (row_count > 9999999999ULL) {
 				throw IOException("Aligned table '%s' group '%s': merged part '%s' holds %llu rows — more than the "
 				                  "self-describing name can represent (10 digits)",
-				                  bind.plan.table.name, group.manifest.group, dir, row_count);
+				                  bind.plan.table_name, group.manifest.group, dir, row_count);
 			}
 			string part_name = StringUtil::Format("0000-%010llu", (unsigned long long)row_count);
 			string group_rel = dir.substr(group.group_path.size());
@@ -309,13 +304,13 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 				if (part_reader->columns.size() != columns.size()) {
 					throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts have "
 					                  "different column sets (schema evolution within a directory)",
-					                  bind.plan.table.name, group.manifest.group, dir);
+					                  bind.plan.table_name, group.manifest.group, dir);
 				}
 				for (idx_t ci = 0; ci < columns.size(); ci++) {
 					if (part_reader->columns[ci].name != columns[ci]) {
 						throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts have "
 						                  "different column sets (schema evolution within a directory)",
-						                  bind.plan.table.name, group.manifest.group, dir);
+						                  bind.plan.table_name, group.manifest.group, dir);
 					}
 				}
 				// fresh reader: read ALL columns in file order (the merged part
@@ -360,7 +355,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			string target_path = dir + "/" + part_name + ".parquet";
 			if (fs.FileExists(target_path)) {
 				throw IOException("Aligned table '%s' group '%s': part '%s' already exists in '%s'",
-				                  bind.plan.table.name, group.manifest.group, part_name, dir);
+				                  bind.plan.table_name, group.manifest.group, part_name, dir);
 			}
 			fs.MoveFile(staged_path, target_path);
 
@@ -377,10 +372,10 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			}
 		}
 
-		// Bump last_txid in _table.json (row counts unchanged — compaction
-		// preserves the row space)
+		// Rewrite _table.json (groups + partitioning only; row counts unchanged
+		// — compaction preserves the row space)
 		if (dirs_compacted > 0) {
-			BumpLastTxid(fs, bind.plan, txid);
+			WriteManifest(fs, bind.plan);
 		}
 
 		// Cleanup the staging tree (best-effort for the empty parent)

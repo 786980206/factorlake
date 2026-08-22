@@ -68,14 +68,12 @@ function Run-DuckDB([string]$sql) {
 function Part-Name([int]$idx, [int]$rows) { '{0:D4}-{1:D10}' -f $idx, $rows }
 
 # ---- _table.json ------------------------------------------------------------
-# The only manifest. Group metadata (row counts, partitioning) is derived from
-# the directory layout + Parquet footers; no _group.json files exist. The
-# explicit partitioning map is omitted on purpose so the reader's directory
-# derivation path is exercised. The groups field is legacy (never read).
+# The only manifest, used solely for empty-table bootstrap (which groups to
+# create, what partition templates to use). Once data exists, groups are
+# discovered via glob and partitioning is derived from the directory layout.
+# The explicit partitioning map is omitted on purpose so the reader's directory
+# derivation path is exercised.
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    name       = $table
-    version    = 1
-    part_rows  = 4194304
     groups     = @('index', 'factor/alpha101', 'fieldset/ma')
 }
 

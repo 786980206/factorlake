@@ -35,15 +35,6 @@ bool GetStringField(duckdb_yyjson::yyjson_val *obj, const char *key, string &res
 	return true;
 }
 
-bool GetUIntField(duckdb_yyjson::yyjson_val *obj, const char *key, idx_t &result) {
-	auto val = duckdb_yyjson::yyjson_obj_get(obj, key);
-	if (!val || !duckdb_yyjson::yyjson_is_uint(val)) {
-		return false;
-	}
-	result = duckdb_yyjson::yyjson_get_uint(val);
-	return true;
-}
-
 //! Parses a JSON document and invokes parse_body with the root object.
 template <class FN>
 void WithJsonObject(const string &path, const string &content, FN parse_body) {
@@ -199,20 +190,10 @@ bool TryReadTableManifest(FileSystem &fs, const string &manifest_path, TableMani
 	}
 	string content = ReadTextFile(fs, manifest_path);
 	WithJsonObject(manifest_path, content, [&](duckdb_yyjson::yyjson_val *root) {
-		GetStringField(root, "name", manifest.name);
-		idx_t version = 1;
-		if (GetUIntField(root, "version", version)) {
-			manifest.version = version;
-		}
-		// Legacy fields (aligned, key, canonical_order, row_count,
-		// row_group_size) are ignored for backwards compatibility: the reader
-		// always enforces full alignment.
-		GetUIntField(root, "rg_rows", manifest.rg_rows);
-		GetUIntField(root, "part_rows", manifest.part_rows);
-		GetUIntField(root, "last_txid", manifest.last_txid);
-		// `groups` is legacy and NEVER read (the group list is always discovered
-		// from the file layout by one glob); it is parsed only so it survives a
-		// writer/compactor manifest rewrite round-trip.
+		// Legacy fields (name, version, rg_rows, part_rows, last_txid, aligned,
+		// key, canonical_order, row_count, row_group_size) are ignored for
+		// backwards compatibility: only groups + partitioning are read (they are
+		// the empty-table bootstrap config).
 		manifest.groups = GetStringArray(root, "groups", manifest_path, false);
 		ParsePartitioning(root, manifest.partitioning, manifest_path);
 	});
@@ -341,21 +322,18 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		root.pop_back();
 	}
 	plan.table_path = root + "/" + table_name;
+	plan.table_name = table_name;
 
-	// Optional _table.json; defaults apply when absent
+	// Optional _table.json (empty-table bootstrap config: groups + partitioning).
+	// When absent, all defaults apply.
 	TableManifest manifest;
 	if (TryReadTableManifest(fs, plan.table_path + "/_table.json", manifest)) {
 		plan.table = std::move(manifest);
-		if (!plan.table.name.empty() && !StringUtil::CIEquals(plan.table.name, table_name)) {
-			throw IOException("Aligned table: manifest name '%s' does not match requested table '%s'",
-			                  plan.table.name, table_name);
-		}
 	} else {
 		if (!fs.DirectoryExists(plan.table_path)) {
 			throw IOException("Aligned table '%s': table directory does not exist at '%s'", table_name,
 			                  plan.table_path);
 		}
-		plan.table = TableManifest(); // defaults: rg_rows=16384, part_rows=4194304
 	}
 	string table_prefix = NormalizePath(plan.table_path);
 
@@ -397,7 +375,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			string key_error;
 			if (!ExtractPartitionKey(pp.rel_group, pp.key, key_error)) {
 				throw IOException("Aligned table '%s': group '%s': %s (v5 single-level partition contract)",
-				                  plan.table.name.empty() ? table_name : plan.table.name, group, key_error);
+				                  table_name, group, key_error);
 			}
 			auto it = group_idx.find(group);
 			if (it == group_idx.end()) {
@@ -427,9 +405,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		}
 	}
 	if (index_gi == DConstants::INVALID_INDEX) {
-		throw IOException("Aligned table '%s': mandatory group 'index' was not found", plan.table.name.empty() ?
-		                                                                               table_name :
-		                                                                               plan.table.name);
+		throw IOException("Aligned table '%s': mandatory group 'index' was not found", table_name);
 	}
 
 	// Process the index group first: it defines the authoritative partition
@@ -459,7 +435,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 				part_paths.push_back(acc.pending[k].path);
 				index_paths_for_derive.push_back(acc.pending[k].path);
 			}
-			AppendPartitionParts(index_group, key, part_paths, total_rows, plan.table.name);
+			AppendPartitionParts(index_group, key, part_paths, total_rows, table_name);
 			auto &pi = index_group.partitions.back();
 			// Index group: indexes must be consecutive from 0000 (no missing,
 			// no gaps). The self-describing name is the contract; the footer
@@ -470,8 +446,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 					throw IOException("Aligned table '%s' group 'index' partition '%s': part indexes must be "
 					                  "consecutive from 0000 (found '%s' at position %llu; the index group may not "
 					                  "skip or repeat indexes)",
-					                  plan.table.name.empty() ? table_name : plan.table.name, key,
-					                  part.part_name, k);
+					                  table_name, key, part.part_name, k);
 				}
 			}
 			index_partitions.push_back(pi);
@@ -509,7 +484,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		if (last_footer.columns.size() < 2) {
 			throw IOException("Aligned table '%s': the index schema must have at least two columns "
 			                  "(primary key: date, symbol); got %zu",
-			                  plan.table.name.empty() ? table_name : plan.table.name, last_footer.columns.size());
+			                  table_name, last_footer.columns.size());
 		}
 		// v7 primary-key contract: among the first two columns exactly one must
 		// be DATE/TIMESTAMP (the partition source); the other is the symbol
@@ -530,8 +505,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			throw IOException("Aligned table '%s': the index schema's first two columns must be the primary key "
 			                  "'(date, symbol)' — exactly one DATE/TIMESTAMP field (the partition source column) "
 			                  "and one symbol column; got '%s' and '%s'",
-			                  plan.table.name.empty() ? table_name : plan.table.name,
-			                  last_footer.columns[0].c_str(), last_footer.columns[1].c_str());
+			                  table_name, last_footer.columns[0].c_str(), last_footer.columns[1].c_str());
 		}
 		index_group.partition_source = date_col;
 		index_group.symbol_column = symbol_col;
@@ -543,13 +517,13 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 				if (!StringUtil::CIEquals(t.source, date_col)) {
 					throw IOException("Aligned table '%s': explicit partitioning for 'index' sources column '%s' "
 					                  "but the index's partition source column is '%s'",
-					                  plan.table.name.empty() ? table_name : plan.table.name, t.source, date_col);
+					                  table_name, t.source, date_col);
 				}
 			}
 			index_group.manifest.partitioning = explicit_it->second;
 		} else {
 			index_group.manifest.partitioning =
-			    DerivePartitioningFromPaths(index_paths_for_derive, plan.table.name, "index", date_col);
+			    DerivePartitioningFromPaths(index_paths_for_derive, table_name, "index", date_col);
 		}
 	}
 
@@ -570,7 +544,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		if (slash == string::npos || acc.name.find('/', slash + 1) != string::npos || slash == 0 ||
 		    slash + 1 >= acc.name.size()) {
 			throw IOException("Aligned table '%s': group '%s' must be a two-level path 'lv1/lv2' (except 'index')",
-			                  plan.table.name.empty() ? table_name : plan.table.name, acc.name);
+			                  table_name, acc.name);
 		}
 		group.lv1 = acc.name.substr(0, slash);
 		group.lv2 = acc.name.substr(slash + 1);
@@ -590,7 +564,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			if (idx_it == index_part_by_key.end()) {
 				throw IOException("Aligned table '%s': group '%s' has partition '%s' that the index group does not "
 				                  "have (partition-aligned contract: group keys must be a subset of the index keys)",
-				                  plan.table.name.empty() ? table_name : plan.table.name, acc.name, key);
+				                  table_name, acc.name, key);
 			}
 			auto &ip = index_partitions[idx_it->second];
 			idx_t j = i + 1;
@@ -602,7 +576,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 				part_paths.push_back(acc.pending[k].path);
 				part_paths_for_derive.push_back(acc.pending[k].path);
 			}
-			AppendPartitionParts(group, key, part_paths, ip.start_row, plan.table.name);
+			AppendPartitionParts(group, key, part_paths, ip.start_row, table_name);
 			auto &pi = group.partitions.back();
 			// Cross-group agreement (v6): the partition's TOTAL row count must
 			// equal the index's (sum of file-name rows), and every index that
@@ -612,7 +586,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 				throw IOException("Aligned table '%s': group '%s' partition '%s' covers %llu rows but the index "
 				                  "covers %llu rows (partition-aligned contract: shared partitions must agree on the "
 				                  "total row count)",
-				                  plan.table.name.empty() ? table_name : plan.table.name, acc.name, key, pi.row_count,
+				                  table_name, acc.name, key, pi.row_count,
 				                  ip.row_count);
 			}
 			// The index group's indexes are consecutive 0..n-1; build a
@@ -629,7 +603,7 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 					throw IOException("Aligned table '%s': group '%s' partition '%s' part index %llu ('%s') holds "
 					                  "%llu rows but the index holds %llu rows for the same index (shared indexes "
 					                  "must agree on row counts)",
-					                  plan.table.name.empty() ? table_name : plan.table.name, acc.name, key,
+					                  table_name, acc.name, key,
 					                  part.partition_index, part.part_name, part.row_count, it->second);
 				}
 			}
@@ -666,15 +640,16 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			group.manifest.partitioning = explicit_it->second;
 		} else {
 			group.manifest.partitioning =
-			    DerivePartitioningFromPaths(part_paths_for_derive, plan.table.name, acc.name,
+			    DerivePartitioningFromPaths(part_paths_for_derive, table_name, acc.name,
 			                                group.partition_source);
 		}
 		plan.groups.push_back(std::move(group));
 	}
 	plan.groups.insert(plan.groups.begin(), std::move(index_group));
-	// Declared groups survive even when they have no parts yet (their first
-	// write happens later): every writer rewrites _table.json from this list,
-	// so dropping an empty declared group here would lose it permanently.
+	// Preserve the bootstrap groups list: every writer rewrites _table.json from
+	// this list, so dropping an empty declared group here would lose it
+	// permanently. Merge manifest-declared groups with the discovered groups
+	// (deduped, case-insensitive).
 	vector<string> declared = std::move(plan.table.groups);
 	plan.table.groups.clear();
 	for (auto &name : declared) {

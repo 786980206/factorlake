@@ -135,7 +135,7 @@ if printf '%s' "$out" | grep -qE '^2000,0\.0$'; then echo 'PASS: e3 bare non-dup
 # 搂2.1b: a table without the mandatory index group must fail (no parts at all)
 BADIDX="$DATA_ROOT/badidx/_table.json"
 mkdir -p "$(dirname "$BADIDX")"
-printf '%s\n' '{"name":"badidx","version":1,"groups":["factor/alpha101"]}' > "$BADIDX"
+printf '%s\n' '{"groups":["factor/alpha101"]}' > "$BADIDX"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('badidx');" "mandatory group 'index'"; then
   echo 'PASS: 搂2.1b missing index group rejected'
 else echo 'FAIL: 搂2.1b missing index'; failures=$((failures+1)); fi

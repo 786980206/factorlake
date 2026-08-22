@@ -50,7 +50,7 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 		if (symbol_pos == DConstants::INVALID_INDEX) {
 			throw IOException("Aligned table '%s' group 'index' partition '%s': part '%s' has no symbol column "
 			                  "'%s' (v7 primary-key contract)",
-			                  plan.table.name.empty() ? plan.table_path : plan.table.name, partition.key,
+			                  plan.table_name, partition.key,
 			                  part.part_name, index_group->symbol_column);
 		}
 		reader->column_ids.push_back(MultiFileLocalColumnId(symbol_pos));
@@ -79,7 +79,7 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 				if (has_prev && !(prev < v)) {
 					throw IOException("Aligned table '%s' group 'index' partition '%s': rows are not strictly "
 					                  "sorted by symbol '%s' (v7 sort contract; duplicates or descending order)",
-					                  plan.table.name.empty() ? plan.table_path : plan.table.name, partition.key,
+					                  plan.table_name, partition.key,
 					                  index_group->symbol_column);
 				}
 				prev = v;
@@ -96,7 +96,7 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 	if (!templates.empty()) {
 		if (!EvaluatePartitionTemplate(templates[0].template_str, date_value, key)) {
 			throw IOException("Aligned table '%s': cannot evaluate partition template '%s' for key resolution",
-			                  plan.table.name.empty() ? plan.table_path : plan.table.name,
+			                  plan.table_name,
 			                  templates[0].template_str);
 		}
 	}

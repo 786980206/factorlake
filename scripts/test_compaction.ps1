@@ -58,7 +58,6 @@ function Make-Part([string]$group, [string]$partIdx, [int]$from, [int]$to) {
 if (Test-Path $tableDir) { Remove-Item $tableDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $tableDir | Out-Null
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    name = $table; version = 1
     groups = @('index', 'factor/alpha101')
     partitioning = @{
         'index' = @(@{ template = 'month=%Y-%m'; source = 'date' })

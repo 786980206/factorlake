@@ -8,7 +8,7 @@
 #
 # Layout (mirrors gen_bench.ps1):
 #   bench_ixday/
-#     _table.json                     (optional; here with part_rows + groups)
+#     _table.json                     (bootstrap config: groups only)
 #     index/   date=2026-09-01..04/   1 part per day (rowsPerDay), RGS 32768
 #     factor/alpha101/ date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
 #     fieldset/ma/     date=2026-09-01..04/   1 part per day, RGS 65536, 20 cols
@@ -50,7 +50,7 @@ run_duck() { "$DUCKDB" -light-mode -c "$1" >/dev/null; }
 rm -rf "$TABLE_DIR"
 mkdir -p "$TABLE_DIR"
 
-rj "$TABLE_DIR/_table.json" "{\"name\":\"$TABLE\",\"version\":1,\"part_rows\":$PART_ROWS,\"groups\":[\"index\",\"factor/alpha101\",\"fieldset/ma\"]}"
+rj "$TABLE_DIR/_table.json" "{\"groups\":[\"index\",\"factor/alpha101\",\"fieldset/ma\"]}"
 
 txid=0
 day_start=0

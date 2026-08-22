@@ -69,14 +69,12 @@ run_duckdb() { # sql
 part_name() { printf '%04d-%010d' "$1" "$2"; }
 
 # ---- _table.json ------------------------------------------------------------
-# The only manifest. Group metadata (row counts, partitioning) is derived from
-# the directory layout + Parquet footers; no _group.json files exist. The
-# explicit partitioning map is omitted on purpose so the reader's directory
-# derivation path is exercised. The groups field is legacy (never read).
+# The only manifest, used solely for empty-table bootstrap (which groups to
+# create, what partition templates to use). Once data exists, groups are
+# discovered via glob and partitioning is derived from the directory layout.
+# The explicit partitioning map is omitted on purpose so the reader's directory
+# derivation path is exercised.
 write_json "$TABLE_DIR/_table.json" '{
-  "name": "cnstk_ixday",
-  "version": 1,
-  "part_rows": 4194304,
   "groups": ["index", "factor/alpha101", "fieldset/ma"]
 }'
 

@@ -9,7 +9,7 @@
 #   partition holds 1 part per group (v6 self-describing name "0000-{rows:10d}"),
 #   so partition rows == part rows and every group has full coverage):
 #   bench_ixday/
-#     _table.json                     (optional; here with part_rows + groups)
+#     _table.json                     (bootstrap config: groups only)
 #     index/   date=2026-09-01..04/   1 part per day (rowsPerDay), RGS 32768
 #     factor/alpha101/ date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
 #     fieldset/ma/     date=2026-09-01..04/   1 part per day, RGS 65536, 20 cols
@@ -50,9 +50,6 @@ function Run-DuckDB([string]$sql) {
 }
 
 Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    name            = $table
-    version         = 1
-    part_rows       = $PART_ROWS
     groups          = @('index', 'factor/alpha101', 'fieldset/ma')
 }
 
