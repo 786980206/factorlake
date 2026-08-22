@@ -119,6 +119,13 @@ body{
 .g-panel{background:rgba(154,103,0,.04);border:1.5px solid rgba(154,103,0,.25)}
 .g-panel .group-label{color:var(--yel)}
 
+/* ===== "more groups" placeholder ===== */
+.group-more{
+  flex:0 0 3vw;align-items:center;justify-content:center;
+  border:1.5px dashed var(--line);background:transparent;
+}
+.group-more .group-label{font-size:2.5vh;justify-content:center;margin:0}
+
 /* ===== Partition band — height proportional to row count (inline flex-grow) ===== */
 .partition{
   border:1px dashed var(--line);border-radius:7px;padding:1vh 1vw;
@@ -381,6 +388,11 @@ body{
                 — 未写入 —
               </div>
             </div>
+          </div>
+
+          <!-- ===== more groups ===== -->
+          <div class="group group-more">
+            <div class="group-label" style="color:var(--dim)">⋯</div>
           </div>
 
         </div><!-- /groups -->
