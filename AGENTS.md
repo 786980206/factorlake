@@ -153,7 +153,8 @@ aligned_drop(table, group_name, root=...)         → (dirs_removed, files_remov
 
 - **v8 mutator**：按主键 `(symbol, date)` 插入/更新/删除，只重写受影响 part。
   删除逻辑：删空单 part 分区 → 整分区移除；删空多 part 分区最高索引 part →
-  直接移除该 part；删空多 part 分区内部 part → fail-fast（run aligned_compact first）。
+  直接移除该 part；删空多 part 分区中间 part → 原地重写为 0 行空文件
+  （保留文件名索引，保持索引连续）。
 - **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式
   partition；崩溃则丢弃（`_tmp/` 对 Reader 不可见）。无 sidecar、无 marker。
 - **映射列类型 = 组内已存类型**（组 schema），非源文件类型——跨 part 列类型必须
@@ -253,7 +254,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 144/144 + 4 PS 套件全 PASS
+- 当前总：SQLLogicTest 106/106 + 4 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`

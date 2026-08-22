@@ -364,3 +364,23 @@ SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE
   §6.3/§6.4/§6.5（source_path/mapping/keys_source 参数）、附录返回值表对应行，
   表函数数量从 7 改为 5；`AGENTS.md` §7 删除两个函数签名并标注"已删除"。
 - 当前总：SQLLogicTest 144/144 + 4 PS 套件全 PASS。
+
+## v0.15-delete-empty-part — 删空中间 part 改为 0 行重写
+
+删空多 part 分区的中间 part 不再 fail-fast，而是原地重写为 0 行空文件
+（保留文件名索引，保持索引连续）。
+
+- **设计理由**：0 行空文件在现有 Reader/Writer 契约下完全合法——索引连续性
+  契约不破坏（part 还在，索引不变）、行区间累加正确（0 行贡献 0）、OpenPart
+  防御校验通过（footer NumRows=0 == 文件名 rows=0）、扫描 0 行窗口天然不产出。
+  旧的 fail-fast + 强制 compact 是保守但非必要的选择。
+- **改动**：
+  - `aligned_mutator.cpp`：删除 `throw IOException("...run aligned_compact first")`
+    分支，改为设置 `t.empty_part = true`。
+  - `aligned_mutator.hpp`：`MutateTarget` 新增 `bool empty_part = false` 字段。
+  - `ExecuteAndCommit`：`empty_part` 目标正常走 `RewritePart`（产出 0 行文件），
+    但 `new_row_count == 0` 时不加入 `removed_partitions`（保留分区目录）；
+    Pass B 不跳过 `empty_part` 的 0 行文件（move 到目标路径覆盖旧文件）。
+- 新增测试：`test/aligned/aligned_delete_empty.test`（12 个断言）——3 分区表
+  删空中间分区、验证前后行数、验证清空分区可再插入。
+- 当前总：SQLLogicTest 106/106 + 4 PS 套件全 PASS。

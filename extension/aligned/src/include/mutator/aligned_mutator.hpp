@@ -97,6 +97,11 @@ struct MutateTarget {
 	// part file is removed outright (remaining indexes stay consecutive);
 	// unlike `removed` the partition directory itself survives.
 	bool remove_part = false;
+	// Emptied INTERIOR part (not the highest index in its partition):
+	// rewrite to a 0-row file in-place, preserving the part index so
+	// the remaining indexes stay consecutive. The file name becomes
+	// {index:04d}-0000000000.parquet.
+	bool empty_part = false;
 	// Synthesized part (UPDATE on keys that exist in index, but this group
 	// has never seen that partition — e.g. M1 columns inserted first, M2
 	// later): the part mirrors the index partition with R_i all-NULL rows;

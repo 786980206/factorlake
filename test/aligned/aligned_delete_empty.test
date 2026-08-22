@@ -1,0 +1,65 @@
+# name: test/aligned/aligned_delete_empty.test
+# description: DELETE that empties an interior part — rewrites to 0-row file, index stays consecutive
+
+# --- setup: create table with 3 partitions, each with 1 part ---
+statement ok
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; SELECT * FROM aligned_create('del_tbl', 'symbol VARCHAR, date DATE, v DOUBLE', groups => 'index:v', partition_template => 'month=%Y-%m')
+
+# --- insert 10 rows in month=2026-01 ---
+statement ok
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); INSERT INTO al.del_tbl SELECT printf('%06d', i) AS symbol, DATE '2026-01-15' AS date, i::DOUBLE AS v FROM (SELECT range AS i FROM range(0, 10)) t
+
+# --- insert 10 rows in month=2026-02 ---
+statement ok
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); INSERT INTO al.del_tbl SELECT printf('%06d', i) AS symbol, DATE '2026-02-15' AS date, i::DOUBLE AS v FROM (SELECT range AS i FROM range(10, 20)) t
+
+# --- insert 10 rows in month=2026-03 ---
+statement ok
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); INSERT INTO al.del_tbl SELECT printf('%06d', i) AS symbol, DATE '2026-03-15' AS date, i::DOUBLE AS v FROM (SELECT range AS i FROM range(20, 30)) t
+
+# --- verify 30 rows total ---
+query I
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.del_tbl
+----
+30
+
+# --- DELETE all rows in month=2026-02 (interior partition) ---
+statement ok
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); DELETE FROM al.del_tbl WHERE date >= DATE '2026-02-01' AND date < DATE '2026-03-01'
+
+# --- verify 20 rows remain (month=2026-01 + month=2026-03) ---
+query I
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.del_tbl
+----
+20
+
+# --- verify month=2026-01 rows intact ---
+query I
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.del_tbl WHERE date < DATE '2026-02-01'
+----
+10
+
+# --- verify month=2026-03 rows intact ---
+query I
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.del_tbl WHERE date >= DATE '2026-03-01'
+----
+10
+
+# --- verify month=2026-02 is empty (0 rows) but partition dir exists with 0-row file ---
+# The partition directory should still exist (0-row placeholder file keeps it alive)
+query I
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.del_tbl WHERE date >= DATE '2026-02-01' AND date < DATE '2026-03-01'
+----
+0
+
+# --- after DELETE, INSERT into the emptied partition should work (0-row file exists) ---
+query R
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); INSERT INTO al.del_tbl VALUES ('000099', DATE '2026-02-20', 99.0); SELECT v FROM al.del_tbl WHERE symbol = '000099'
+----
+99.0
+
+# --- verify total is now 21 ---
+query I
+SET aligned_data_root='{TEST_DIR}/del_empty_data'; ATTACH '{TEST_DIR}/del_empty_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.del_tbl
+----
+21

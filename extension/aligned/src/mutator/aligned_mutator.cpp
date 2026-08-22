@@ -754,7 +754,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 			// Serial path (single rewrite or single-core)
 			for (auto &task : rewrite_tasks) {
 				task.target->new_row_count = RewritePart(context, task.input);
-				if (task.target->new_row_count == 0) {
+				if (task.target->new_row_count == 0 && !task.target->empty_part) {
 					removed_partitions.insert(task.target->partition_key);
 					continue;
 				}
@@ -783,7 +783,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 						auto &task = rewrite_tasks[task_idx];
 						try {
 							task.target->new_row_count = RewritePart(context, task.input);
-							if (task.target->new_row_count == 0) {
+							if (task.target->new_row_count == 0 && !task.target->empty_part) {
 								std::lock_guard<std::mutex> lock(removed_mutex);
 								removed_partitions.insert(task.target->partition_key);
 							} else {
@@ -821,7 +821,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 			auto &group = bind.plan.groups[gi];
 			for (auto &kv : targets[gi]) {
 				auto &t = *kv.second;
-				if (t.removed || t.staged_path.empty() || t.new_row_count == 0) {
+				if (t.removed || t.staged_path.empty() || (t.new_row_count == 0 && !t.empty_part)) {
 					continue;
 				}
 				string final_name = StringUtil::Format("%04llu-%010llu.parquet", t.part_index, t.new_row_count);
@@ -1383,12 +1383,13 @@ static void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &da
 		}
 	}
 
-	// 5. Pre-check: a part emptied by deletes must be removable without
+	// 5. Pre-check: a part emptied by deletes must be handled without
 	//    breaking the index-consecutiveness contract — either it is the only
 	//    part of its partition (whole-partition removal) or it is the group's
 	//    highest-index part in that partition (part-file removal; remaining
-	//    indexes stay consecutive). Emptying an interior part of a multi-part
-	//    partition is rejected before anything is staged.
+	//    indexes stay consecutive). An interior part emptied by deletes is
+	//    rewritten to a 0-row file in-place (empty_part), preserving its
+	//    index so the remaining indexes stay consecutive.
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 		auto &group = bind.plan.groups[gi];
 		for (auto &kv : targets[gi]) {
@@ -1414,9 +1415,9 @@ static void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &da
 				t.remove_part = true;
 				continue;
 			}
-			throw IOException("Aligned table '%s': cannot delete all rows of part '%s' (partition '%s' has "
-			                  "%llu parts); run aligned_compact first",
-			                  bind.table_name, t.part->part_name, t.partition_key, t.part->partition_parts);
+			// Interior part emptied by delete: rewrite to a 0-row file in-place
+			// (preserves the part index, keeping the remaining indexes consecutive).
+			t.empty_part = true;
 		}
 	}
 
