@@ -169,20 +169,19 @@ body{
 .rg-C{border-left:3px solid rgba(26,127,55,.4)}
 .rg-D{border-left:3px solid rgba(130,80,223,.4)}
 
-/* L4: Column list inside RG — horizontal row of narrow vertical column bars */
+/* L4: Column list inside RG — horizontal row of field bars */
 .rg-body{
-  display:none;flex-direction:row;gap:3px;
+  display:none;flex-direction:row;gap:4px;
   padding:.5vh .5vw .6vh;flex:1;min-height:0;overflow-x:auto;align-items:stretch;
 }
 .rg.selected .rg-body{display:flex;flex-direction:row}
 .rg-body .col-chip{
-  flex:0 0 auto;width:20px;
-  display:flex;align-items:center;justify-content:center;
-  font-family:Consolas,monospace;font-size:1vh;
-  padding:6px 2px;border-radius:3px;
+  flex:0 0 auto;
+  font-family:Consolas,monospace;font-size:1.1vh;
+  padding:4px 10px;border-radius:4px;
   background:var(--panel2);border:1px solid var(--line2);
-  writing-mode:vertical-rl;text-orientation:mixed;
-  white-space:nowrap;overflow:hidden;
+  white-space:nowrap;
+  display:flex;align-items:center;
 }
 
 /* ===== Empty partition ===== */
