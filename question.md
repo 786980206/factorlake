@@ -142,6 +142,8 @@ con.execute("SELECT * FROM aligned_scan('dg5')")
 | 2026-08-23 | stkoe-cli 当前安装的扩展构建时间：2026-08-23 01:43:35（D:/proj/factorlake/release/aligned.duckdb_extension） | 请确认是否为最新编译版本 |
 | 2026-08-23 | FactorLake 侧定位根因：HasIgnoredPathSegment 误过滤含 .stkoe 的数据根路径 | 已修复 |
 | 2026-08-23 | FactorLake 侧修复 commit 0fe5aa6，重新编译扩展，回复问题 1/2/3 | 已回复 |
+| 2026-08-23 | stkoe-cli 验证修复：FORCE INSTALL 新扩展，全部验证通过 | ✅ 已确认 |
+| 2026-08-23 | stkoe-cli 全量 280 测试通过（FactorLake 引擎活跃，双路径回退机制就绪） | ✅ |
 
 ### 补充说明（2026-08-23）
 
@@ -230,3 +232,26 @@ con.execute("LOAD aligned;")
 - **P1 问题 3**（aligned_scan 空表报错）：已修复 [OK]
 - **P2 需求 4**（aligned_partitions）：后续可补
 - **P2 需求 5**（aligned_storage_stats）：后续可补
+
+---
+
+## 新发现（2026-08-23）
+
+### 发现 4：表名以 `_` 开头时 ATTACH 仍看不到 schema（🟡 低优先）
+
+**现象**：表名 `_stkoe_smoke_test`（以 `_` 开头）创建成功、`aligned_groups` 返回正确，
+但 ATTACH 后 `DESCRIBE al._stkoe_smoke_test` 报 "Table does not exist"。
+
+改用不以 `_` 开头的表名（如 `smoke2`）后全部正常。
+
+**推测**：`HasIgnoredPathSegment` 修复后只检查表目录下方路径段，但表名本身以 `_`
+开头可能仍被误判为隐藏目录（`_tmp/`、`.hidden/` 契约 §2.1d）。
+
+**影响**：低——stkoe 的表名来自 index 资产名，不会以 `_` 开头。但建议修复以保持一致性。
+
+### 发现 5：DROP TABLE 在 ATTACH 模式下不支持（🟡 预期行为）
+
+**现象**：`DROP TABLE al.smoke2` 报 `NotImplementedError: DROP is not supported on logical parquet tables`
+
+**期望**：这是预期行为——用 `aligned_drop(table, group)` 删列组而非 DROP TABLE。
+stkoe 已使用 `aligned_drop`。记录此处供参考。

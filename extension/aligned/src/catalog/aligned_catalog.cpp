@@ -112,7 +112,11 @@ void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
 	}
 	vector<string> candidates;
 	fs->ListFiles(root, [&](const string &fname, bool is_dir) {
-		if (!is_dir || fname.empty() || fname[0] == '.' || fname[0] == '_') {
+		// Skip non-directories and hidden files (dot-prefixed). Tables
+		// named with a leading '_' are valid — the '_' filter only applies
+		// to _tmp/ directories inside a table directory, not to table
+		// directories at the root level.
+		if (!is_dir || fname.empty() || fname[0] == '.') {
 			return;
 		}
 		candidates.push_back(fname);
