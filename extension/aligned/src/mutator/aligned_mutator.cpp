@@ -619,6 +619,83 @@ UpsertResult AlignedUpsertFromCollection(ClientContext &context, const string &t
 	return result;
 }
 
+//! Builds a MutateBindData for delete, using an in-memory ColumnDataCollection
+//! as the source instead of a parquet file. The collection must have two
+//! columns: (symbol VARCHAR, date DATE/TIMESTAMP).
+static unique_ptr<MutateBindData> BuildDeleteBindFromCollection(ClientContext &context,
+                                                                const string &table_name,
+                                                                const string &root,
+                                                                const ColumnDataCollection &keys_collection) {
+	auto result = make_uniq<MutateBindData>();
+	result->is_delete = true;
+	result->table_name = table_name;
+	result->source_path = "<in-memory>";
+	result->source_collection = nullptr;
+	const char *fn = "aligned_delete";
+
+	auto &fs = FileSystem::GetFileSystem(context);
+	string table_dir = root + "/" + table_name;
+
+	bool empty_table = !fs.DirectoryExists(table_dir) ||
+	                   fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY).empty();
+	if (empty_table) {
+		throw BinderException("%s: the table '%s' is empty (no parts) — nothing to delete", fn, table_name);
+	}
+	BuildTablePlan(context, root, table_name, result->plan);
+	result->empty_table = false;
+	result->plan.table_path = table_dir;
+	result->plan.table_name = table_name;
+
+	result->group_mapping.resize(result->plan.groups.size());
+
+	// Primary key columns (non-empty table)
+	auto &index_group = result->plan.groups[0];
+	result->date_col = index_group.partition_source;
+	result->symbol_col = index_group.symbol_column;
+
+	// The keys collection must have 2 columns matching (symbol, date).
+	auto &ktypes = keys_collection.Types();
+	if (ktypes.size() != 2) {
+		throw BinderException("%s: keys collection must have 2 columns (symbol, date), got %llu", fn,
+		                      (unsigned long long)ktypes.size());
+	}
+	// Column 0 = symbol (VARCHAR), column 1 = date (DATE or TIMESTAMP)
+	if (ktypes[0].id() != LogicalTypeId::VARCHAR) {
+		throw BinderException("%s: keys collection column 0 must be VARCHAR (symbol), got %s", fn,
+		                      ktypes[0].ToString());
+	}
+	if (ktypes[1].id() != LogicalTypeId::DATE && ktypes[1].id() != LogicalTypeId::TIMESTAMP) {
+		throw BinderException("%s: keys collection column 1 must be DATE or TIMESTAMP, got %s", fn,
+		                      ktypes[1].ToString());
+	}
+
+	result->source_rows = keys_collection.Count();
+	result->types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
+	result->names = {"rows_deleted", "parts_rewritten", "txid"};
+	return result;
+}
+
+DeleteResult AlignedDeleteFromCollection(ClientContext &context, const string &table_name,
+                                          const string &root, ColumnDataCollection &keys_collection) {
+	auto bind = BuildDeleteBindFromCollection(context, table_name, root, keys_collection);
+	bind->source_collection = &keys_collection;
+
+	MutateGlobalState gstate;
+	DataChunk output;
+	output.Initialize(context, bind->types);
+
+	TableFunctionInput input(bind.get(), nullptr, &gstate);
+
+	AlignedDeleteFunction(context, input, output);
+
+	DeleteResult result;
+	if (output.size() > 0) {
+		result.rows_deleted = output.GetValue(0, 0).GetValue<int64_t>();
+		result.parts_rewritten = output.GetValue(1, 0).GetValue<int64_t>();
+	}
+	return result;
+}
+
 //===----------------------------------------------------------------------===//
 // Execution helpers
 //===----------------------------------------------------------------------===//
@@ -1532,9 +1609,17 @@ void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, Dat
 	auto &index_group = bind.plan.groups[0];
 	string template_str = IndexTemplate(bind);
 
-	// 1. Read the keys source's two key columns.
+	// 1. Read the keys source's two key columns. When source_collection is
+	//    set (internal API from PhysicalAlignedDelete), read from the in-memory
+	//    collection instead of opening a parquet file.
 	vector<string> key_names = {bind.date_col, bind.symbol_col};
-	auto src = ReadSourceColumns(context, bind.source_path, key_names);
+	unique_ptr<ColumnDataCollection> src;
+	if (bind.source_collection) {
+		src = ReadSourceFromCollection(context, *bind.source_collection, key_names,
+		                               vector<string> {"symbol", "date"});
+	} else {
+		src = ReadSourceColumns(context, bind.source_path, key_names);
+	}
 	SourceReader reader(context, *src);
 
 	// 2. Build + sort + dedupe the key list (vectorized chunk scan).

@@ -203,4 +203,15 @@ UpsertResult AlignedUpsertFromCollection(ClientContext &context, const string &t
                                           ColumnDataCollection &source_collection,
                                           const vector<string> &source_col_names);
 
+//! Internal API: delete directly from an in-memory ColumnDataCollection of
+//! (symbol, date) keys, bypassing the temp-parquet file. Used by
+//! PhysicalAlignedDelete to avoid the double-write.
+//! The collection must have two columns: (symbol VARCHAR, date DATE/TIMESTAMP).
+struct DeleteResult {
+	idx_t rows_deleted = 0;
+	idx_t parts_rewritten = 0;
+};
+DeleteResult AlignedDeleteFromCollection(ClientContext &context, const string &table_name,
+                                          const string &root, ColumnDataCollection &keys_collection);
+
 } // namespace duckdb

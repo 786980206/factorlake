@@ -1,16 +1,16 @@
 //! Standard DML physical operators for aligned attached tables (Phase 8).
 //!
-//! INSERT: buffer rows -> temp parquet under <table>/_tmp/ -> aligned_upsert
-//! mutator places them into the column groups atomically. The upsert runs on
-//! a dedicated thread with its own Connection (nested queries on the caller's
-//! context deadlock 鈥?see aligned_catalog.cpp).
+//! INSERT/UPDATE/DELETE: buffer rows in-memory -> direct C++ mutator call
+//! (AlignedUpsertFromCollection / AlignedDeleteFromCollection). No temp parquet
+//! file, no worker thread, no nested SQL query. The mutator does only
+//! filesystem + parquet I/O (no catalog/executor access), so it is safe to
+//! call directly on the pipeline thread.
 
 #include "execution/aligned_dml.hpp"
 
 #include "catalog/aligned_catalog.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/parallel/event.hpp"
@@ -20,88 +20,8 @@
 #include "scan/aligned_scan.hpp"
 
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "parquet_writer.hpp"
-#include "zstd_file_system.hpp"
-
-#include <atomic>
-#include <condition_variable>
-#include <functional>
-#include <mutex>
-#include <thread>
 
 namespace duckdb {
-
-//! A single-worker thread pool for DML operations. Each DML Finalize runs
-//! the mutator on this worker thread (nested-query deadlock avoidance:
-//! the caller's context may hold pipeline locks). The thread is persistent
-//! — it avoids the ~10-50µs thread creation overhead per DML statement,
-//! which matters for high-frequency small-batch INSERTs.
-class DmlWorkerPool {
-public:
-	static DmlWorkerPool &Instance() {
-		static DmlWorkerPool instance;
-		return instance;
-	}
-
-	void Submit(const std::function<void()> &task) {
-		std::unique_lock<std::mutex> lock(mutex_);
-		task_ = task;
-		has_task_ = true;
-		done_ = false;
-		cv_.notify_one();
-	}
-
-	void Wait() {
-		std::unique_lock<std::mutex> lock(mutex_);
-		cv_done_.wait(lock, [this] { return done_; });
-	}
-
-private:
-	DmlWorkerPool() : has_task_(false), done_(false), stop_(false) {
-		thread_ = std::thread([this] {
-			while (true) {
-				std::unique_lock<std::mutex> lock(mutex_);
-				cv_.wait(lock, [this] { return has_task_ || stop_; });
-				if (stop_) {
-					return;
-				}
-				auto task = std::move(task_);
-				has_task_ = false;
-				lock.unlock();
-				task();
-				{
-					std::lock_guard<std::mutex> lk(mutex_);
-					done_ = true;
-					cv_done_.notify_one();
-				}
-			}
-		});
-	}
-
-	~DmlWorkerPool() {
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			stop_ = true;
-			cv_.notify_one();
-		}
-		if (thread_.joinable()) {
-			thread_.join();
-		}
-	}
-
-	std::thread thread_;
-	std::function<void()> task_;
-	bool has_task_;
-	bool done_;
-	bool stop_;
-	std::mutex mutex_;
-	std::condition_variable cv_;
-	std::condition_variable cv_done_;
-};
-
-#ifdef DELETE
-#undef DELETE
-#endif
 
 //===----------------------------------------------------------------------===//
 // States
@@ -176,34 +96,18 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 		return SinkFinalizeType::READY;
 	}
 
-	// Direct upsert from the in-memory ColumnDataCollection — no temp parquet
-	// file, no intermediate serialization. The mutator reads the collection
-	// directly via the source_collection field in MutateBindData.
-	// Run on a worker thread (nested-query deadlock avoidance: the caller's
-	// context may be holding pipeline locks).
-	auto &db = DatabaseInstance::GetDatabase(context);
-	const string &tbl = table;
-	const string &rt = root;
-	// Direct upsert from the in-memory ColumnDataCollection on the persistent
-	// DML worker thread (avoids per-statement thread creation overhead + nested-
-	// query deadlock avoidance).
-	DmlWorkerPool::Instance().Submit([&db, &g, tbl, rt, this]() {
-		try {
-			Connection con(db);
-			auto result = AlignedUpsertFromCollection(*con.context, tbl, rt, "", g.collection, row_names);
-			g.rows_inserted = result.rows_inserted;
-			g.rows_updated = result.rows_updated;
-		} catch (std::exception &ex) {
-			g.error = ex.what();
-		} catch (...) {
-			g.error = "unknown error during aligned upsert";
-		}
-	});
-	DmlWorkerPool::Instance().Wait();
-
-	if (!g.error.empty()) {
-		throw IOException("aligned INSERT failed: %s", g.error);
+	// Direct C++ call — no worker thread, no Connection, no temp parquet.
+	// The mutator (BuildTablePlan + KeyResolver + ExecuteAndCommit) does only
+	// filesystem + parquet I/O; it does NOT touch the catalog or executor, so
+	// there is no nested-query deadlock risk on the pipeline thread.
+	try {
+		auto result = AlignedUpsertFromCollection(context, table, root, "", g.collection, row_names);
+		g.rows_inserted = result.rows_inserted;
+		g.rows_updated = result.rows_updated;
+	} catch (std::exception &ex) {
+		throw IOException("aligned INSERT failed: %s", ex.what());
 	}
+
 	return SinkFinalizeType::READY;
 }
 
@@ -279,10 +183,10 @@ SinkCombineResultType PhysicalAlignedDelete::Combine(ExecutionContext &context,
 	return SinkCombineResultType::FINISHED;
 }
 
-//! Scans the index group's (date, symbol) columns and writes the keys of the
-//! given rowids to a staging parquet for aligned_delete.
-static string StageKeysForRowids(ClientContext &context, const string &root, const string &table_name,
-                                 const vector<int64_t> &rowids, const string &tmp_dir) {
+//! Scans the index group's (symbol, date) columns and collects the keys of the
+//! given rowids into an in-memory ColumnDataCollection. No temp parquet file.
+static ColumnDataCollection ResolveKeysForRowids(ClientContext &context, const string &root,
+                                                 const string &table_name, const vector<int64_t> &rowids) {
 	auto sorted = rowids;
 	sort(sorted.begin(), sorted.end());
 	sorted.erase(unique(sorted.begin(), sorted.end()), sorted.end());
@@ -309,12 +213,6 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 	// cursor in order).
 	vector<column_t> col_ids = {symbol_pos, date_pos};
 	TableFunctionInitInput init_input(bind_data.get(), col_ids, {}, nullptr);
-	{
-		string nm;
-		for (auto &n : scan_names) {
-			nm += n + ",";
-		}
-	}
 	auto gstate = AlignedInitGlobal(context, init_input);
 	ThreadContext thread_context(context);
 	ExecutionContext exec(context, thread_context, nullptr);
@@ -371,20 +269,7 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 		scan_chunk.Reset();
 	}
 
-	// Stage to parquet (v8: column order symbol, date).
-	auto fs = FileSystem::CreateLocal();
-	fs->CreateDirectoriesRecursive(tmp_dir);
-	string staged = tmp_dir + "/dml-delete-keys-" +
-	                StringUtil::Format("%lld", (long long)Timestamp::GetEpochMs(Timestamp::GetCurrentTimestamp())) +
-	                "-" + StringUtil::Format("%d", (int)(idx_t)&keys % 100000) + ".parquet";
-	ParquetWriter writer(context, FileSystem::GetFileSystem(context), staged, keys_types,
-	                     vector<string> {"symbol", "date"}, duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(),
-	                     ShreddingType(), vector<pair<string, string>>(), nullptr, optional_idx(), 1073741824ULL, 1,
-	                     0.01, ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
-	unique_ptr<ParquetWriteTransformData> transform;
-	writer.Flush(keys, transform);
-	writer.Finalize();
-	return staged;
+	return keys;
 }
 
 SinkFinalizeType PhysicalAlignedDelete::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
@@ -394,49 +279,18 @@ SinkFinalizeType PhysicalAlignedDelete::Finalize(Pipeline &pipeline, Event &even
 		return SinkFinalizeType::READY;
 	}
 
-	string tmp_dir = root + "/" + table + "/_tmp";
-	auto &db = DatabaseInstance::GetDatabase(context);
-	DmlWorkerPool::Instance().Submit([&db, &g, tbl = table, rt = root, rowids = g.rowids, tmp_dir]() {
-		string staged;
-		try {
-			Connection key_con(db);
-			// Resolve rowids -> keys on the worker's own context (reentrant
-			// scanning on the caller's pipeline context is not safe).
-			staged = StageKeysForRowids(*key_con.context, rt, tbl, rowids, tmp_dir);
-			g.staged_path = staged;
-		} catch (std::exception &ex) {
-			g.error = string("key resolution failed: ") + ex.what();
-			return;
-		}
-		try {
-			Connection con(db);
-			auto result = con.Query("SELECT rows_deleted FROM aligned_delete('" +
-			                        StringUtil::Replace(tbl, "'", "''") + "', '" +
-			                        StringUtil::Replace(staged, "'", "''") + "', root='" +
-			                        StringUtil::Replace(rt, "'", "''") + "')");
-			if (result->HasError()) {
-				g.error = result->GetError();
-				return;
-			}
-			auto &mat = result->Cast<MaterializedQueryResult>();
-			if (mat.RowCount() > 0) {
-				g.rows_deleted = mat.GetValue<int64_t>(0, 0);
-			}
-		} catch (std::exception &ex) {
-			g.error = ex.what();
-		}
-	});
-	DmlWorkerPool::Instance().Wait();
+	// Direct C++ call — no worker thread, no Connection, no temp parquet.
+	// 1. Resolve rowids → (symbol, date) keys via direct index scan.
+	// 2. Delete via AlignedDeleteFromCollection (in-memory keys collection).
+	// Neither step touches the catalog or executor; safe on the pipeline thread.
+	try {
+		auto keys = ResolveKeysForRowids(context, root, table, g.rowids);
+		auto result = AlignedDeleteFromCollection(context, table, root, keys);
+		g.rows_deleted = result.rows_deleted;
+	} catch (std::exception &ex) {
+		throw IOException("aligned DELETE failed: %s", ex.what());
+	}
 
-	if (!g.staged_path.empty()) {
-		try {
-			FileSystem::CreateLocal()->RemoveFile(g.staged_path);
-		} catch (...) {
-		}
-	}
-	if (!g.error.empty()) {
-		throw IOException("aligned DELETE failed: %s", g.error);
-	}
 	return SinkFinalizeType::READY;
 }
 
@@ -619,158 +473,119 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 		return SinkFinalizeType::READY;
 	}
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	string staged;
-	string err;
-	DmlWorkerPool::Instance().Submit([&db, &g, &staged, &err, this, tbl = table, rt = root]() {
-		try {
-			Connection con(db);
-			ClientContext &wctx = *con.context;
-
-			// Collect all rowids + set values from the sink collection.
-			vector<int64_t> rowids;
-			std::map<int64_t, std::vector<Value>> set_by_row;
-			{
-				ColumnDataScanState ss;
-				g.collection.InitializeScan(ss);
-				DataChunk c;
-				g.collection.InitializeScanChunk(c);
-				while (g.collection.Scan(ss, c)) {
-					for (idx_t r = 0; r < c.size(); r++) {
-						int64_t rid = c.GetValue(0, r).GetValue<int64_t>();
-						rowids.push_back(rid);
-						std::vector<Value> vals;
-						for (idx_t k = 1; k < c.ColumnCount(); k++) {
-							vals.push_back(c.GetValue(k, r));
-						}
-						set_by_row[rid] = vals;
-					}
-					c.Reset();
-				}
-			}
-
-			// Resolve keys: (rowid, symbol, date) — v8: symbol before date.
-			auto keys_types = vector<LogicalType> {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DATE};
-			ColumnDataCollection keys(wctx, keys_types);
-			ColumnDataAppendState append;
-			keys.InitializeAppend(append);
-			ResolveKeysForRowids(wctx, rt, tbl, rowids, keys, append);
-
-			// staged schema: symbol, date, then set columns in set_names order (v8)
-			vector<LogicalType> staged_types;
-			vector<string> staged_names;
-			staged_types.push_back(LogicalType::VARCHAR);
-			staged_names.push_back("symbol");
-			staged_types.push_back(LogicalType::DATE);
-			staged_names.push_back("date");
-			for (auto &expr : this->expressions) {
-				staged_types.push_back(expr->return_type);
-			}
-			for (auto &nm : this->set_names) {
-				staged_names.push_back(nm);
-			}
-
-			ColumnDataCollection staged_coll(wctx, staged_types);
-			ColumnDataAppendState staged_append;
-			staged_coll.InitializeAppend(staged_append);
-			DataChunk out_chunk;
-			out_chunk.Initialize(wctx, staged_types);
-			idx_t out_n = 0;
+	// Direct C++ call — no worker thread, no Connection, no temp parquet.
+	// 1. Collect rowids + set values from the sink collection.
+	// 2. Resolve rowids → (symbol, date) keys via direct index scan.
+	// 3. Build staged collection (symbol, date, set values...).
+	// 4. Upsert via AlignedUpsertFromCollection (in-memory collection).
+	// None of these steps touch the catalog or executor; safe on the pipeline
+	// thread.
+	try {
+		// Collect all rowids + set values from the sink collection.
+		vector<int64_t> rowids;
+		std::map<int64_t, std::vector<Value>> set_by_row;
+		{
 			ColumnDataScanState ss;
-			keys.InitializeScan(ss);
-			DataChunk kc;
-			keys.InitializeScanChunk(kc);
-			while (keys.Scan(ss, kc)) {
-				for (idx_t r = 0; r < kc.size(); r++) {
-					int64_t rid = kc.GetValue(0, r).GetValue<int64_t>();
-					auto it = set_by_row.find(rid);
-					if (it == set_by_row.end()) {
-						continue;
+			g.collection.InitializeScan(ss);
+			DataChunk c;
+			g.collection.InitializeScanChunk(c);
+			while (g.collection.Scan(ss, c)) {
+				for (idx_t r = 0; r < c.size(); r++) {
+					int64_t rid = c.GetValue(0, r).GetValue<int64_t>();
+					rowids.push_back(rid);
+					std::vector<Value> vals;
+					for (idx_t k = 1; k < c.ColumnCount(); k++) {
+						vals.push_back(c.GetValue(k, r));
 					}
-					// kc layout: (rowid, symbol, date) — v8
-					out_chunk.SetValue(0, out_n, kc.GetValue(1, r)); // symbol
-					out_chunk.SetValue(1, out_n, kc.GetValue(2, r)); // date
-					for (idx_t k = 0; k < it->second.size(); k++) {
-						out_chunk.SetValue(2 + k, out_n, it->second[k]);
-					}
-					out_n++;
-					if (out_n >= STANDARD_VECTOR_SIZE) {
-						out_chunk.SetCardinality(out_n);
-						staged_coll.Append(out_chunk);
-						out_chunk.Reset();
-						out_n = 0;
-					}
+					set_by_row[rid] = vals;
 				}
-				kc.Reset();
+				c.Reset();
 			}
-			if (out_n > 0) {
-				out_chunk.SetCardinality(out_n);
-				staged_coll.Append(out_chunk);
-			}
+		}
 
-			auto fs_local = FileSystem::CreateLocal();
-			auto &fs = *fs_local;
-			string tmp_dir = rt + "/" + tbl + "/_tmp";
-			fs.CreateDirectoriesRecursive(tmp_dir);
-			staged = tmp_dir + "/dml-update-" +
-			         StringUtil::Format("%lld", (long long)Timestamp::GetEpochMs(Timestamp::GetCurrentTimestamp())) +
-			         "-" + StringUtil::Format("%d", (int)(idx_t)&rowids % 100000) + ".parquet";
+		// Resolve keys: (rowid, symbol, date) — v8: symbol before date.
+		auto keys_types = vector<LogicalType> {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DATE};
+		ColumnDataCollection keys(context, keys_types);
+		ColumnDataAppendState append;
+		keys.InitializeAppend(append);
+		ResolveKeysForRowids(context, root, table, rowids, keys, append);
 
-			ParquetWriter writer(wctx, fs, staged, staged_types, staged_names,
-			                     duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(), ShreddingType(),
-			                     vector<pair<string, string>>(), nullptr, optional_idx(), 1073741824ULL, 1, 0.01,
-			                     ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
-			unique_ptr<ParquetWriteTransformData> transform;
-			writer.Flush(staged_coll, transform);
-			writer.Finalize();
+		// staged schema: symbol, date, then set columns in set_names order (v8)
+		vector<LogicalType> staged_types;
+		vector<string> staged_names;
+		staged_types.push_back(LogicalType::VARCHAR);
+		staged_names.push_back("symbol");
+		staged_types.push_back(LogicalType::DATE);
+		staged_names.push_back("date");
+		for (auto &expr : expressions) {
+			staged_types.push_back(expr->return_type);
+		}
+		for (auto &nm : set_names) {
+			staged_names.push_back(nm);
+		}
 
-			// Upsert mapping (v8): index:symbol,date(+ any index-group set
-			// columns); each non-index set group gets its own mapping segment.
-			string index_cols = "symbol,date";
-			string mapping = "index:symbol,date";
-			for (idx_t i = 0; i < this->set_names.size(); i++) {
-				if (this->set_groups[i].empty()) {
+		ColumnDataCollection staged_coll(context, staged_types);
+		ColumnDataAppendState staged_append;
+		staged_coll.InitializeAppend(staged_append);
+		DataChunk out_chunk;
+		out_chunk.Initialize(context, staged_types);
+		idx_t out_n = 0;
+		ColumnDataScanState ss;
+		keys.InitializeScan(ss);
+		DataChunk kc;
+		keys.InitializeScanChunk(kc);
+		while (keys.Scan(ss, kc)) {
+			for (idx_t r = 0; r < kc.size(); r++) {
+				int64_t rid = kc.GetValue(0, r).GetValue<int64_t>();
+				auto it = set_by_row.find(rid);
+				if (it == set_by_row.end()) {
 					continue;
 				}
-				if (this->set_groups[i] == "index") {
-					index_cols += "," + this->set_names[i];
-				} else {
-					mapping += ";" + this->set_groups[i] + ":" + this->set_names[i];
+				// kc layout: (rowid, symbol, date) — v8
+				out_chunk.SetValue(0, out_n, kc.GetValue(1, r)); // symbol
+				out_chunk.SetValue(1, out_n, kc.GetValue(2, r)); // date
+				for (idx_t k = 0; k < it->second.size(); k++) {
+					out_chunk.SetValue(2 + k, out_n, it->second[k]);
+				}
+				out_n++;
+				if (out_n >= STANDARD_VECTOR_SIZE) {
+					out_chunk.SetCardinality(out_n);
+					staged_coll.Append(out_chunk);
+					out_chunk.Reset();
+					out_n = 0;
 				}
 			}
-			if (index_cols != "symbol,date") {
-				mapping = "index:" + index_cols + mapping.substr(strlen("index:symbol,date"));
-			}
-
-			Connection con2(db);
-			auto result = con2.Query("SELECT rows_inserted, rows_updated FROM aligned_upsert('" +
-			                         StringUtil::Replace(tbl, "'", "''") + "', '" +
-			                         StringUtil::Replace(staged, "'", "''") + "', '" +
-			                         StringUtil::Replace(mapping, "'", "''") + "', root='" +
-			                         StringUtil::Replace(rt, "'", "''") + "')");
-			if (result->HasError()) {
-				err = result->GetError();
-				return;
-			}
-			auto &mat = result->Cast<MaterializedQueryResult>();
-			if (mat.RowCount() > 0) {
-				g.row_count = mat.GetValue<int64_t>(1, 0); // rows_updated
-			}
-		} catch (std::exception &ex) {
-			err = ex.what();
+			kc.Reset();
 		}
-	});
-	DmlWorkerPool::Instance().Wait();
-
-	if (!staged.empty()) {
-		try {
-			FileSystem::CreateLocal()->RemoveFile(staged);
-		} catch (...) {
+		if (out_n > 0) {
+			out_chunk.SetCardinality(out_n);
+			staged_coll.Append(out_chunk);
 		}
+
+		// Upsert mapping (v8): index:symbol,date(+ any index-group set
+		// columns); each non-index set group gets its own mapping segment.
+		string index_cols = "symbol,date";
+		string mapping = "index:symbol,date";
+		for (idx_t i = 0; i < set_names.size(); i++) {
+			if (set_groups[i].empty()) {
+				continue;
+			}
+			if (set_groups[i] == "index") {
+				index_cols += "," + set_names[i];
+			} else {
+				mapping += ";" + set_groups[i] + ":" + set_names[i];
+			}
+		}
+		if (index_cols != "symbol,date") {
+			mapping = "index:" + index_cols + mapping.substr(strlen("index:symbol,date"));
+		}
+
+		auto result = AlignedUpsertFromCollection(context, table, root, mapping, staged_coll, staged_names);
+		g.row_count = result.rows_updated;
+	} catch (std::exception &ex) {
+		throw IOException("aligned UPDATE failed: %s", ex.what());
 	}
-	if (!err.empty()) {
-		throw IOException("aligned UPDATE failed: %s", err);
-	}
+
 	return SinkFinalizeType::READY;
 }
 
