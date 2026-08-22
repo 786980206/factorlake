@@ -10,7 +10,10 @@
   --tx:#1f2328; --mut:#656d76; --dim:#8c959f;
   --cyan:#0969da; --teal:#0a7b83; --org:#bc4c00; --grn:#1a7f37;
   --prp:#8250df; --red:#cf222e; --yel:#9a6700;
-  --sel:rgba(9,105,218,.08);
+  /* per-level accent colors */
+  --l1:#0a7b83; --l1bg:rgba(10,123,131,.08); --l1bd:rgba(10,123,131,.45);  /* partition: teal */
+  --l2:#9a6700; --l2bg:rgba(154,103,0,.08); --l2bd:rgba(154,103,0,.45);  /* part: amber */
+  --l3:#8250df; --l3bg:rgba(130,80,223,.08); --l3bd:rgba(130,80,223,.45);  /* rg: purple */
 }
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;overflow:hidden}
@@ -96,7 +99,18 @@ body{
 }
 .group-more span{font-size:2.5vh;color:var(--dim)}
 
-/* ===== L1: Partition — visible by default, click to select+expand ===== */
+/* ===== Spotlight: when something is selected, dim unselected peers ===== */
+.table-box.has-sel .partition:not(.selected),
+.table-box.has-sel .part:not(.selected),
+.table-box.has-sel .rg:not(.selected){opacity:.45;filter:saturate(.5)}
+.table-box.has-sel-part .partition:not(.selected),
+.table-box.has-sel-part .part:not(.selected),
+.table-box.has-sel-part .rg:not(.selected){opacity:.35;filter:saturate(.3)}
+.table-box.has-sel-rg .partition:not(.selected),
+.table-box.has-sel-rg .part:not(.selected),
+.table-box.has-sel-rg .rg:not(.selected){opacity:.3;filter:saturate(.2)}
+
+/* ===== L1: Partition — teal accent ===== */
 .partition{
   border:1px solid var(--line);border-radius:8px;
   background:rgba(0,0,0,.012);overflow:hidden;cursor:pointer;
@@ -107,9 +121,10 @@ body{
 .partition.selected{flex:1 1 0;min-height:0}
 .partition:hover{border-color:var(--mut);background:rgba(0,0,0,.025)}
 .partition.selected{
-  border:2px solid var(--cyan);background:var(--sel);
-  box-shadow:0 0 12px rgba(9,105,218,.12);
+  border:2px solid var(--l1bd);background:var(--l1bg);
+  box-shadow:0 0 12px rgba(10,123,131,.15);
 }
+.partition.selected .partition-header{color:var(--l1)}
 .partition-header{
   padding:.7vh .8vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);
@@ -119,7 +134,7 @@ body{
 .partition-body{display:none;flex-direction:column;gap:.6vh;padding:0 .6vw .8vh;flex:1;min-height:0;overflow:auto}
 .partition.selected .partition-body{display:flex}
 
-/* ===== L2: Part file — click to select+expand ===== */
+/* ===== L2: Part file — amber accent ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;background:var(--panel);
   overflow:hidden;cursor:pointer;transition:all .25s;
@@ -129,9 +144,10 @@ body{
 .part.selected{flex:1 1 0;min-height:0}
 .part:hover{border-color:var(--mut)}
 .part.selected{
-  border:2px solid var(--cyan);background:var(--sel);
-  box-shadow:0 0 10px rgba(9,105,218,.1);
+  border:2px solid var(--l2bd);background:var(--l2bg);
+  box-shadow:0 0 10px rgba(154,103,0,.15);
 }
+.part.selected .part-header{color:var(--l2)}
 .part-header{
   padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);user-select:none;
@@ -141,7 +157,7 @@ body{
 .part-body{display:none;padding:.6vh .6vw .7vh;flex-direction:column;gap:.5vh;flex:1;min-height:0}
 .part.selected .part-body{display:flex}
 
-/* ===== L3: Row Group blocks — same styling pattern as partition/part ===== */
+/* ===== L3: Row Group blocks — purple accent ===== */
 .rgs{display:flex;flex-direction:column;gap:5px;align-items:stretch;flex:1}
 .rg{
   border:1px solid var(--line2);border-radius:6px;background:var(--panel);
@@ -152,9 +168,10 @@ body{
 .rg.selected{flex:1 1 0;min-height:0}
 .rg:hover{border-color:var(--mut)}
 .rg.selected{
-  border:2px solid var(--cyan);background:var(--sel);
-  box-shadow:0 0 10px rgba(9,105,218,.1);
+  border:2px solid var(--l3bd);background:var(--l3bg);
+  box-shadow:0 0 10px rgba(130,80,223,.15);
 }
+.rg.selected .rg-label{color:var(--l3)}
 .rg-label{
   padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.2vh;font-weight:500;
@@ -164,6 +181,10 @@ body{
 .rg-B .rg-label{color:var(--org)}
 .rg-C .rg-label{color:var(--grn)}
 .rg-D .rg-label{color:var(--prp)}
+.rg.selected.rg-A .rg-label,
+.rg.selected.rg-B .rg-label,
+.rg.selected.rg-C .rg-label,
+.rg.selected.rg-D .rg-label{color:var(--l3)}
 .rg-A{border-left:3px solid rgba(9,105,218,.4)}
 .rg-B{border-left:3px solid rgba(188,76,0,.4)}
 .rg-C{border-left:3px solid rgba(26,127,55,.4)}
@@ -670,8 +691,17 @@ body{
 <script>
 "use strict";
 (function(){
-  var selPartition = null;  // currently selected partition key
-  var selPart = null;       // currently selected part key
+  var selPartition = null;
+  var selPart = null;
+  var selRG = null;
+  var tableBox = document.querySelector(".table-box");
+
+  function updateSpotlight(){
+    tableBox.classList.remove("has-sel","has-sel-part","has-sel-rg");
+    if (selRG) tableBox.classList.add("has-sel","has-sel-part","has-sel-rg");
+    else if (selPart) tableBox.classList.add("has-sel","has-sel-part");
+    else if (selPartition) tableBox.classList.add("has-sel");
+  }
 
   // Click partition → toggle all groups' same-data-p partition in sync
   document.querySelectorAll(".partition").forEach(function(p){
@@ -680,25 +710,27 @@ body{
       var key = p.getAttribute("data-p");
       var isOn = p.classList.contains("selected");
 
-      // Clear all partition selections across all groups
       document.querySelectorAll(".partition.selected").forEach(function(x){
         x.classList.remove("selected");
       });
-      // Clear all part selections too
       document.querySelectorAll(".part.selected").forEach(function(x){
         x.classList.remove("selected");
       });
+      document.querySelectorAll(".rg.selected").forEach(function(x){
+        x.classList.remove("selected");
+      });
       selPart = null;
+      selRG = null;
 
       if (isOn) {
         selPartition = null;
       } else {
-        // Select the same partition in ALL groups
         document.querySelectorAll('.partition[data-p="'+key+'"]').forEach(function(x){
           x.classList.add("selected");
         });
         selPartition = key;
       }
+      updateSpotlight();
     });
   });
 
@@ -710,19 +742,17 @@ body{
       var partKey = pt.getAttribute("data-part");
       var isOn = pt.classList.contains("selected");
 
-      // Clear all part selections
       document.querySelectorAll(".part.selected").forEach(function(x){
         x.classList.remove("selected");
       });
-      // Clear all RG selections
       document.querySelectorAll(".rg.selected").forEach(function(x){
         x.classList.remove("selected");
       });
+      selRG = null;
 
       if (isOn) {
         selPart = null;
       } else {
-        // Make sure parent partition is selected
         if (selPartition !== pKey) {
           document.querySelectorAll(".partition.selected").forEach(function(x){
             x.classList.remove("selected");
@@ -732,12 +762,12 @@ body{
           });
           selPartition = pKey;
         }
-        // Select the same part in ALL groups under the same partition
         document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"]').forEach(function(x){
           x.classList.add("selected");
         });
         selPart = partKey;
       }
+      updateSpotlight();
     });
   });
 
@@ -748,17 +778,19 @@ body{
       var rgKey = rg.getAttribute("data-rg");
       var isOn = rg.classList.contains("selected");
 
-      // Clear all RG selections
       document.querySelectorAll(".rg.selected").forEach(function(x){
         x.classList.remove("selected");
       });
 
       if (!isOn) {
-        // Select the same RG letter in ALL groups
         document.querySelectorAll('.rg[data-rg="'+rgKey+'"]').forEach(function(x){
           x.classList.add("selected");
         });
+        selRG = rgKey;
+      } else {
+        selRG = null;
       }
+      updateSpotlight();
     });
   });
 })();
