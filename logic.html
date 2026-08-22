@@ -113,8 +113,9 @@ body{
   user-select:none;
 }
 .partition-header .tag{color:var(--dim);font-size:1.2vh}
-.partition-body{display:none;flex-direction:column;gap:.5vh;padding:0 .6vw .6vh}
+.partition-body{display:none;flex-direction:column;gap:.6vh;padding:0 .6vw .8vh}
 .partition.selected .partition-body{display:flex}
+.partition.selected{flex:3 }
 
 /* ===== L2: Part file — click to select+expand ===== */
 .part{
@@ -124,22 +125,22 @@ body{
 .part:hover{border-color:var(--mut)}
 .part.selected{
   border:2px solid var(--cyan);background:var(--sel);
-  box-shadow:0 0 10px rgba(9,105,218,.1);
+  box-shadow:0 0 10px rgba(9,105,218,.1);flex:3;
 }
 .part-header{
   padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);user-select:none;
 }
 .part-header .rows{color:var(--mut);font-size:1.1vh}
-.part-body{display:none;padding:.4vh .6vw .5vh}
-.part.selected .part-body{display:block}
+.part-body{display:none;padding:.6vh .6vw .7vh;flex-direction:column;gap:.5vh}
+.part.selected .part-body{display:flex}
 
-/* ===== L3: Row Group blocks ===== */
-.rgs{display:flex;gap:4px;align-items:stretch}
+/* ===== L3: Row Group blocks (vertical stack — RG-A on top, RG-B below, etc.) ===== */
+.rgs{display:flex;flex-direction:column;gap:5px;align-items:stretch}
 .rg{
-  flex:1;height:3.5vh;border-radius:4px;min-width:14px;
+  flex:1;border-radius:4px;min-height:3vh;
   display:flex;align-items:center;justify-content:center;
-  font-size:1.1vh;font-family:Consolas,monospace;font-weight:500;
+  font-size:1.2vh;font-family:Consolas,monospace;font-weight:500;
   cursor:default;position:relative;transition:transform .15s;
   overflow:hidden;white-space:nowrap;
 }
