@@ -696,6 +696,9 @@ static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buff
 static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind, MutateGlobalState &gstate,
                              vector<TargetMap> &targets) {
 	auto &fs = FileSystem::GetFileSystem(context);
+	// Acquire the table-level write lock (file-based mutual exclusion across
+	// concurrent aligned_upsert/aligned_delete/aligned_compact invocations).
+	TableWriteLock write_lock(fs, bind.plan.table_path);
 	idx_t txid = NextTransactionId();
 	gstate.txid = txid;
 	string tmp_root = bind.plan.table_path + "/_tmp/transaction-" + to_string(txid);

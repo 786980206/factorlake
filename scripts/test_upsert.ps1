@@ -320,6 +320,35 @@ Expect-Equal 'atl alpha003 non-null (r%11==0 in 1500..1999)' $out.Trim() '45'
 Remove-Item $sA1, $sA2, $sA3 -Force -ErrorAction SilentlyContinue
 Remove-Item $atldir -Recurse -Force -ErrorAction SilentlyContinue
 
+# ---- concurrent write lock (stale lock file blocks writes) --------------------
+$lockdir = 'D:/proj/factorlake/testdata/upsert_lock'
+$lockTable = 'locktest'
+$lockTableDir = Join-Path $lockdir $lockTable
+Remove-Item $lockdir -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $lockdir | Out-Null
+$sL1 = 'D:/proj/factorlake/testdata/lock_s1.parquet'
+& $duckdb -c "COPY (SELECT 'a' AS symbol, DATE '2026-01-01' AS date, 1.0::DOUBLE AS v) TO '$sL1' (FORMAT PARQUET);" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'lock staging failed' }
+$lockMap = "index:symbol,date;f/m1:v"
+$out = Run-DuckDB "SET aligned_data_root='$lockdir'; SELECT rows_inserted FROM aligned_upsert('$lockTable', '$sL1', '$lockMap');"
+Expect-Equal 'lock write 1 inserts' $out.Trim() '1'
+# Create a stale lock file — the next write should be blocked
+$lockFile = Join-Path $lockTableDir '.aligned_write.lock'
+if (-not (Test-Path $lockTableDir)) { New-Item -ItemType Directory -Force -Path $lockTableDir | Out-Null }
+Set-Content -Path $lockFile -Value 'locked' -Encoding Ascii
+if (Run-DuckDB-ExpectError "SET aligned_data_root='$lockdir'; SELECT * FROM aligned_upsert('$lockTable', '$sL1', '$lockMap');" 'another write is in progress') {
+    Write-Host 'PASS: stale lock file blocks concurrent write'
+} else { Write-Host 'FAIL: stale lock file did not block write'; $script:failures++ }
+# After removing the lock, writes should succeed again (same key = update, not insert)
+Remove-Item $lockFile -Force
+$out = Run-DuckDB "SET aligned_data_root='$lockdir'; SELECT rows_inserted, rows_updated FROM aligned_upsert('$lockTable', '$sL1', '$lockMap');"
+Expect-Equal 'lock write after cleanup (ins, upd)' $out.Trim() '0,1'
+# Verify the lock file is cleaned up after a successful write
+if (-not (Test-Path $lockFile)) { Write-Host 'PASS: lock file removed after write' }
+else { Write-Host 'FAIL: lock file not removed after write'; $script:failures++ }
+Remove-Item $sL1 -Force -ErrorAction SilentlyContinue
+Remove-Item $lockdir -Recurse -Force -ErrorAction SilentlyContinue
+
 # ---- cleanup -----------------------------------------------------------------
 Remove-Item $s1, $s2, $s3, $s4, $s5, $s6, $s7, $s8 -Force -ErrorAction SilentlyContinue
 Remove-Item $s9f, $s10f -Force -ErrorAction SilentlyContinue

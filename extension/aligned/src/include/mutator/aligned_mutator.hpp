@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "catalog/manifest.hpp"
@@ -8,6 +9,57 @@
 #include <map>
 
 namespace duckdb {
+
+//! RAII file-based write lock for an AlignedTable directory. Creates a
+//! `.aligned_write.lock` file in the table root; if the lock file already
+//! exists, throws an error (another writer is active). The lock is released
+//! by deleting the file in the destructor. This is advisory mutual exclusion
+//! — it prevents concurrent aligned_upsert/aligned_delete/aligned_compact on
+//! the same table from corrupting the staging + move protocol. It is NOT a
+//! replacement for proper filesystem transactions (the staging + move is
+//! already crash-safe: an interrupted writer leaves only a `_tmp/` tree that
+//! readers never see).
+class TableWriteLock {
+public:
+	TableWriteLock(FileSystem &fs, const string &table_path) : fs(fs), lock_path(table_path + "/.aligned_write.lock") {
+		// Ensure the table directory exists (first write of an empty table
+		// may not have created it yet).
+		if (!fs.DirectoryExists(table_path)) {
+			fs.CreateDirectoriesRecursive(table_path);
+		}
+		if (fs.FileExists(lock_path)) {
+			throw IOException("Aligned table '%s': another write is in progress (lock file exists: %s). "
+			                  "Retry after the current write completes or remove the stale lock file if the "
+			                  "previous writer crashed.",
+			                  table_path, lock_path);
+		}
+		auto handle = fs.OpenFile(lock_path, FileFlags::FILE_FLAGS_FILE_CREATE | FileFlags::FILE_FLAGS_WRITE);
+		const char *msg = "locked\n";
+		handle->Write(const_cast<char *>(msg), 7);
+		handle->Close();
+		locked = true;
+	}
+	~TableWriteLock() {
+		if (locked) {
+			try {
+				fs.RemoveFile(lock_path);
+			} catch (...) {
+				// best-effort: a stale lock is harmless (next writer clears it)
+			}
+		}
+	}
+	TableWriteLock(const TableWriteLock &) = delete;
+	TableWriteLock &operator=(const TableWriteLock &) = delete;
+	TableWriteLock(TableWriteLock &&other) noexcept
+	    : fs(other.fs), lock_path(std::move(other.lock_path)), locked(other.locked) {
+		other.locked = false;
+	}
+
+private:
+	FileSystem &fs;
+	string lock_path;
+	bool locked = false;
+};
 
 //! One target part of a mutation: either an existing part to rewrite or a
 //! fresh part for a new partition.

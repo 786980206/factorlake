@@ -246,3 +246,23 @@ query I
 SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT count(alpha003) FROM aligned_table('atltest')
 ----
 45
+
+# --- concurrent write lock: a stale .aligned_write.lock file blocks the next write ---
+mkdir {TEST_DIR}/locktest_data
+
+statement ok
+COPY (SELECT 'a' AS symbol, DATE '2026-01-01' AS date, 1.0::DOUBLE AS v) TO '{TEST_DIR}/lock_s1.parquet' (FORMAT PARQUET)
+
+query II
+SET aligned_data_root='{TEST_DIR}/locktest_data'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '{TEST_DIR}/lock_s1.parquet', 'index:symbol,date;f/m1:v')
+----
+1,0
+
+# Create a stale lock file manually — the next write should be blocked
+writefile {TEST_DIR}/locktest_data/t/.aligned_write.lock
+locked
+
+statement error
+SET aligned_data_root='{TEST_DIR}/locktest_data'; SELECT * FROM aligned_upsert('t', '{TEST_DIR}/lock_s1.parquet', 'index:symbol,date;f/m1:v')
+----
+another write is in progress

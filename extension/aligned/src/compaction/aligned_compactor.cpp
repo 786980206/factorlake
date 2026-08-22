@@ -1,6 +1,7 @@
 #include "compaction/aligned_compactor.hpp"
 
 #include "catalog/manifest.hpp"
+#include "mutator/aligned_mutator.hpp"
 #include "resolver/row_space.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -142,6 +143,10 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 	gstate.done = true;
 
 	auto &fs = FileSystem::GetFileSystem(context);
+
+	// Acquire the table-level write lock (file-based mutual exclusion across
+	// concurrent aligned_upsert/aligned_delete/aligned_compact invocations).
+	TableWriteLock write_lock(fs, bind.plan.table_path);
 
 	// txid for the staging directory name (in-process counter, not persisted)
 	idx_t txid = NextTransactionId();
