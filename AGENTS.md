@@ -243,7 +243,7 @@ extension/aligned/src/
 
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
-- PS 脚本：test_aligned 42/42、test_upsert 50/50、test_dml 7/7、test_compaction 16/16、test_parallel 8/8
+- PS 脚本：test_aligned 42/42、test_upsert 50/50、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
 - 当前总：SQLLogicTest 124/124 + 5 PS 套件全 PASS
 
 ### 扩展发布

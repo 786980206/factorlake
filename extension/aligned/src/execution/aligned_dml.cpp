@@ -96,14 +96,56 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 		return SinkFinalizeType::READY;
 	}
 
-	// Direct C++ call — no worker thread, no Connection, no temp parquet.
-	// The mutator (BuildTablePlan + KeyResolver + ExecuteAndCommit) does only
-	// filesystem + parquet I/O; it does NOT touch the catalog or executor, so
-	// there is no nested-query deadlock risk on the pipeline thread.
+	// For large INSERTs, batch the upsert to avoid materializing all rows
+	// in memory at once. Each batch is a separate mutator transaction
+	// (re-acquires write lock, re-reads table plan). The batch size is
+	// chosen to balance memory usage vs per-batch metadata overhead.
+	static constexpr idx_t INSERT_BATCH_SIZE = 1048576; // 1M rows per batch
+
 	try {
-		auto result = AlignedUpsertFromCollection(context, table, root, "", g.collection, row_names);
-		g.rows_inserted = result.rows_inserted;
-		g.rows_updated = result.rows_updated;
+		if (g.collection.Count() <= INSERT_BATCH_SIZE) {
+			// Small enough — single call (the common case).
+			auto result = AlignedUpsertFromCollection(context, table, root, "", g.collection, row_names);
+			g.rows_inserted = result.rows_inserted;
+			g.rows_updated = result.rows_updated;
+		} else {
+			// Large INSERT — scan the collection in batches, calling the
+			// mutator per batch. Each batch is an independent transaction.
+			// The write lock ensures batches are serialized (no concurrent
+			// writes from other processes), and the mutator re-reads the
+			// table plan each time to pick up parts written by prior batches.
+			ColumnDataScanState scan_state;
+			g.collection.InitializeScan(scan_state);
+			DataChunk scan_chunk;
+			g.collection.InitializeScanChunk(scan_chunk);
+
+			// Batch collection — reused across batches to avoid reallocation.
+			ColumnDataCollection batch(context, row_types);
+			ColumnDataAppendState batch_append;
+			idx_t batch_rows = 0;
+			while (g.collection.Scan(scan_state, scan_chunk)) {
+				if (scan_chunk.size() == 0) {
+					continue;
+				}
+				batch.Append(scan_chunk);
+				batch_rows += scan_chunk.size();
+
+				if (batch_rows >= INSERT_BATCH_SIZE) {
+					auto result = AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
+					g.rows_inserted += result.rows_inserted;
+					g.rows_updated += result.rows_updated;
+					batch.Reset();
+					batch.InitializeAppend(batch_append);
+					batch_rows = 0;
+				}
+			}
+			// Flush the final partial batch.
+			if (batch_rows > 0) {
+				auto result = AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
+				g.rows_inserted += result.rows_inserted;
+				g.rows_updated += result.rows_updated;
+			}
+		}
 	} catch (std::exception &ex) {
 		throw IOException("aligned INSERT failed: %s", ex.what());
 	}

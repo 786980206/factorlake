@@ -207,6 +207,10 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
   追加新行**（而非新建 part），减少 part 碎片化。该决策需跨组一致：若任一组
   的末 part 在不同索引、行数不同、已达阈值或缺少某映射列（schema evolution），
   则**整分区回退**为新建 part。单个 batch 可小幅超限（不做硬截断）。
+- **大批量 INSERT 分批提交**：标准 INSERT 通过 catalog 钩子直写 parquet 列组。
+  当单次 INSERT 行数 > 1M 时，自动分批调用 mutator（每批 1M 行，各自独立事务），
+  避免 10M+ 行全量物化到内存导致 OOM。每批重新获取写锁 + 重读表 plan（拾取前批
+  写入的 part）。
 - **提交协议**：
   1. 写入 `<table>/_tmp/transaction-<txid>/`，`_tmp/` 对 Reader 不可见。
   2. 提交时 part 以 v6 名 `{idx:04d}-{rows:10d}.parquet` 落位（rename 到正式位置）。

@@ -242,8 +242,13 @@
   `std::map<int64_t, vector<Value>>` 存 set 值 + 逐行 `GetValue`/`SetValue` join。
   改为 sorted vector + merge-join（两端按 rowid 排序，单遍扫描），消除
   `std::map` 开销。
+- **DML INSERT 大批量分批提交**：`PhysicalAlignedInsert::Finalize` 原先将全部
+  行物化到单个 `ColumnDataCollection` 后一次调用 mutator，10M+ 行可能 OOM。改为
+  阈值 1M 行分批：超过 1M 行时扫描 collection 按批调用
+  `AlignedUpsertFromCollection`，每批独立事务（重获写锁 + 重读 plan）。小 INSERT
+  （≤1M 行）走原单次路径（零开销）。新增 test_dml.ps1 1.1M 行批量 INSERT 测试
+  （count/distinct/date filter 全验证通过）。
 
 ### 后续待办
 
-- DML INSERT 超大 batch 内存控制（当前全部物化到内存 ColumnDataCollection，
-  10M+ 行可能 OOM；需流式 mutator API）
+- （暂无已知遗留项）

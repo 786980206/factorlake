@@ -95,12 +95,37 @@ SELECT count(*) FROM al.$table WHERE symbol = '009991';
 "@
 Expect-Equal 'deleted key gone' ($out -split "`r?`n")[-1].Trim() '0'
 
-# ---- column groups untouched by reads elsewhere -------------------------------
+# ---- aligned_table sees same state (read + write consistency) -----------------
 $out = Run-DuckDB @"
 $setRoot
 SELECT count(*) FROM aligned_table('$table');
 "@
 Expect-Equal 'aligned_table sees same state' $out.Trim() $afterDelete
+
+# ---- large batch INSERT (>1M rows, exercises batched upsert path) ------------
+$batchDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'testdata_batchtmp'
+$batchDirFwd = $batchDir.Replace('\', '/')
+if (Test-Path $batchDir) { Remove-Item -Recurse -Force $batchDir }
+New-Item -ItemType Directory -Force -Path $batchDir | Out-Null
+
+$out = Run-DuckDB @"
+ATTACH '$batchDirFwd' AS al (TYPE ALIGNED);
+CREATE TABLE al.batchtest (symbol VARCHAR, date DATE, val DOUBLE);
+INSERT INTO al.batchtest SELECT
+  printf('%06d', range),
+  DATE '2026-01-01' + CAST(range % 30 AS INTEGER),
+  range * 1.5
+FROM range(0, 1100000);
+SELECT count(*) FROM al.batchtest;
+SELECT count(DISTINCT symbol) FROM al.batchtest;
+SELECT count(*) FROM al.batchtest WHERE date = DATE '2026-01-01';
+SELECT sum(val) FROM al.batchtest WHERE date = DATE '2026-01-01';
+"@
+$lines = $out -split "`r?`n" | Where-Object { $_.Trim() -ne '' }
+Expect-Equal 'batch INSERT row count' $lines[-4].Trim() '1100000'
+Expect-Equal 'batch INSERT distinct symbols' $lines[-3].Trim() '1100000'
+Expect-Equal 'batch INSERT date filter count' $lines[-2].Trim() '36667'
+Remove-Item -Recurse -Force $batchDir -ErrorAction SilentlyContinue
 
 Write-Host ''
 if ($script:failures -eq 0) {
