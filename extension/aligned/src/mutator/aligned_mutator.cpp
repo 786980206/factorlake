@@ -17,6 +17,10 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <atomic>
+#include <future>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 namespace duckdb {
@@ -708,6 +712,13 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 
 	try {
 		// Pass A: stage every rewrite (visible to readers only after the move).
+		// Collect all targets that need rewriting (independent of each other).
+		struct RewriteTask {
+			MutateTarget *target;
+			PartMergeInput input;
+			const GroupPlan *group;
+		};
+		vector<RewriteTask> rewrite_tasks;
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &group = bind.plan.groups[gi];
 			for (auto &kv : targets[gi]) {
@@ -737,16 +748,80 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				in.update_cols = t.mapped_names;
 				in.deletes = &t.delete_rows;
 				in.rgs = ALIGNED_DEFAULT_RG_ROWS;
-				t.new_row_count = RewritePart(context, in);
-				if (t.new_row_count == 0) {
-					// Only a pre-checked single-part partition can be emptied
-					// (multi-part empties fail fast before staging); the part
-					// is discarded and the partition removed below.
-					removed_partitions.insert(t.partition_key);
+				rewrite_tasks.push_back({&t, in, &group});
+			}
+		}
+
+		// Execute rewrites in parallel (each RewritePart is independent: own
+		// reader/writer, own buffers, no shared mutable state). The DuckDB
+		// BufferManager and FileSystem are thread-safe; ColumnDataCollection
+		// buffers are read-only during rewrite.
+		auto num_threads = MinValue<idx_t>(rewrite_tasks.size(),
+		                                   std::thread::hardware_concurrency());
+		if (num_threads <= 1 || rewrite_tasks.size() <= 1) {
+			// Serial path (single rewrite or single-core)
+			for (auto &task : rewrite_tasks) {
+				task.target->new_row_count = RewritePart(context, task.input);
+				if (task.target->new_row_count == 0) {
+					removed_partitions.insert(task.target->partition_key);
 					continue;
 				}
 				gstate.parts_rewritten++;
 			}
+		} else {
+			// Parallel path
+			std::atomic<idx_t> next_task {0};
+			std::atomic<idx_t> parts_done {0};
+			std::atomic<bool> failed {false};
+			std::string error_msg;
+			std::mutex error_mutex;
+			std::mutex removed_mutex;
+			vector<std::thread> threads;
+			threads.reserve(num_threads);
+			for (idx_t ti = 0; ti < num_threads; ti++) {
+				threads.emplace_back([&]() {
+					while (true) {
+						if (failed.load()) {
+							return;
+						}
+						idx_t task_idx = next_task.fetch_add(1);
+						if (task_idx >= rewrite_tasks.size()) {
+							return;
+						}
+						auto &task = rewrite_tasks[task_idx];
+						try {
+							task.target->new_row_count = RewritePart(context, task.input);
+							if (task.target->new_row_count == 0) {
+								std::lock_guard<std::mutex> lock(removed_mutex);
+								removed_partitions.insert(task.target->partition_key);
+							} else {
+								parts_done.fetch_add(1);
+							}
+						} catch (std::exception &e) {
+							bool expected = false;
+							if (failed.compare_exchange_strong(expected, true)) {
+								std::lock_guard<std::mutex> lock(error_mutex);
+								error_msg = e.what();
+							}
+							return;
+						} catch (...) {
+							bool expected = false;
+							if (failed.compare_exchange_strong(expected, true)) {
+								std::lock_guard<std::mutex> lock(error_mutex);
+								error_msg = "unknown error during parallel rewrite";
+							}
+							return;
+						}
+					}
+				});
+			}
+			for (auto &t : threads) {
+				t.join();
+			}
+			if (failed.load()) {
+				throw IOException("Aligned table: parallel rewrite failed: %s", error_msg);
+			}
+			gstate.parts_rewritten += parts_done.load();
 		}
 		// Pass B: move the staged parts into place, then delete the superseded
 		// old parts (same-name updates are replaced by the move).
