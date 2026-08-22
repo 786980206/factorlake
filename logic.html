@@ -163,6 +163,29 @@ body{
 .rg-C{background:rgba(26,127,55,.10);border:1px solid rgba(26,127,55,.25);color:var(--grn)}
 .rg-D{background:rgba(130,80,223,.10);border:1px solid rgba(130,80,223,.25);color:var(--prp)}
 
+/* RG selected state */
+.rg.selected{
+  flex:1 1 0;max-height:none;
+  border-width:2px;
+}
+.rg.selected.rg-A{background:rgba(9,105,218,.18);border-color:rgba(9,105,218,.6)}
+.rg.selected.rg-B{background:rgba(188,76,0,.16);border-color:rgba(188,76,0,.5)}
+.rg.selected.rg-C{background:rgba(26,127,55,.16);border-color:rgba(26,127,55,.5)}
+.rg.selected.rg-D{background:rgba(130,80,223,.16);border-color:rgba(130,80,223,.5)}
+
+/* L4: Column list inside RG — vertically stacked fields */
+.rg-body{
+  display:none;flex-direction:column;gap:3px;
+  padding:.4vh .5vw;flex:1;min-height:0;overflow:auto;
+  align-items:stretch;
+}
+.rg.selected .rg-body{display:flex}
+.rg-body .col-chip{
+  font-family:Consolas,monospace;font-size:1.1vh;font-weight:500;
+  padding:2px 6px;border-radius:3px;text-align:center;white-space:nowrap;
+  background:rgba(255,255,255,.5);
+}
+
 /* ===== Empty partition ===== */
 .partition-empty{
   padding:.5vh .8vw;text-align:center;font-size:1.2vh;
@@ -187,7 +210,7 @@ body{
 
 <div class="topbar">
   <div class="logo">AlignedTable<span>目录结构</span></div>
-  <div class="hint">点击分区或文件 · <b>所有列组同步展开</b></div>
+  <div class="hint">点击分区 → 文件 → Row Group → 字段 · <b>所有列组同步展开</b></div>
 </div>
 
 <div class="slide">
@@ -223,8 +246,24 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
-                      <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">RG-B</div>
+                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · rows 0–16383">RG-A
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B · rows 16384–2997">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -235,8 +274,24 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">RG-B</div>
-                      <div class="rg rg-C" data-tip="RG-C · rows 4998–5997">RG-C</div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B · rows 2998–4997">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-C" data-rg="C" data-tip="RG-C · rows 4998–5997">RG-C
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -256,9 +311,33 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
-                      <div class="rg rg-B" data-tip="RG-B · rows 16384–32767">RG-B</div>
-                      <div class="rg rg-C" data-tip="RG-C · rows 32768–5997">RG-C</div>
+                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · rows 0–16383">RG-A
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B · rows 16384–32767">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-C" data-rg="C" data-tip="RG-C · rows 32768–5997">RG-C
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -278,7 +357,15 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">RG-D</div>
+                      <div class="rg rg-D" data-rg="D" data-tip="RG-D · 1 行（INSERT 追加）">RG-D
+                        <div class="rg-body">
+                          <div class="col-chip">date</div>
+                          <div class="col-chip">symbol</div>
+                          <div class="col-chip">close</div>
+                          <div class="col-chip">volume</div>
+                          <div class="col-chip">amount</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -306,8 +393,22 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-A" data-tip="RG-A · 与 index part 0000 同行区间">RG-A</div>
-                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index part 0000 同行区间">RG-A
+                        <div class="rg-body">
+                          <div class="col-chip">alpha001</div>
+                          <div class="col-chip">alpha002</div>
+                          <div class="col-chip">…</div>
+                          <div class="col-chip">alpha101</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">alpha001</div>
+                          <div class="col-chip">alpha002</div>
+                          <div class="col-chip">…</div>
+                          <div class="col-chip">alpha101</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -318,8 +419,22 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">alpha001</div>
+                          <div class="col-chip">alpha002</div>
+                          <div class="col-chip">…</div>
+                          <div class="col-chip">alpha101</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-C" data-rg="C" data-tip="RG-C">RG-C
+                        <div class="rg-body">
+                          <div class="col-chip">alpha001</div>
+                          <div class="col-chip">alpha002</div>
+                          <div class="col-chip">…</div>
+                          <div class="col-chip">alpha101</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -339,9 +454,30 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
-                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index 同行区间">RG-A
+                        <div class="rg-body">
+                          <div class="col-chip">alpha001</div>
+                          <div class="col-chip">alpha002</div>
+                          <div class="col-chip">…</div>
+                          <div class="col-chip">alpha101</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">alpha001</div>
+                          <div class="col-chip">alpha002</div>
+                          <div class="col-chip">…</div>
+                          <div class="col-chip">alpha101</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-C" data-rg="C" data-tip="RG-C">RG-C
+                        <div class="rg-body">
+                          <div class="col-chip">alpha001</div>
+                          <div class="col-chip">alpha002</div>
+                          <div class="col-chip">…</div>
+                          <div class="col-chip">alpha101</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -379,8 +515,26 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
-                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index 同行区间">RG-A
+                        <div class="rg-body">
+                          <div class="col-chip">ma5</div>
+                          <div class="col-chip">ma10</div>
+                          <div class="col-chip">ma20</div>
+                          <div class="col-chip">ma60</div>
+                          <div class="col-chip">ma120</div>
+                          <div class="col-chip">ma250</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">ma5</div>
+                          <div class="col-chip">ma10</div>
+                          <div class="col-chip">ma20</div>
+                          <div class="col-chip">ma60</div>
+                          <div class="col-chip">ma120</div>
+                          <div class="col-chip">ma250</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -391,8 +545,26 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">ma5</div>
+                          <div class="col-chip">ma10</div>
+                          <div class="col-chip">ma20</div>
+                          <div class="col-chip">ma60</div>
+                          <div class="col-chip">ma120</div>
+                          <div class="col-chip">ma250</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-C" data-rg="C" data-tip="RG-C">RG-C
+                        <div class="rg-body">
+                          <div class="col-chip">ma5</div>
+                          <div class="col-chip">ma10</div>
+                          <div class="col-chip">ma20</div>
+                          <div class="col-chip">ma60</div>
+                          <div class="col-chip">ma120</div>
+                          <div class="col-chip">ma250</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -412,9 +584,36 @@ body{
                   </div>
                   <div class="part-body">
                     <div class="rgs">
-                      <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
-                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index 同行区间">RG-A
+                        <div class="rg-body">
+                          <div class="col-chip">ma5</div>
+                          <div class="col-chip">ma10</div>
+                          <div class="col-chip">ma20</div>
+                          <div class="col-chip">ma60</div>
+                          <div class="col-chip">ma120</div>
+                          <div class="col-chip">ma250</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-B" data-rg="B" data-tip="RG-B">RG-B
+                        <div class="rg-body">
+                          <div class="col-chip">ma5</div>
+                          <div class="col-chip">ma10</div>
+                          <div class="col-chip">ma20</div>
+                          <div class="col-chip">ma60</div>
+                          <div class="col-chip">ma120</div>
+                          <div class="col-chip">ma250</div>
+                        </div>
+                      </div>
+                      <div class="rg rg-C" data-rg="C" data-tip="RG-C">RG-C
+                        <div class="rg-body">
+                          <div class="col-chip">ma5</div>
+                          <div class="col-chip">ma10</div>
+                          <div class="col-chip">ma20</div>
+                          <div class="col-chip">ma60</div>
+                          <div class="col-chip">ma120</div>
+                          <div class="col-chip">ma250</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -517,6 +716,10 @@ body{
       document.querySelectorAll(".part.selected").forEach(function(x){
         x.classList.remove("selected");
       });
+      // Clear all RG selections
+      document.querySelectorAll(".rg.selected").forEach(function(x){
+        x.classList.remove("selected");
+      });
 
       if (isOn) {
         selPart = null;
@@ -536,6 +739,27 @@ body{
           x.classList.add("selected");
         });
         selPart = partKey;
+      }
+    });
+  });
+
+  // Click RG → toggle all groups' same-data-rg RGs in sync
+  document.querySelectorAll(".rg").forEach(function(rg){
+    rg.addEventListener("click", function(e){
+      e.stopPropagation();
+      var rgKey = rg.getAttribute("data-rg");
+      var isOn = rg.classList.contains("selected");
+
+      // Clear all RG selections
+      document.querySelectorAll(".rg.selected").forEach(function(x){
+        x.classList.remove("selected");
+      });
+
+      if (!isOn) {
+        // Select the same RG letter in ALL groups
+        document.querySelectorAll('.rg[data-rg="'+rgKey+'"]').forEach(function(x){
+          x.classList.add("selected");
+        });
       }
     });
   });
