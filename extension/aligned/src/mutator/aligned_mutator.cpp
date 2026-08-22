@@ -19,82 +19,9 @@
 
 namespace duckdb {
 
-//===----------------------------------------------------------------------===//
-// Small JSON / file helpers (same as aligned_writer / aligned_compactor)
-//===----------------------------------------------------------------------===//
-
-static void WriteTextFile(FileSystem &fs, const string &path, const string &content) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
-	// FILE_FLAGS_FILE_CREATE does not truncate an existing file: the old tail
-	// would remain past the new content (invalid JSON on rewrite).
-	handle->Truncate(0);
-	handle->Write(const_cast<char *>(content.c_str()), content.size());
-	handle->Sync();
-	handle->Close();
-}
-
-static string JsonEscape(const string &s) {
-	string out;
-	for (auto c : s) {
-		if (c == '"' || c == '\\') {
-			out += '\\';
-			out += c;
-		} else if (c == '\n') {
-			out += "\\n";
-		} else {
-			out += c;
-		}
-	}
-	return out;
-}
-
-static string JsonStringArray(const vector<string> &items) {
-	string out = "[";
-	for (idx_t i = 0; i < items.size(); i++) {
-		if (i > 0) {
-			out += ",";
-		}
-		out += "\"" + JsonEscape(items[i]) + "\"";
-	}
-	out += "]";
-	return out;
-}
-
-//! Writes _table.json with only the bootstrap config (groups + partitioning).
-//! The manifest is optional and only used for empty-table bootstrap; the
-//! writer still writes it back after each commit to preserve the group list
-//! and partition templates for the next bootstrap.
-static void WriteManifest(FileSystem &fs, const TablePlan &plan) {
-	auto &table = plan.table;
-	string partitioning;
-	if (!table.partitioning.empty()) {
-		partitioning = ",\"partitioning\":{";
-		bool first_group = true;
-		for (auto &entry : table.partitioning) {
-			if (!first_group) {
-				partitioning += ",";
-			}
-			first_group = false;
-			partitioning += "\"" + JsonEscape(entry.first) + "\":[";
-			for (idx_t i = 0; i < entry.second.size(); i++) {
-				if (i > 0) {
-					partitioning += ",";
-				}
-				partitioning += "{\"template\":\"" + JsonEscape(entry.second[i].template_str) + "\",\"source\":\"" +
-				                JsonEscape(entry.second[i].source) + "\"}";
-			}
-			partitioning += "]";
-		}
-		partitioning += "}";
-	}
-	string manifest = "{\"groups\":" + JsonStringArray(table.groups) + partitioning + "}";
-	WriteTextFile(fs, plan.table_path + "/_table.json", manifest);
-}
-
 //! In-process transaction counter (starts at 1, increments each call). Not
-//! persisted — last_txid was removed from the manifest; the counter is only
-//! used for the txid return value and the _tmp/transaction-<txid>/ staging
-//! directory name (both transient).
+//! persisted — the counter is only used for the txid return value and the
+//! _tmp/transaction-<txid>/ staging directory name (both transient).
 static idx_t NextTransactionId() {
 	static idx_t counter = 0;
 	return ++counter;
@@ -167,39 +94,25 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 
 	string root;
 	ResolveRoot(context, input, fn, root);
-	BuildTablePlan(context, root, result->table_name, result->plan);
+	auto &fs = FileSystem::GetFileSystem(context);
+	string table_dir = root + "/" + result->table_name;
 
-	// Materialize manifest-declared groups that have no parts yet (declared in
-	// _table.json at create time, first written later). Without this the
-	// mutator would reject them as "unknown group"; with it, an UPDATE for
-	// existing keys synthesizes the group's first aligned part (all-NULL rows
-	// plus the mapped values). The reader keeps ignoring part-less groups
-	// until that first write.
-	bool table_has_parts = !result->plan.groups.empty() && !result->plan.groups[0].parts.empty();
-	if (table_has_parts) {
-		for (auto &decl : result->plan.table.groups) {
-			bool found = false;
-			for (auto &g : result->plan.groups) {
-				if (StringUtil::CIEquals(g.manifest.group, decl)) {
-					found = true;
-					break;
-				}
-			}
-			if (!found) {
-				GroupPlan gp;
-				gp.manifest.group = decl;
-				gp.group_path = result->plan.table_path + "/" + decl;
-				result->plan.groups.push_back(std::move(gp));
-			}
+	// BuildTablePlan may return an empty plan (empty table: no parts at all).
+	// In that case the mutator creates the group structure from the mapping.
+	bool empty_table = !fs.DirectoryExists(table_dir) ||
+	                   fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY).empty();
+	if (empty_table) {
+		if (is_delete) {
+			throw BinderException("%s: the table '%s' is empty (no parts) — nothing to delete", fn,
+			                      result->table_name);
 		}
+	} else {
+		BuildTablePlan(context, root, result->table_name, result->plan);
 	}
 
-
-	// The index group is the first plan group; its primary key columns define
-	// the (date, symbol) contract (v7).
-	auto &index_group = result->plan.groups[0];
-	bool empty_table = index_group.parts.empty();
 	result->empty_table = empty_table;
+	result->plan.table_path = table_dir;
+	result->plan.table_name = result->table_name;
 
 
 	// Resolve the group mapping (upsert only). When `mapping` is omitted the
@@ -207,15 +120,78 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 	// so the user only needs to pass it for the first write of an empty table
 	// or to override the default placement.
 	case_insensitive_map_t<vector<string>> mapping;
+	if (!is_delete && !mapping_str.empty()) {
+		ParseMapping(mapping_str, fn, mapping);
+	}
+
+	// For an empty table (first write), create the group structure from the
+	// mapping. The mapping defines which Column Groups exist and their columns.
+	if (empty_table) {
+		if (mapping.empty()) {
+			throw BinderException("%s: mapping is required for the first write of an empty table "
+			                      "(it defines the Column Group structure); e.g. "
+			                      "'index:date,symbol,close;factor/alpha101:alpha001'",
+			                      fn);
+		}
+		// Create the index group first (must be groups[0]), then others.
+		auto index_it = mapping.find("index");
+		if (index_it == mapping.end()) {
+			throw BinderException("%s: the mapping must include an 'index' group (the primary key group)", fn);
+		}
+		{
+			GroupPlan gp;
+			gp.manifest.group = "index";
+			gp.group_path = table_dir + "/index";
+			result->plan.groups.push_back(std::move(gp));
+		}
+		for (auto &kv : mapping) {
+			if (StringUtil::CIEquals(kv.first, "index")) {
+				continue; // already added
+			}
+			GroupPlan gp;
+			gp.manifest.group = kv.first;
+			gp.group_path = table_dir + "/" + kv.first;
+			// Set lv1/lv2 from the group path
+			auto slash = kv.first.find('/');
+			if (slash != string::npos && kv.first.find('/', slash + 1) == string::npos) {
+				gp.lv1 = kv.first.substr(0, slash);
+				gp.lv2 = kv.first.substr(slash + 1);
+			}
+			result->plan.groups.push_back(std::move(gp));
+		}
+	}
+
 	result->group_mapping.resize(result->plan.groups.size());
+
+	// For a non-empty table, the mapping may name groups that don't exist yet
+	// (schema evolution: a new column group added in a later write). Materialize
+	// those groups so the mutator can write their first parts.
+	if (!empty_table && !mapping.empty()) {
+		for (auto &kv : mapping) {
+			bool found = false;
+			for (auto &g : result->plan.groups) {
+				if (StringUtil::CIEquals(g.manifest.group, kv.first)) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				GroupPlan gp;
+				gp.manifest.group = kv.first;
+				gp.group_path = table_dir + "/" + kv.first;
+				auto slash = kv.first.find('/');
+				if (slash != string::npos && kv.first.find('/', slash + 1) == string::npos) {
+					gp.lv1 = kv.first.substr(0, slash);
+					gp.lv2 = kv.first.substr(slash + 1);
+				}
+				result->plan.groups.push_back(std::move(gp));
+				result->group_mapping.resize(result->plan.groups.size());
+			}
+		}
+	}
+
 	if (!is_delete) {
 		if (mapping_str.empty()) {
-			if (empty_table) {
-				throw BinderException("%s: mapping is required for the first write of an empty table "
-				                      "(it defines the Column Group structure); e.g. "
-				                      "'index:date,symbol,close;factor/alpha101:alpha001'",
-				                      fn);
-			}
 			// Auto-derive: each source column → the group whose schema owns it.
 			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(result->source_path), ParquetOptions(context));
 			for (auto &col : reader->columns) {
@@ -230,7 +206,6 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 				}
 			}
 		} else {
-			ParseMapping(mapping_str, fn, mapping);
 			for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
 				auto &gm = result->group_mapping[gi];
 				auto &group = result->plan.groups[gi];
@@ -299,6 +274,7 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 		result->date_col = date_col;
 		result->symbol_col = symbol_col;
 	} else {
+		auto &index_group = result->plan.groups[0];
 		result->date_col = index_group.partition_source;
 		result->symbol_col = index_group.symbol_column;
 		if (is_delete) {
@@ -756,7 +732,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				in.updates = t.update_buffer.get();
 				in.update_cols = t.mapped_names;
 				in.deletes = &t.delete_rows;
-				in.rgs = TableManifest::DEFAULT_RG_ROWS;
+				in.rgs = ALIGNED_DEFAULT_RG_ROWS;
 				t.new_row_count = RewritePart(context, in);
 				if (t.new_row_count == 0) {
 					// Only a pre-checked single-part partition can be emptied
@@ -813,9 +789,6 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				gstate.parts_removed++;
 			}
 		}
-		if (gstate.parts_rewritten > 0 || gstate.parts_removed > 0) {
-			WriteManifest(fs, bind.plan);
-		}
 	} catch (...) {
 		if (fs.DirectoryExists(tmp_root)) {
 			fs.RemoveDirectory(tmp_root);
@@ -836,11 +809,12 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 }
 
 //! The index group's partition template (the mutator only needs the index
-//! group's single template — partition keys are index-defined).
+//! group's single template — partition keys are index-defined). For an empty
+//! table (first write), defaults to "month=%Y-%m".
 static string IndexTemplate(const MutateBindData &bind) {
 	auto &index_group = bind.plan.groups[0];
 	if (index_group.manifest.partitioning.empty()) {
-		return string();
+		return "month=%Y-%m"; // default for first write of an empty table
 	}
 	return index_group.manifest.partitioning[0].template_str;
 }

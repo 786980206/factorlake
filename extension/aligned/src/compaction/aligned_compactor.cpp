@@ -36,75 +36,6 @@ struct AlignedCompactGlobalState : public GlobalTableFunctionState {
 	idx_t parts_after = 0;
 };
 
-//===----------------------------------------------------------------------===//
-// Small helpers (see aligned_writer.cpp for the same helpers)
-//===----------------------------------------------------------------------===//
-
-static string JsonEscape(const string &s) {
-	string out;
-	for (auto c : s) {
-		if (c == '"' || c == '\\') {
-			out += '\\';
-			out += c;
-		} else if (c == '\n') {
-			out += "\\n";
-		} else {
-			out += c;
-		}
-	}
-	return out;
-}
-
-static string JsonStringArray(const vector<string> &items) {
-	string out = "[";
-	for (idx_t i = 0; i < items.size(); i++) {
-		if (i > 0) {
-			out += ",";
-		}
-		out += "\"" + JsonEscape(items[i]) + "\"";
-	}
-	out += "]";
-	return out;
-}
-
-static void WriteTextFile(FileSystem &fs, const string &path, const string &content) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
-	// FILE_FLAGS_FILE_CREATE does not truncate an existing file: the old tail
-	// would remain past the new content (invalid JSON on rewrite).
-	handle->Truncate(0);
-	handle->Write(const_cast<char *>(content.c_str()), content.size());
-	handle->Sync();
-	handle->Close();
-}
-
-//! Writes _table.json with only the bootstrap config (groups + partitioning).
-static void WriteManifest(FileSystem &fs, const TablePlan &plan) {
-	auto &table = plan.table;
-	string partitioning;
-	if (!table.partitioning.empty()) {
-		partitioning = ",\"partitioning\":{";
-		bool first_group = true;
-		for (auto &entry : table.partitioning) {
-			if (!first_group) {
-				partitioning += ",";
-			}
-			first_group = false;
-			partitioning += "\"" + JsonEscape(entry.first) + "\":[";
-			for (idx_t i = 0; i < entry.second.size(); i++) {
-				if (i > 0) {
-					partitioning += ",";
-				}
-				partitioning += "{\"template\":\"" + JsonEscape(entry.second[i].template_str) + "\",\"source\":\"" +
-				                JsonEscape(entry.second[i].source) + "\"}";
-			}
-			partitioning += "]";
-		}
-		partitioning += "}";
-	}
-	string manifest = "{\"groups\":" + JsonStringArray(table.groups) + partitioning + "}";
-	WriteTextFile(fs, plan.table_path + "/_table.json", manifest);
-}
-
 //! In-process transaction counter (starts at 1, increments each call). Not
 //! persisted — only used for the staging directory name.
 static idx_t NextTransactionId() {
@@ -273,7 +204,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			// cross-group indexes stay consistent). The staging path includes
 			// the partition's relative path so that multiple partitions of one
 			// group do not collide.
-			idx_t rgs = TableManifest::DEFAULT_RG_ROWS;
+			idx_t rgs = ALIGNED_DEFAULT_RG_ROWS;
 			if (row_count > 9999999999ULL) {
 				throw IOException("Aligned table '%s' group '%s': merged part '%s' holds %llu rows — more than the "
 				                  "self-describing name can represent (10 digits)",
@@ -370,12 +301,6 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 				parts_after -= parts.size();
 				parts_after += 1;
 			}
-		}
-
-		// Rewrite _table.json (groups + partitioning only; row counts unchanged
-		// — compaction preserves the row space)
-		if (dirs_compacted > 0) {
-			WriteManifest(fs, bind.plan);
 		}
 
 		// Cleanup the staging tree (best-effort for the empty parent)

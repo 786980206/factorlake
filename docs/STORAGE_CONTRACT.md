@@ -31,7 +31,6 @@ index schema 前两列 = 主键 `(date, symbol)`。
 ```
 <data_root>/
 └── <table_name>/                  ← Logical Table
-    ├── _table.json                ← 可选，仅空表 bootstrap 用（§5）
     ├── index/                     ← Column Group（必选）
     │   └── month=2026-08/         ← Physical Partition（单层）
     │       ├── 0000-0000002000.parquet
@@ -116,39 +115,21 @@ index 行空间的一部分**（缺分区 → 该区行保留、该组列全 NUL
 
 ---
 
-## 5. Manifest（`_table.json`）
+## 5. 无 Manifest（`_table.json` 已删除）
 
-### 5.1 用途
+### 5.1 设计
 
-`_table.json` 是**可选文件**，仅用于**空表 bootstrap**——当表还没有任何 part 文件时，
-Writer 需要知道要创建哪些 Column Group 以及用什么分区模板。一旦表有了数据，
-所有信息从目录结构和 Parquet footer 推导，`_table.json` 不再被读端使用。
+**没有 `_table.json`，没有 `_group.json`，没有 sidecar，没有 commit marker。**
+目录本身就是 Catalog，文件发现用 Hive layout。所有元数据从目录结构和 Parquet
+footer 推导。
 
-### 5.2 字段
+**空表不是有效表**：`BuildTablePlan` 通过 glob 发现 Group，空表（无任何 part）
+返回空 plan。Writer 的 `aligned_upsert` 第一次写入时，从 `mapping` 参数推导
+Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认 `month=%Y-%m`。
 
-```json
-{
-  "groups": ["index", "factor/alpha101", "fieldset/ma"],
-  "partitioning": {
-    "index":           [{"template": "month=%Y-%m", "source": "date"}],
-    "factor/alpha101": [{"template": "month=%Y-%m", "source": "date"}],
-    "fieldset/ma":     [{"template": "month=%Y-%m", "source": "date"}]
-  }
-}
-```
+### 5.2 不存在的字段
 
-- `groups`：Column Group 列表（`"index"` 必含，其余形如 `lv1/lv2`）。
-  **读端永不解析**——唯一例外是空表（glob 无任何 part）时给 Writer 提供 Group 骨架。
-- `partitioning`：`group → 目录模板列表`。
-  - 每个 Group 恰好一个模板；模板只有三种：`year=%Y`、`month=%Y-%m`、`date=%Y-%m-%d`。
-  - `source` 为 index schema 的 DATE/TIMESTAMP 列名（主键契约，§8）。
-  - 所有 Group 必须用同一种模板。
-  - 空表起步时必须有显式 partitioning，否则 Writer 无法决定目录布局。
-  - Writer 重写 `_table.json` 时必须原样写回 partitioning 与 groups。
-
-### 5.3 不存在的字段
-
-以下信息**不存入 manifest**，全部从目录结构或 Parquet footer 读取：
+以下信息**不持久化**，全部从目录结构或 Parquet footer 读取：
 
 | 信息 | 来源 |
 |------|------|
@@ -157,8 +138,10 @@ Writer 需要知道要创建哪些 Column Group 以及用什么分区模板。�
 | 行数 / 行区间 | part 文件名 `{idx:04d}-{rows:10d}` |
 | Row Group 大小 | 编译时常量 131072 |
 | 事务号 | 不持久化（无 CAS、无并发控制） |
+| Column Group 列表 | glob `<table>/**/*.parquet` |
+| 分区模板 | 目录结构推导（`year=`/`month=`/`date=` 段） |
 
-### 5.4 组发现（有数据时）
+### 5.3 组发现
 
 - Group 发现：glob `<table>/**/*.parquet`（跳过 `.`/`_` 段），从路径尾部向前扫描目录段，
   跳过 `name=value` 分区段，剩余目录段的最长后缀即 Group。
@@ -166,6 +149,8 @@ Writer 需要知道要创建哪些 Column Group 以及用什么分区模板。�
   - 只识别 `year=YYYY`、`month=YYYY-MM`、`date=YYYY-MM-DD` 三种段。
   - 只识别单层；多层 → 报错。
   - 无识别段 → 该 Group 无分区（仅当 index 也无分区时合法）。
+- 空表（glob 无任何 part）：`BuildTablePlan` 返回空 plan，Reader 报 "table directory
+  does not exist" 或 0 groups；Writer 从 `mapping` 参数推导 Group 结构。
 
 ---
 
@@ -215,8 +200,7 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
 - **提交协议**：
   1. 写入 `<table>/_tmp/transaction-<txid>/`，`_tmp/` 对 Reader 不可见。
   2. 提交时 part 以 v6 名 `{idx:04d}-{rows:10d}.parquet` 落位（rename 到正式位置）。
-  3. 重写 `_table.json`（临时文件 + 原子 rename），保留 `groups` 与 `partitioning`。
-  4. 崩溃 → 丢弃 `_tmp/transaction-<txid>/`（读端从不读 `_tmp/`）。
+  3. 崩溃 → 丢弃 `_tmp/transaction-<txid>/`（读端从不读 `_tmp/`）。
 - `aligned_delete`：删空最高索引 part → 直接移除；删空单 part 分区 → 整分区移除；
   删空内部 part → fail-fast（"run aligned_compact first"）。
 
@@ -226,12 +210,11 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
 
 ### 10.1 打开
 
-1. 尝试读 `_table.json`（可选）；不存在则全从目录推导。
-2. 组发现：一次 glob → 推导 Group 与分区键；**绝不使用 manifest `groups`**（空表例外）。
-3. 对每个 Group：按分区键分组 → 从文件名解析行区间 → 校验分区键 ⊆ index →
+1. 组发现：一次 glob → 推导 Group 与分区键。
+2. 对每个 Group：按分区键分组 → 从文件名解析行区间 → 校验分区键 ⊆ index →
    校验共享分区 R_i 一致 → index 分区内索引连续 → 每组读最后 1 个 part 的 footer
    （组 schema + 日期列契约）→ ValidateRowSpace。
-4. 跨 Group：index 的 R_i 表 = 权威；缺分区组不报错（扫描时 NULL 填充）。
+3. 跨 Group：index 的 R_i 表 = 权威；缺分区组不报错（扫描时 NULL 填充）。
 
 ### 10.2 执行
 
@@ -255,7 +238,7 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
 | 情形 | 行为 |
 |------|------|
 | 表目录不存在 | 报错 |
-| `_table.json` JSON 非法 | 报错 |
+| 空表（无任何 part） | Reader 报错；Writer 从 mapping 推导 Group |
 | 无 index Group | 报错 "mandatory group 'index' was not found" |
 | Group 分区键不在 index 分区键集合内 | 报错（fail-fast） |
 | 共享分区 R_i != index 的 R_i | 报错（fail-fast） |

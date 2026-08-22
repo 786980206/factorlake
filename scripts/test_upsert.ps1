@@ -71,17 +71,8 @@ COPY (
     if ($LASTEXITCODE -ne 0) { throw "staging failed: $path" }
 }
 
-# ---- fresh table (manifest only, empty table) -------------------------------
+# ---- fresh table (empty, first write populates it) ---------------------------
 if (Test-Path $tableDir) { Remove-Item $tableDir -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $tableDir | Out-Null
-Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    groups = @('index', 'factor/alpha101', 'fieldset/ma')
-    partitioning = @{
-        'index' = @(@{ template = 'month=%Y-%m'; source = 'date' })
-        'factor/alpha101' = @(@{ template = 'month=%Y-%m'; source = 'date' })
-        'fieldset/ma' = @(@{ template = 'month=%Y-%m'; source = 'date' })
-    }
-}
 
 # ---- batch 1: first write (empty table) on 2026-09-10 ----------------------
 $s1 = Join-Path $dataRoot 'upsert_s1.parquet'
@@ -193,9 +184,9 @@ Expect-Equal 'table untouched after rejected delete' $out.Trim() '5997'
 
 # ---- error cases ------------------------------------------------------------
 $s1f = $s1.Replace('\', '/')
-if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('$table', '$s1f', 'no_such_group:date');" "unknown group") {
-    Write-Host 'PASS: unknown group in mapping rejected'
-} else { Write-Host 'FAIL: unknown group not rejected'; $script:failures++ }
+if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('upsert_empty2', '$s1f', 'no_such_group:date');" "the mapping must include an 'index' group") {
+    Write-Host 'PASS: empty-table write without index group rejected'
+} else { Write-Host 'FAIL: empty-table write without index group not rejected'; $script:failures++ }
 if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('$table', '$s1f', 'index:date,symbol,no_such_col');" "not found in source") {
     Write-Host 'PASS: missing mapped column rejected'
 } else { Write-Host 'FAIL: missing mapped column not rejected'; $script:failures++ }
@@ -219,7 +210,7 @@ Expect-Equal 'auto-derive new row values' $out.Trim() '77.7,8.8,9.9'
 # empty-table first write still REQUIRES explicit mapping (no schema to infer)
 $emptyDir = Join-Path $dataRoot 'upsert_empty'
 New-Item -ItemType Directory -Force -Path $emptyDir | Out-Null
-if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('upsert_empty', '$s8f');" 'mandatory group') {
+if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('upsert_empty', '$s8f');" 'mapping is required for the first write') {
     Write-Host 'PASS: empty-table first write without mapping rejected'
 } else { Write-Host 'FAIL: empty-table first write should require mapping'; $script:failures++ }
 Remove-Item $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -233,7 +224,6 @@ Remove-Item $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
 $m12dir = 'D:/proj/factorlake/testdata/upsert_m12'
 Remove-Item $m12dir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$m12dir/t" | Out-Null
-[IO.File]::WriteAllText("$m12dir/t/_table.json", '{"groups":["index","f/m1","g/m2"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"f/m1":[{"template":"month=%Y-%m","source":"date"}],"g/m2":[{"template":"month=%Y-%m","source":"date"}]}}')
 $s9f = 'D:/proj/factorlake/testdata/upsert_s9.parquet'
 $s10f = 'D:/proj/factorlake/testdata/upsert_s10.parquet'
 & $duckdb -c "COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 1.0::DOUBLE AS v UNION ALL SELECT DATE '2026-01-01', 'b', 2.0) TO '$s9f' (FORMAT PARQUET);" 2>&1 | Out-Null

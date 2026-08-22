@@ -5,7 +5,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "parquet_reader.hpp"
-#include "yyjson.hpp"
 
 #include <algorithm>
 #include <map>
@@ -13,122 +12,6 @@
 namespace duckdb {
 
 namespace {
-
-string ReadTextFile(FileSystem &fs, const string &path) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	idx_t size = handle->GetFileSize();
-	string result;
-	result.resize(size);
-	if (size > 0) {
-		// NOTE: C++11 standard is enforced (string::data() returns const char*)
-		handle->Read(&result[0], size, 0);
-	}
-	return result;
-}
-
-bool GetStringField(duckdb_yyjson::yyjson_val *obj, const char *key, string &result) {
-	auto val = duckdb_yyjson::yyjson_obj_get(obj, key);
-	if (!val || !duckdb_yyjson::yyjson_is_str(val)) {
-		return false;
-	}
-	result.assign(duckdb_yyjson::yyjson_get_str(val), duckdb_yyjson::yyjson_get_len(val));
-	return true;
-}
-
-//! Parses a JSON document and invokes parse_body with the root object.
-template <class FN>
-void WithJsonObject(const string &path, const string &content, FN parse_body) {
-	auto doc = duckdb_yyjson::yyjson_read(content.c_str(), content.size(), 0);
-	if (!doc) {
-		throw IOException("Aligned table: invalid JSON in '%s'", path);
-	}
-	auto root = duckdb_yyjson::yyjson_doc_get_root(doc);
-	if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
-		duckdb_yyjson::yyjson_doc_free(doc);
-		throw IOException("Aligned table: expected a JSON object in '%s'", path);
-	}
-	try {
-		parse_body(root);
-	} catch (...) {
-		duckdb_yyjson::yyjson_doc_free(doc);
-		throw;
-	}
-	duckdb_yyjson::yyjson_doc_free(doc);
-}
-
-string GetRequiredString(duckdb_yyjson::yyjson_val *obj, const char *key, const string &path) {
-	string result;
-	if (!GetStringField(obj, key, result) || result.empty()) {
-		throw IOException("Aligned table: missing or invalid required field '%s' in '%s'", key, path);
-	}
-	return result;
-}
-
-vector<string> GetStringArray(duckdb_yyjson::yyjson_val *obj, const char *key, const string &path, bool required) {
-	vector<string> result;
-	auto val = duckdb_yyjson::yyjson_obj_get(obj, key);
-	if (!val) {
-		if (required) {
-			throw IOException("Aligned table: missing required array field '%s' in '%s'", key, path);
-		}
-		return result;
-	}
-	if (!duckdb_yyjson::yyjson_is_arr(val)) {
-		throw IOException("Aligned table: field '%s' in '%s' must be an array", key, path);
-	}
-	auto size = duckdb_yyjson::yyjson_arr_size(val);
-	result.reserve(size);
-	for (size_t i = 0; i < size; i++) {
-		auto item = duckdb_yyjson::yyjson_arr_get(val, i);
-		if (!duckdb_yyjson::yyjson_is_str(item)) {
-			throw IOException("Aligned table: field '%s' in '%s' must be an array of strings", key, path);
-		}
-		result.emplace_back(duckdb_yyjson::yyjson_get_str(item), duckdb_yyjson::yyjson_get_len(item));
-	}
-	return result;
-}
-
-//! Parses the optional _table.json "partitioning" map (group -> templates).
-void ParsePartitioning(duckdb_yyjson::yyjson_val *obj, case_insensitive_map_t<vector<PartitionTemplate>> &out,
-                       const string &path) {
-	auto val = duckdb_yyjson::yyjson_obj_get(obj, "partitioning");
-	if (!val) {
-		return; // optional: derived from the directory layout instead
-	}
-	if (!duckdb_yyjson::yyjson_is_obj(val)) {
-		throw IOException("Aligned table: field 'partitioning' in '%s' must be an object (group -> templates)", path);
-	}
-	size_t idx;
-	size_t max;
-	duckdb_yyjson::yyjson_val *key;
-	duckdb_yyjson::yyjson_val *entry;
-	yyjson_obj_foreach(val, idx, max, key, entry) {
-		string group_name(duckdb_yyjson::yyjson_get_str(key), duckdb_yyjson::yyjson_get_len(key));
-		if (!duckdb_yyjson::yyjson_is_arr(entry)) {
-			throw IOException("Aligned table: partitioning entry '%s' in '%s' must be an array", group_name, path);
-		}
-		vector<PartitionTemplate> templates;
-		auto size = duckdb_yyjson::yyjson_arr_size(entry);
-		for (size_t i = 0; i < size; i++) {
-			auto item = duckdb_yyjson::yyjson_arr_get(entry, i);
-			if (!duckdb_yyjson::yyjson_is_obj(item)) {
-				throw IOException("Aligned table: partitioning entries of '%s' in '%s' must be objects", group_name,
-				                  path);
-			}
-			PartitionTemplate tmpl;
-			if (!GetStringField(item, "template", tmpl.template_str) || tmpl.template_str.empty()) {
-				throw IOException("Aligned table: partitioning entry %zu of '%s' in '%s' is missing 'template'", i,
-				                  group_name, path);
-			}
-			if (!GetStringField(item, "source", tmpl.source) || tmpl.source.empty()) {
-				throw IOException("Aligned table: partitioning entry %zu of '%s' in '%s' is missing 'source'", i,
-				                  group_name, path);
-			}
-			templates.push_back(std::move(tmpl));
-		}
-		out[group_name] = std::move(templates);
-	}
-}
 
 //! Contract §2.1d: true when any directory segment of the path starts with
 //! '.' or '_' (e.g. "_tmp/", ".hidden/"). The file name segment is excluded.
@@ -183,22 +66,6 @@ string NormalizePath(const string &path) {
 }
 
 } // namespace
-
-bool TryReadTableManifest(FileSystem &fs, const string &manifest_path, TableManifest &manifest) {
-	if (!fs.FileExists(manifest_path)) {
-		return false;
-	}
-	string content = ReadTextFile(fs, manifest_path);
-	WithJsonObject(manifest_path, content, [&](duckdb_yyjson::yyjson_val *root) {
-		// Legacy fields (name, version, rg_rows, part_rows, last_txid, aligned,
-		// key, canonical_order, row_count, row_group_size) are ignored for
-		// backwards compatibility: only groups + partitioning are read (they are
-		// the empty-table bootstrap config).
-		manifest.groups = GetStringArray(root, "groups", manifest_path, false);
-		ParsePartitioning(root, manifest.partitioning, manifest_path);
-	});
-	return true;
-}
 
 //! Reads footer metadata (row count + schema) of one part file. Under v6 the
 //! row count is ALSO read here (it is not stored in the plan), but it is used
@@ -324,22 +191,17 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 	plan.table_path = root + "/" + table_name;
 	plan.table_name = table_name;
 
-	// Optional _table.json (empty-table bootstrap config: groups + partitioning).
-	// When absent, all defaults apply.
-	TableManifest manifest;
-	if (TryReadTableManifest(fs, plan.table_path + "/_table.json", manifest)) {
-		plan.table = std::move(manifest);
-	} else {
-		if (!fs.DirectoryExists(plan.table_path)) {
-			throw IOException("Aligned table '%s': table directory does not exist at '%s'", table_name,
-			                  plan.table_path);
-		}
+	// An empty table (no parts) is not a valid table — the index group is
+	// mandatory and discovered via glob. No manifest file is used.
+	if (!fs.DirectoryExists(plan.table_path)) {
+		throw IOException("Aligned table '%s': table directory does not exist at '%s'", table_name,
+		                  plan.table_path);
 	}
 	string table_prefix = NormalizePath(plan.table_path);
 
 	// Group discovery: ONE glob over the whole table; every directory that
 	// directly contains part files (partition segment "name=value" stripped) is
-	// a column group. The manifest's `groups` field is never read.
+	// a column group.
 	struct PendingPart {
 		string path; // absolute, normalized
 		string rel;  // relative to the TABLE root
@@ -385,24 +247,21 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			}
 			group_list[it->second].pending.push_back(std::move(pp));
 		}
-		// Empty table (no parts anywhere): the group skeleton comes from the
-		// manifest's `groups` list — the ONLY case where that field is read
-		// (the writer needs the skeleton to lay out the first write; a read of
-		// an empty table is degenerate anyway).
-		if (group_list.empty() && !plan.table.groups.empty()) {
-			for (auto &group_name : plan.table.groups) {
-				group_list.push_back({group_name, {}});
-			}
-		}
 	}
 
-	// Contract §2.1b: the 'index' group is mandatory
+	// Contract §2.1b: the 'index' group is mandatory. An empty table (no
+	// parts at all) returns an empty plan — the caller (mutator) handles
+	// the first-write case by creating groups from the mapping.
 	idx_t index_gi = DConstants::INVALID_INDEX;
 	for (idx_t gi = 0; gi < group_list.size(); gi++) {
 		if (StringUtil::CIEquals(group_list[gi].name, "index")) {
 			index_gi = gi;
 			break;
 		}
+	}
+	if (group_list.empty()) {
+		// Empty table: no parts anywhere. Return an empty plan.
+		return;
 	}
 	if (index_gi == DConstants::INVALID_INDEX) {
 		throw IOException("Aligned table '%s': mandatory group 'index' was not found", table_name);
@@ -454,16 +313,6 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			total_rows += pi.row_count;
 			i = j;
 		}
-		// Partition templates for pruning: explicit from the manifest, else
-		// derived from the layout (single-level only). The source column is
-		// bound AFTER the index schema is known (the DATE/TIMESTAMP field
-		// among the index schema's first two columns) — see below; this block
-		// only records the explicit templates (for empty tables there is no
-		// schema yet, so the templates are taken verbatim).
-		auto explicit_it = plan.table.partitioning.find("index");
-		if (explicit_it != plan.table.partitioning.end() && !explicit_it->second.empty()) {
-			index_group.manifest.partitioning = explicit_it->second;
-		}
 	}
 	index_group.full_coverage = true; // the index defines the full row space
 	plan.row_count = total_rows;
@@ -509,22 +358,9 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		}
 		index_group.partition_source = date_col;
 		index_group.symbol_column = symbol_col;
-		// Explicit partitioning templates must source that column (otherwise
-		// filter pushdown silently misses); derived templates get it bound.
-		auto explicit_it = plan.table.partitioning.find("index");
-		if (explicit_it != plan.table.partitioning.end() && !explicit_it->second.empty()) {
-			for (auto &t : explicit_it->second) {
-				if (!StringUtil::CIEquals(t.source, date_col)) {
-					throw IOException("Aligned table '%s': explicit partitioning for 'index' sources column '%s' "
-					                  "but the index's partition source column is '%s'",
-					                  table_name, t.source, date_col);
-				}
-			}
-			index_group.manifest.partitioning = explicit_it->second;
-		} else {
-			index_group.manifest.partitioning =
-			    DerivePartitioningFromPaths(index_paths_for_derive, table_name, "index", date_col);
-		}
+		// Partitioning is always derived from the directory layout.
+		index_group.manifest.partitioning =
+		    DerivePartitioningFromPaths(index_paths_for_derive, table_name, "index", date_col);
 	}
 
 	// Non-index groups: partition keys must be a subset of the index keys,
@@ -633,40 +469,13 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		}
 
 		// Partition templates for pruning: explicit from the manifest, else
-		// derived from the layout (single-level only). Non-index groups
-		// partition on the same source column as the index.
-		auto explicit_it = plan.table.partitioning.find(acc.name);
-		if (explicit_it != plan.table.partitioning.end() && !explicit_it->second.empty()) {
-			group.manifest.partitioning = explicit_it->second;
-		} else {
-			group.manifest.partitioning =
-			    DerivePartitioningFromPaths(part_paths_for_derive, table_name, acc.name,
-			                                group.partition_source);
-		}
+		// Partitioning is always derived from the directory layout.
+		group.manifest.partitioning =
+		    DerivePartitioningFromPaths(part_paths_for_derive, table_name, acc.name,
+		                                group.partition_source);
 		plan.groups.push_back(std::move(group));
 	}
 	plan.groups.insert(plan.groups.begin(), std::move(index_group));
-	// Preserve the bootstrap groups list: every writer rewrites _table.json from
-	// this list, so dropping an empty declared group here would lose it
-	// permanently. Merge manifest-declared groups with the discovered groups
-	// (deduped, case-insensitive).
-	vector<string> declared = std::move(plan.table.groups);
-	plan.table.groups.clear();
-	for (auto &name : declared) {
-		plan.table.groups.push_back(name);
-	}
-	for (auto &g : group_list) {
-		bool dup = false;
-		for (auto &existing : plan.table.groups) {
-			if (StringUtil::CIEquals(existing, g.name)) {
-				dup = true;
-				break;
-			}
-		}
-		if (!dup) {
-			plan.table.groups.push_back(g.name);
-		}
-	}
 }
 
 } // namespace duckdb

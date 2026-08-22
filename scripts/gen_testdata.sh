@@ -6,7 +6,6 @@
 # partition — every group uses the SAME partition kind; self-describing part
 # names "{idx:04d}-{rows:10d}.parquet"):
 #   cnstk_ixday/
-#     _table.json                              (groups field present but NEVER read)
 #     index/        month=2026-07/  0000-0000002000.parquet (1 part, 2000 rows)
 #                   month=2026-08/  0000-0000002000.parquet
 #                                   0001-0000002000.parquet (2 parts, 2000+2000)
@@ -67,16 +66,6 @@ run_duckdb() { # sql
 
 # v6 self-describing part name: "{idx:04d}-{rows:10d}"
 part_name() { printf '%04d-%010d' "$1" "$2"; }
-
-# ---- _table.json ------------------------------------------------------------
-# The only manifest, used solely for empty-table bootstrap (which groups to
-# create, what partition templates to use). Once data exists, groups are
-# discovered via glob and partitioning is derived from the directory layout.
-# The explicit partitioning map is omitted on purpose so the reader's directory
-# derivation path is exercised.
-write_json "$TABLE_DIR/_table.json" '{
-  "groups": ["index", "factor/alpha101", "fieldset/ma"]
-}'
 
 # ---- logical partitions -----------------------------------------------------
 # per-part row count is 2000 everywhere (row bookkeeping is from names).

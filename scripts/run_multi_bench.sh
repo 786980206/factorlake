@@ -89,11 +89,11 @@ ALIGNED_TABLE="bench_mb"        # physical table
 # ---------- data generation (once per rows/width/sparsity) --------------------------
 GEN_FLAGS=(--rows "$ROWS" --width "$WIDTH" --sparsity "$SPARSITY" --aligned true --out "$OUT" --tag mb)
 need_gen=0
-if [ ! -f "$OUT/$ALIGNED_TABLE/_table.json" ]; then need_gen=1; fi
+if [ ! -d "$OUT/$ALIGNED_TABLE/index" ]; then need_gen=1; fi
 if [ "$need_gen" = 1 ] && [ "$FLAG_NOREGEN" = 0 ]; then
   bash "$ROOT/scripts/gen_multi_bench.sh" "${GEN_FLAGS[@]}"
 fi
-if [ ! -f "$OUT/$ALIGNED_TABLE/_table.json" ]; then echo "aligned table missing (use --no-regen only if data exists): $OUT/$ALIGNED_TABLE"; exit 1; fi
+if [ ! -d "$OUT/$ALIGNED_TABLE/index" ]; then echo "aligned table missing (use --no-regen only if data exists): $OUT/$ALIGNED_TABLE"; exit 1; fi
 
 BASE="$OUT/bench_baseline_mb"
 WIDE="$BASE/wide.parquet"; JOINAL="$BASE/join_alpha.parquet"; JOINFS="$BASE/join_fs.parquet"

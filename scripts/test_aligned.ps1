@@ -147,10 +147,11 @@ if ($out -match '(?m)^2000,0\.0\r?$') { Write-Host 'PASS: e3 bare non-duplicated
 
 # --- directory rules (contract §2.1b/c) --------------------------------------
 # §2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above)
-# §2.1b: a table without the mandatory index group must fail (no parts at all)
-$badIdx = Join-Path $dataRoot 'badidx\_table.json'
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $badIdx) | Out-Null
-'{"groups":["factor/alpha101"]}' | Set-Content -Path $badIdx -Encoding Ascii
+# §2.1b: a table without the mandatory index group must fail (has alpha parts
+# but no index parts at all)
+$badIdx = Join-Path $dataRoot 'badidx'
+New-Item -ItemType Directory -Force -Path (Join-Path $badIdx 'factor\alpha101\month=2026-07') | Out-Null
+Copy-Item (Join-Path $dataRoot 'cnstk_ixday\factor\alpha101\month=2026-07\0000-0000002000.parquet') (Join-Path $badIdx 'factor\alpha101\month=2026-07\0000-0000002000.parquet')
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('badidx');" 2>&1 | Out-String
@@ -178,7 +179,6 @@ Remove-Item (Join-Path $dataRoot 'badlvl') -Recurse -Force
 # must fail fast — the file-name row counts are the contract.
 $badName = Join-Path $dataRoot 'badname'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $badName -Recurse -Force
-Remove-Item (Join-Path $badName '_table.json') -Force
 Rename-Item (Join-Path $badName 'index\month=2026-08\0001-0000002000.parquet') 'part-000001.parquet'
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
@@ -191,7 +191,6 @@ Remove-Item $badName -Recurse -Force
 # index is a contract violation — the index defines the row space).
 $badIdx = Join-Path $dataRoot 'badidx'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $badIdx -Recurse -Force
-Remove-Item (Join-Path $badIdx '_table.json') -Force
 Remove-Item (Join-Path $badIdx 'index\month=2026-08\0000-0000002000.parquet') -Force
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
@@ -207,7 +206,6 @@ Remove-Item $badIdx -Recurse -Force
 # partition TOTAL already disagrees).
 $badRows = Join-Path $dataRoot 'badrows'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $badRows -Recurse -Force
-Remove-Item (Join-Path $badRows '_table.json') -Force
 Copy-Item (Join-Path $badRows 'factor\alpha101\month=2026-08\0002-0000002000.parquet') (Join-Path $badRows 'factor\alpha101\month=2026-08\0003-0000003000.parquet')
 Remove-Item (Join-Path $badRows 'factor\alpha101\month=2026-08\0002-0000002000.parquet') -Force
 $prevEAP = $ErrorActionPreference
@@ -222,7 +220,6 @@ Remove-Item $badRows -Recurse -Force
 # schema source) with the date column moved out of the first two columns.
 $badDate = Join-Path $dataRoot 'baddate'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $badDate -Recurse -Force
-Remove-Item (Join-Path $badDate '_table.json') -Force
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $sql = "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, DATE '2026-08-01' AS date FROM range(4000, 6000) t(r)) TO '$($badDate.Replace('\','/'))/index/month=2026-08/0001-0000002000.parquet' (FORMAT PARQUET);"
@@ -247,13 +244,12 @@ Expect-Equal 'TIMESTAMP-pruned rows' ([long]$vals[0]) 100
 Expect-Equal 'TIMESTAMP-pruned sum' ([long]$vals[1]) 14950
 Remove-Item $tsTable -Recurse -Force
 
-# --- optional _table.json + partition-aligned contract ------------------------
-# A table without _table.json: groups are discovered from the file layout and
-# the partition-aligned contract is enforced (ma missing month=2026-07 stays
-# legal — partition subsets are allowed; the partition totals still agree).
+# --- partition-aligned contract (no manifest needed) -------------------------
+# Groups are discovered from the file layout and the partition-aligned contract
+# is enforced (ma missing month=2026-07 stays legal — partition subsets are
+# allowed; the partition totals still agree).
 $v3Table = Join-Path $dataRoot 'v3_notable'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $v3Table -Recurse -Force
-Remove-Item (Join-Path $v3Table '_table.json') -Force
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; WITH t AS (SELECT * FROM aligned_table('v3_notable')) SELECT count(*), count(rowid_ma), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM t;"
 $vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','
 Expect-Equal 'no-manifest rows (defaults + partition alignment)' ([long]$vals[0]) 6000
@@ -263,7 +259,6 @@ Expect-Equal 'no-manifest misaligned' ([long]$vals[2]) 0
 # index's month=2026-07 partition (alpha still has it).
 $v3Bad = Join-Path $dataRoot 'v3_bad'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $v3Bad -Recurse -Force
-Remove-Item (Join-Path $v3Bad '_table.json') -Force
 Remove-Item (Join-Path $v3Bad 'index\month=2026-07') -Recurse -Force
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'

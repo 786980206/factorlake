@@ -72,9 +72,8 @@ run_duck(){ local tmp="$OUT/.gen_bench.sql"; printf '%s\n' "$1" > "$tmp"; "/d/pr
 
 echo "== gen $TABLE: rows=$ROWS width=$WIDTH (idx=$INDEX_COLS alpha=$ALPHA_COLS fs=$FIELDSET_COLS) sparse=${NULL_PCT}% aligned=$ALIGNED =="
 
-# ---------------- aligned table manifest ----------------
+# ---------------- aligned table (no manifest needed) ----------------
 rm -rf "$tableDir"; mkdir -p "$tableDir"
-rj "$tableDir/_table.json" "{\"groups\":[\"index\",\"factor/alpha\",\"fieldset/fs\"]}"
 
 # ---------------- column definition helpers ----------------
 # index_cols returns a SQL select list for the given global row range [g0,g1)

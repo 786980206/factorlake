@@ -8,9 +8,7 @@
 statement ok
 COPY (WITH r AS (SELECT range AS r FROM range(0, 100)) SELECT DATE '2026-09-10' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001 FROM r) TO '{TEST_DIR}/dml_stage.parquet' (FORMAT PARQUET)
 
-# --- setup: create upserttest table ---
-mkdir {TEST_DIR}/dml_data/upserttest
-writejson {TEST_DIR}/dml_data/upserttest/_table.json {"groups":["index","factor/alpha101","fieldset/ma"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"factor/alpha101":[{"template":"month=%Y-%m","source":"date"}],"fieldset/ma":[{"template":"month=%Y-%m","source":"date"}]}}
+# --- setup: create upserttest table (empty, first write populates it) ---
 
 statement ok
 SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT rows_inserted, rows_updated FROM aligned_upsert('upserttest', '{TEST_DIR}/dml_stage.parquet', 'index:date,symbol,close,rowid;factor/alpha101:rowid_alpha,alpha001;fieldset/ma:rowid_ma,ma5')

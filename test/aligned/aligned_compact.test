@@ -2,11 +2,9 @@
 # description: aligned_compact — merge multi-part partition to single part, verify correctness
 # Covers: test_compaction.ps1 (14 assertions)
 
-# --- setup: create table dir + _table.json ---
+# --- setup: create table dir with 2-part-per-group layout ---
 mkdir {TEST_DIR}/compacttest_data/compacttest/index/month=2026-07
 mkdir {TEST_DIR}/compacttest_data/compacttest/factor/alpha101/month=2026-07
-
-writejson {TEST_DIR}/compacttest_data/compacttest/_table.json {"groups":["index","factor/alpha101"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}],"factor/alpha101":[{"template":"month=%Y-%m","source":"date"}]}}
 
 # --- seed 2 parts per group (same partition dir, 2 parts) ---
 statement ok

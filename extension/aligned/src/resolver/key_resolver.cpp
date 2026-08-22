@@ -20,9 +20,12 @@ KeyResolver::KeyResolver(ClientContext &context_p, const TablePlan &plan_p) : co
 		throw IOException("Aligned table: internal error — the index group is not the first plan group");
 	}
 	// The partition template of the index group: exactly one single-level
-	// template (or none for an unpartitioned table).
+	// template (or none for an unpartitioned table). For an empty table (first
+	// write), default to "month=%Y-%m" — the mutator uses the same default.
 	if (!index_group->manifest.partitioning.empty()) {
 		templates = index_group->manifest.partitioning;
+	} else if (index_group->parts.empty()) {
+		templates.push_back({"month=%Y-%m", ""});
 	}
 }
 

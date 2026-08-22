@@ -48,7 +48,6 @@ JOIN 成本、Key duplication、不需要的列扫描、横向 concat **全部�
 <data_root>/
 ├── cnidx_klday/            ← Logical Table
 ├── cnstk_ixday/            ← Logical Table
-│   ├── _table.json
 │   ├── index/
 │   ├── factor/
 │   │   ├── alpha101/
@@ -102,46 +101,29 @@ fieldset/ma/      year=2026/month=08/
 
 ---
 
-## 5. Manifest（轻量，不做 Catalog DB）
+## 5. 无 Manifest（不做 Catalog DB）
 
-目录本身就是 Catalog，文件发现用 Hive layout。`_table.json` **可选**，仅用于
-**空表 bootstrap**——当表还没有任何 part 文件时，Writer 需要知道要创建哪些 Column
-Group 以及用什么分区模板。一旦表有了数据，所有信息从目录结构和 Parquet footer
-推导，`_table.json` 不再被读端使用。没有 `_group.json`、没有 part sidecar、
-没有 commit marker：
-
-```json
-{
-  "groups": ["index", "factor/alpha101", "factor/alpha191", "fieldset/ema",
-             "fieldset/ma", "fieldset/qoq", "fieldset/ttm", "fieldset/yoy",
-             "panel/cnstk_icday", "panel/cnstk_ixday", "panel/cnstk_klday"],
-  "partitioning": {
-    "index":          [{"template": "month=%Y-%m", "source": "date"}],
-    "factor/alpha101": [{"template": "month=%Y-%m", "source": "date"}]
-  }
-}
-```
+目录本身就是 Catalog，文件发现用 Hive layout。**没有 `_table.json`，没有
+`_group.json`，没有 part sidecar，没有 commit marker**。所有元数据从目录结构和
+Parquet footer 推导：
 
 - **分区对齐（Partition Alignment）是唯一契约**：所有 Group（含 index）用
   **同一种一层分区段**（`year=` / `month=` / `date=` 三选一）；分区键 = 完整
   `name=value` 段串（因此不同分区方式自动无法对齐）；Group 分区键集合 **⊆ index**
   （允许缺分区 → 该区行保留、该组列全 NULL；**绝不添加 index 没有的分区**，违反即
   fail-fast）；共享分区**总行数**必须一致（末 part 行数可不同）。
-- `groups`：Column Group 列表。**读端永不解析**——Group 发现唯一路径 = 一次 glob
-  （`**/*.parquet` → 跳过 `name=value` 分区段 → 最长非分区段后缀即 Group）；唯一例外 =
-  空表（无任何 part）且 `groups` 非空时给 Writer 提供 Group 骨架。
-- `partitioning`：`group → 目录模板列表`。**每个 Group 恰好一个模板**（单层）；
-  模板只允许 `year=%Y` / `month=%Y-%m` / `date=%Y-%m-%d`，source = index schema 的
-  DATE/TIMESTAMP 列名；**所有 Group 必须同一种模板**。**空表起步必须显式给出**；
-  否则从目录结构推导（仅识别这三种单层段，多层 `name=value` 段 → 报错）；Writer
-  重写 manifest 必须原样写回 partitioning 与 groups。
-- **Canonical Key = index Group 的 schema 列**（从 Parquet footer 读取，不写入 manifest）。
+- **Group 发现唯一路径 = 一次 glob**（`**/*.parquet` → 跳过 `name=value` 分区段
+  → 最长非分区段后缀即 Group）。空表（无任何 part）不是有效表——Reader 报错，
+  Writer 从 `mapping` 参数推导 Group 结构。
+- **分区模板从目录结构推导**（仅识别 `year=%Y`/`month=%Y-%m`/`date=%Y-%m-%d`
+  三种单层段；空表首写默认 `month=%Y-%m`）。
+- **Canonical Key = index Group 的 schema 列**（从 Parquet footer 读取）。
 - **主键契约**：index schema（rel_path 排序最后 1 个 part footer）前两列 = 主键
   `(date, symbol)`——**恰一列 DATE/TIMESTAMP**（分区源列）+ **一列 symbol**，
   两日期列或无日期列均 fail-fast；分区目录只由该日期列求值。
-- **不存入 manifest 的信息**：表名（←目录名）、schema（←Parquet footer）、
+- **不持久化的信息**：表名（←目录名）、schema（←Parquet footer）、
   行数/行区间（←part 文件名 `{idx:04d}-{rows:10d}`）、Row Group 大小（←编译常量
-  131072）、事务号（不持久化）。
+  131072）、事务号（不持久化）、Column Group 列表（←glob）、分区模板（←目录结构）。
 - 行区间契约：part 顺序 = 组内相对路径字符串排序，part_id = 文件名解析出的 `idx`；
   行区间由文件名累加推导（`start_row = S_i + Σ(更小索引 part 的行数)`，零 footer IO）；
   扫描时 OpenPart 防御校验 footer 行数 == 文件名行数。组 schema = 组内 rel_path
@@ -212,10 +194,9 @@ aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewri
   取代第一版 `aligned_write`（已删除）：按主键 `(date, symbol)` 插入/更新/删除，
   只重写受影响 part；主键契约 = index schema 前两列（§5：恰一 DATE/TIMESTAMP + 一
   symbol）。
-- **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式 partition，
-  再原子重写 `_table.json`（仅 `groups` + `partitioning`，原样写回）；
+- **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式 partition；
   崩溃则丢弃 transaction（`_tmp/` 对 Reader 永不可见），扫描时跨 Group 行数
-  fail-fast 兜底。无 sidecar、无 marker 文件。
+  fail-fast 兜底。无 sidecar、无 marker 文件、无 manifest。
 - **映射列类型 = 组内已存类型**（组 schema），非源文件类型——跨 part 列类型必须
   一致；首写空表回退源类型。新分区只建在映射过的 Group（未映射 Group 该区行 NULL）。
 - **Compaction**：`aligned_compact(table, 'all')` 单事务合并所有组（按分区目录），
@@ -966,3 +947,30 @@ tive'）→ 断言 pattern 必须用
   - 验收：91/91 PASS；`python test/run_sqllogictest.py`（默认跑 test/aligned/*.test）
   - 与 PS 脚本对比：PS 5.1 的 78 列 stderr 折行、`-c` 引号 mangle 等痛点全部消除（Python 运行器
     用 subprocess + temp file stdin）；attach/dml 测试需同进程批处理（preamble 机制）
+- [x] **删除 `_table.json`（无 manifest 契约，2026-08）**：
+  - **设计**：`_table.json` 原仅用于空表 bootstrap（告诉 writer 用哪些 group/分区模板）。
+    现完全删除——空表不是有效表（无 index = 无表），`BuildTablePlan` glob 无 part 返回空 plan
+    （0 groups），Reader 报错，Writer 从 `mapping` 参数推导 Group 结构。分区模板默认
+    `month=%Y-%m`（空表首写时 `IndexTemplate` / `KeyResolver` 构造函数均用此默认值）。
+    非空表后续写入若 mapping 命名了未知 group，mutator 自动 materialize 新 group。
+  - **代码**：manifest.hpp 删 `TableManifest` struct、`TryReadTableManifest` decl、
+    `TablePlan::table` field；加 `ALIGNED_DEFAULT_RG_ROWS=131072` 命名空间常量。
+    manifest.cpp 删全部 JSON helpers（`ReadTextFile`/`GetStringField`/`WithJsonObject`/
+    `GetRequiredString`/`GetStringArray`/`ParsePartitioning`）+ `yyjson.hpp` include +
+    `TryReadTableManifest`；`BuildTablePlan` 删 manifest 读取、空表骨架、显式分区查找
+    （3 处）、declared-groups merge；空表提前 return（0 groups）。
+    aligned_mutator.cpp 删 `WriteManifest` + JSON helpers（`WriteTextFile`/`JsonEscape`/
+    `JsonStringArray`）；空表检测改用 `fs.GlobFiles(table_dir+"/**/*.parquet")`；
+    空表从 mapping 创建 group（index 先、其余后）；非空表 materialize 未知 mapped group；
+    `IndexTemplate` 默认 `""`→`"month=%Y-%m"`；`TableManifest::DEFAULT_RG_ROWS`→
+    `ALIGNED_DEFAULT_RG_ROWS`。aligned_compactor.cpp 删 `WriteManifest` + JSON helpers。
+    key_resolver.cpp 空表加默认模板 `{"month=%Y-%m",""}`。
+  - **测试/脚本**：test/aligned/*.test 删 `writejson`+`mkdir` `_table.json` 指令；
+    "unknown group" 测试改 "mapping is required for the first write" / "the mapping
+    must include an 'index' group"；gen_testdata/gen_bench/bench_write/test_*.ps1+
+    .sh 全部删 `_table.json` 写入/引用；test_aligned.ps1 badidx 改用真实 alpha parquet。
+  - **文档**：docs/STORAGE_CONTRACT.md §5 重写（无 Manifest）、目录图删 `_table.json`、
+    §9 Writer 删 "重写 `_table.json`"、§10 读取协议删 manifest 读取步骤、错误处理表
+    改；AGENTS.md §2 目录图/§5/§9 同步。
+  - **验收**：SQLLogicTest 91/91 PASS；test_aligned.ps1 18/18、test_upsert.ps1 31/31、
+    test_compaction.ps1 8/8 全 PASS

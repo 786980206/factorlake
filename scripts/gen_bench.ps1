@@ -9,7 +9,6 @@
 #   partition holds 1 part per group (v6 self-describing name "0000-{rows:10d}"),
 #   so partition rows == part rows and every group has full coverage):
 #   bench_ixday/
-#     _table.json                     (bootstrap config: groups only)
 #     index/   date=2026-09-01..04/   1 part per day (rowsPerDay), RGS 32768
 #     factor/alpha101/ date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
 #     fieldset/ma/     date=2026-09-01..04/   1 part per day, RGS 65536, 20 cols
@@ -40,17 +39,9 @@ $Days = @(
 $rowsPerDay = [long]($TotalRows / $Days.Count)
 $PART_ROWS = $rowsPerDay
 
-function Write-JsonFile([string]$path, $obj) {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
-    ($obj | ConvertTo-Json -Depth 8) | Set-Content -Path $path -Encoding Ascii
-}
 function Run-DuckDB([string]$sql) {
     & $duckdb -c $sql 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "duckdb failed: $sql" }
-}
-
-Write-JsonFile (Join-Path $tableDir '_table.json') @{
-    groups          = @('index', 'factor/alpha101', 'fieldset/ma')
 }
 
 $alphaCols = 0..99 | ForEach-Object {

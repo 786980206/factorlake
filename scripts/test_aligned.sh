@@ -132,10 +132,11 @@ if printf '%s' "$out" | grep -qE '^2000,0\.0$'; then echo 'PASS: e3 bare non-dup
 
 # --- directory rules (contract 搂2.1b/c) --------------------------------------
 # 搂2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above)
-# 搂2.1b: a table without the mandatory index group must fail (no parts at all)
-BADIDX="$DATA_ROOT/badidx/_table.json"
-mkdir -p "$(dirname "$BADIDX")"
-printf '%s\n' '{"groups":["factor/alpha101"]}' > "$BADIDX"
+# 搂2.1b: a table without the mandatory index group must fail (has alpha parts
+# but no index parts at all)
+BADIDX="$DATA_ROOT/badidx"
+mkdir -p "$BADIDX/factor/alpha101/month=2026-07"
+cp "$DATA_ROOT/cnstk_ixday/factor/alpha101/month=2026-07/0000-0000002000.parquet" "$BADIDX/factor/alpha101/month=2026-07/0000-0000002000.parquet"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('badidx');" "mandatory group 'index'"; then
   echo 'PASS: 搂2.1b missing index group rejected'
 else echo 'FAIL: 搂2.1b missing index'; failures=$((failures+1)); fi
@@ -156,7 +157,6 @@ rm -rf "$DATA_ROOT/badlvl"
 # fail fast — the file-name row counts are the contract.
 BADNAME="$DATA_ROOT/badname"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADNAME"
-rm -f "$BADNAME/_table.json"
 mv "$BADNAME/index/month=2026-08/0001-0000002000.parquet" "$BADNAME/index/month=2026-08/part-000001.parquet"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('badname');" "self-desc"; then
   echo 'PASS: v6 non-conforming part name rejected'
@@ -167,7 +167,6 @@ rm -rf "$BADNAME"
 # index is a contract violation — the index defines the row space).
 BADIDX="$DATA_ROOT/badidx"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADIDX"
-rm -f "$BADIDX/_table.json"
 rm -f "$BADIDX/index/month=2026-08/0000-0000002000.parquet"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('badidx');" "consecutive from 0000"; then
   echo 'PASS: v6 index gap rejected'
@@ -178,7 +177,6 @@ rm -rf "$BADIDX"
 # 0003-3000 -> partition total 5000 != index 4000 -> fail-fast).
 BADROWS="$DATA_ROOT/badrows"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADROWS"
-rm -f "$BADROWS/_table.json"
 cp "$BADROWS/factor/alpha101/month=2026-08/0002-0000002000.parquet" "$BADROWS/factor/alpha101/month=2026-08/0003-0000003000.parquet"
 rm -f "$BADROWS/factor/alpha101/month=2026-08/0002-0000002000.parquet"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('badrows');" "must agree"; then
@@ -191,7 +189,6 @@ rm -rf "$BADROWS"
 # the first two columns).
 BADDATE="$DATA_ROOT/baddate"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADDATE"
-rm -f "$BADDATE/_table.json"
 run_duckdb "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, DATE '2026-08-01' AS date FROM range(4000, 6000) t(r)) TO '$BADDATE/index/month=2026-08/0001-0000002000.parquet' (FORMAT PARQUET);" >/dev/null
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('baddate');" "must include a DATE"; then
   echo 'PASS: v6 index date-field contract enforced'
@@ -212,7 +209,7 @@ rm -rf "$TSTABLE"
 if run_duckdb_expect_error "SELECT * FROM aligned_table('no_such_table');" "no data root configured"; then
   echo 'PASS: missing root error'
 else echo 'FAIL: missing root error'; failures=$((failures+1)); fi
-if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('no_such_table');" "_table.json"; then
+if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('no_such_table');" "does not exist"; then
   echo 'PASS: missing table error'
 else echo 'FAIL: missing table error'; failures=$((failures+1)); fi
 

@@ -29,7 +29,7 @@ fi
 
 # ---- Locate / generate the bench table ---------------------------------------
 BENCH="$DATA_ROOT/bench_ixday"
-if [ ! -f "$BENCH/_table.json" ]; then
+if [ ! -d "$BENCH/index" ]; then
   echo "Generating aligned bench data ($TOTAL rows)..."
   DUCKDB="$DUCKDB" DATA_ROOT="$DATA_ROOT" bash "$ROOT/scripts/gen_bench.sh" "$TOTAL"
 fi

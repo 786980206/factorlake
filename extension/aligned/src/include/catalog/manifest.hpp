@@ -6,9 +6,12 @@
 
 namespace duckdb {
 
-// One entry of _table.json "partitioning" (or derived from the directory
-// layout): a directory template (e.g. "date=%Y-%m-%d") sourced from the
-// logical "date" column. Only three partition kinds are supported:
+//! Default Row Group size for Parquet writes (compile-time constant).
+constexpr idx_t ALIGNED_DEFAULT_RG_ROWS = 131072;
+
+// One entry of the partitioning config (derived from the directory layout):
+// a directory template (e.g. "date=%Y-%m-%d") sourced from the logical "date"
+// column. Only three partition kinds are supported:
 //   year=%Y, month=%Y-%m, date=%Y-%m-%d.
 struct PartitionTemplate {
 	string template_str;
@@ -16,32 +19,11 @@ struct PartitionTemplate {
 };
 
 // Column-group metadata. The group name is the directory path relative to the
-// table root ("index", "factor/alpha101", ...). The partitioning templates
-// come from _table.json (explicit, required for empty tables) or are derived
-// from the partition directory structure at plan time.
+// table root ("index", "factor/alpha101", ...). The partitioning templates are
+// derived from the partition directory structure at plan time.
 struct GroupManifest {
 	string group;
 	vector<PartitionTemplate> partitioning;
-};
-
-// _table.json — the optional, table-level manifest of a logical table. It exists
-// ONLY for empty-table bootstrap: when the table has no part files yet, the
-// writer needs to know which Column Groups to create and what partition template
-// to use. Once the table has data, _table.json is not read by the reader (groups
-// are discovered via glob, partitioning is derived from the directory layout).
-// The writer still writes it back after each commit (preserving groups +
-// partitioning for the next bootstrap). Unknown/legacy fields (key, row_count,
-// canonical_order, row_group_size, aligned, name, version, rg_rows, part_rows,
-// last_txid, ...) are ignored for backwards compatibility.
-struct TableManifest {
-	// Bootstrap config for empty tables only: which column groups to create.
-	vector<string> groups;
-	// Bootstrap config for empty tables only: partition templates per group.
-	case_insensitive_map_t<vector<PartitionTemplate>> partitioning;
-
-	// Compile-time Row Group size (writer/compactor flush boundary). Not stored
-	// in _table.json — it is a fixed constant.
-	static constexpr idx_t DEFAULT_RG_ROWS = 131072;
 };
 
 // A part file. The part order is the lexicographic order of the file's
@@ -110,28 +92,21 @@ struct GroupPlan {
 struct TablePlan {
 	string table_path; // absolute path
 	string table_name; // the logical table name (directory name)
-	TableManifest table;
 	vector<GroupPlan> groups;
 	idx_t row_count = 0; // total row count (index partitions, from file names)
 };
 
-//! Resolves a logical table: reads the optional _table.json (defaults when
-//! absent), discovers the column groups from the file layout (ONE glob; the
-//! manifest's `groups` field is ignored), groups the parts by partition key
-//! (single-level year=/month=/date=), parses each part file name
-//! ("{idx:04d}-{rows:10d}.parquet") for its index and row count, enforces the
-//! partition-aligned contract (group keys ⊆ index keys, equal per-key partition
-//! totals, equal per-shared-index row counts, index indexes consecutive from
-//! 0000, index schema's first two columns contain a DATE/TIMESTAMP field),
-//! assigns start_row by cumulative file-name rows, and validates every
-//! partition's parts tile its row range. Only ONE footer read per group (the
-//! group's last part, for the schema). Throws IOException on any contract
-//! violation.
+//! Resolves a logical table: discovers the column groups from the file layout
+//! (ONE glob), groups the parts by partition key (single-level year=/month=/date=),
+//! parses each part file name ("{idx:04d}-{rows:10d}.parquet") for its index and
+//! row count, enforces the partition-aligned contract (group keys ⊆ index keys,
+//! equal per-key partition totals, equal per-shared-index row counts, index
+//! indexes consecutive from 0000, index schema's first two columns contain a
+//! DATE/TIMESTAMP field), assigns start_row by cumulative file-name rows, and
+//! validates every partition's parts tile its row range. Only ONE footer read
+//! per group (the group's last part, for the schema). Throws IOException on
+//! any contract violation. A table with no part files (empty table) is not a
+//! valid table — the index group is mandatory and discovered via glob.
 void BuildTablePlan(ClientContext &context, const string &root_path, const string &table_name, TablePlan &plan);
-
-//! Reads + validates _table.json only (used for lightweight lookups). Returns
-//! false when the file does not exist (the caller falls back to defaults).
-//! Only groups + partitioning are read (bootstrap config for empty tables).
-bool TryReadTableManifest(FileSystem &fs, const string &manifest_path, TableManifest &manifest);
 
 } // namespace duckdb

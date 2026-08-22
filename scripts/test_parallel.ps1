@@ -1,4 +1,4 @@
-﻿# test_parallel.ps1
+# test_parallel.ps1
 # Phase 4 acceptance: parallel scan correctness + scaling smoke test.
 # Requires: scripts\gen_bench.ps1 has been run (bench_ixday, 1M rows), duckdb_aligned.exe built.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\test_parallel.ps1
@@ -8,7 +8,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $db = Join-Path $root 'duckdb\build3\duckdb_al3.exe'
 if (-not (Test-Path $db)) { throw "build missing: $db" }
 $dataRoot = 'D:/proj/factorlake/testdata'
-$bench = Join-Path $dataRoot 'bench_ixday\_table.json'
+$bench = Join-Path $dataRoot 'bench_ixday\index'
 if (-not (Test-Path $bench)) { throw "bench data missing: run scripts\gen_bench.ps1 first" }
 
 $failures = 0

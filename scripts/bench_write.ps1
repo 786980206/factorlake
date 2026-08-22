@@ -24,8 +24,6 @@ $day = '2026-05-01'  # all base rows in ONE partition month=2026-05 (worst case 
 # ---- fresh workspace ---------------------------------------------------------
 Remove-Item $root.Replace('/', '\') -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
-[IO.File]::WriteAllText("$root/aligned/t/_table.json",
-  '{"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
 
 function Run-SqlFile([string]$path) {
     cmd /c "`"$duckdb`" -unsigned < `"$path`"" 2>&1 | Out-Null
@@ -51,8 +49,6 @@ foreach ($batch in 1000, 10000, 100000) {
     # --- aligned: reset table to base state, then one aligned_upsert ---
     Remove-Item "$root/aligned/t" -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
-    [IO.File]::WriteAllText("$root/aligned/t/_table.json",
-      '{"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
     # base data via one big upsert (setup, not timed)
     $setupA = @"
 SET aligned_data_root='$root/aligned';
@@ -105,8 +101,6 @@ COPY (
     # --- aligned: same-key upsert with new values ---
     Remove-Item "$root/aligned/t" -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
-    [IO.File]::WriteAllText("$root/aligned/t/_table.json",
-      '{"groups":["index"],"partitioning":{"index":[{"template":"month=%Y-%m","source":"date"}]}}')
     Run-SqlFile $sf   # rebuild base (same setupA)
     $updKeys = [long]($baseRows / 2)
     $setupU = @"
