@@ -143,6 +143,8 @@ AlignedTableScan
 ```
 aligned_upsert(table, source, mapping, root=...)  → (rows_inserted, rows_updated, parts_rewritten, txid)
 aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewritten, txid)
+aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
+aligned_drop(table, group_name, root=...)         → (dirs_removed, files_removed, txid)
 ```
 
 - **v8 mutator**：按主键 `(symbol, date)` 插入/更新/删除，只重写受影响 part。
@@ -221,7 +223,7 @@ extension/aligned/src/
 ├── scan/          aligned_scan.cpp
 ├── mutator/       aligned_mutator.cpp
 ├── rewriter/      part_rewriter.cpp
-├── compaction/    aligned_compactor.cpp
+├── compaction/    aligned_compactor.cpp  aligned_drop.cpp
 ├── io/            parquet_io.cpp
 ├── execution/     aligned_dml.cpp
 └── transaction/   aligned_transaction.cpp
@@ -247,7 +249,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本：test_aligned 42/42、test_upsert 50/50、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 124/124 + 5 PS 套件全 PASS
+- 当前总：SQLLogicTest 135/135 + 5 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`

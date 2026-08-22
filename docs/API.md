@@ -144,7 +144,7 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 ## 4. 表函数 API
 
-除了标准 SQL DML，还提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+除了标准 SQL DML，还提供 6 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
 ### 4.1 `aligned_table` — 扫描逻辑表
 
@@ -260,6 +260,34 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha001');
 SELECT * FROM aligned_compact('cnstk_ixday', 'all');
 ```
 
+### 4.6 `aligned_drop` — 删除列组或整表
+
+```sql
+SELECT * FROM aligned_drop(table_name, group_name [, root => '...']);
+```
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|------|------|------|------|------|
+| `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名。 |
+| `group_name` | 位置参数 2 | VARCHAR | 是 | 要删除的列组名。`'index'` = 删除整张表（所有列组 + 表目录）；其他值 = 仅删除该列组的目录树。 |
+| `root` | 命名参数 | VARCHAR | 否 | 数据根目录。 |
+
+**返回**：单行 `(dirs_removed BIGINT, files_removed BIGINT, txid BIGINT)`。
+
+**规则**：
+- `group_name = 'index'`：删除整个表目录（`<root>/<table>/`），包括所有列组。
+- `group_name = 其他`：仅删除该列组目录（`<root>/<table>/<group_path>/`），index 及其他列组不受影响。
+- 删除前自动获取写锁（`TableWriteLock`），与并发写入互斥。
+- 不存在的组名 → fail-fast（`BinderException`）。
+
+```sql
+-- 删除单个列组（保留 index 及其他组）
+SELECT * FROM aligned_drop('cnstk_ixday', 'factor/alpha001');
+
+-- 删除整张表（index = 删除所有内容）
+SELECT * FROM aligned_drop('cnstk_ixday', 'index');
+```
+
 ---
 
 ## 5. 配置项
@@ -340,11 +368,12 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 - 要求：Parquet 文件，恰好两列 `(symbol VARCHAR, date DATE)`。
 - 不存在的主键被静默跳过（幂等）。
 
-### 6.6 `group_name`（合并目标组名）
+### 6.6 `group_name`（合并/删除目标组名）
 
 - 类型：VARCHAR
-- 含义：`aligned_compact` 的目标列组名。
-- 特殊值 `'all'`：合并表中所有列组（单事务原子切换）。
+- 含义：`aligned_compact` 和 `aligned_drop` 的目标列组名。
+- `aligned_compact` 特殊值 `'all'`：合并表中所有列组（单事务原子切换）。
+- `aligned_drop` 特殊值 `'index'`：删除整张表（所有列组 + 表目录）。
 - 组名格式：`index` / `factor/alpha101` / `fieldset/ma` 等。
 
 ### 6.7 WITH 子句参数（CREATE TABLE）
@@ -479,6 +508,9 @@ idx_t NextTransactionId();
 | `aligned_compact` | `dirs_compacted` | 合并的分区目录数 |
 | | `parts_before` | 合并前 part 文件总数 |
 | | `parts_after` | 合并后 part 文件总数 |
+| `aligned_drop` | `dirs_removed` | 删除的目录数（含分区子目录） |
+| | `files_removed` | 删除的 parquet 文件数 |
+| | `txid` | 事务 ID |
 | `INSERT` (标准 SQL) | `Count` | 插入的行数 |
 | `UPDATE` (标准 SQL) | `Count` | 更新的行数 |
 | `DELETE` (标准 SQL) | `Count` | 删除的行数 |

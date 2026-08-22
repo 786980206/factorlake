@@ -296,3 +296,24 @@
   需设计缓存失效策略（按 part mtime/size），影响面较广，暂缓。
 - StagedTransaction RAII（mutator + compactor 暂存逻辑统一）— 中等优先级重构。
 - manifest → plan/table_plan 重命名 — 低优先级命名清理。
+
+## v0.12-aligned-drop — 列组/整表删除
+
+新增 `aligned_drop` 表函数，支持按列组或整表级别删除 AlignedTable 数据：
+
+```sql
+-- 删除单个列组（保留 index 及其他组）
+SELECT * FROM aligned_drop('mytable', 'factor/alpha', root => '...');
+-- 删除整张表（group_name='index'）
+SELECT * FROM aligned_drop('mytable', 'index', root => '...');
+```
+
+- **规则**：`group_name='index'` 删除整个表目录（所有列组）；其他组名仅删除
+  该列组的目录树，index 及其他组不受影响。
+- **并发安全**：删除前获取 `TableWriteLock`，与并发 upsert/delete/compact 互斥。
+- **返回值**：`(dirs_removed, files_removed, txid)` — 删除的目录数、文件数、事务 ID。
+- **DuckDB 1.5.4 限制**：SQL 解析器不支持 `DROP TABLE ... WITH (...)` 语法
+  （`ExtraDropInfo` 机制仅用于 SECRETS），因此使用表函数而非标准 DROP TABLE。
+- 新增文件：`compaction/aligned_drop.{cpp,hpp}`（~140 行）。
+- 新增测试：`test/aligned/aligned_drop.test`（11 个断言）。
+- 更新 `docs/API.md`：新增 §4.6 aligned_drop + 参数详解 + 返回值表。

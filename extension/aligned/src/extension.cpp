@@ -2,6 +2,7 @@
 
 #include "catalog/aligned_catalog.hpp"
 #include "compaction/aligned_compactor.hpp"
+#include "compaction/aligned_drop.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -73,6 +74,16 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	                                 AlignedCompactFunction, AlignedCompactBind, AlignedCompactInitGlobal, nullptr);
 	aligned_compact_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_compact_fn);
+
+	// aligned_drop(table_name, group_name, root=...)
+	// Drop a column group (all partitions) or the entire table (index).
+	// group_name = "index" deletes the whole table directory; other names
+	// delete only that group's directory tree. Returns (dirs_removed,
+	// files_removed, txid).
+	TableFunction aligned_drop_fn("aligned_drop", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                              AlignedDropFunction, AlignedDropBind, AlignedDropInitGlobal, nullptr);
+	aligned_drop_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(aligned_drop_fn);
 
 	// Phase 8: DuckLake-style storage extension. ATTACH '<root>' AS name
 	// (TYPE ALIGNED) creates a logical catalog over the parquet column groups:

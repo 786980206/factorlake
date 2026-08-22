@@ -1,0 +1,70 @@
+# name: test/aligned/aligned_drop.test
+# description: aligned_drop — drop column group or entire table (index)
+
+# --- setup: create multi-group table with data ---
+query I
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); CREATE TABLE al.drop_tbl (symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT, alpha001 DOUBLE, alpha002 DOUBLE) WITH (groups = 'index:close,volume;factor/alpha:alpha001,alpha002'); SELECT count(*) FROM al.drop_tbl
+----
+0
+
+# insert rows across two months
+query I
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); INSERT INTO al.drop_tbl VALUES ('000001', DATE '2026-01-15', 10.5, 1000, 0.3, 0.5); INSERT INTO al.drop_tbl VALUES ('000002', DATE '2026-02-20', 11.0, 2000, 0.4, 0.6); SELECT count(*) FROM al.drop_tbl
+----
+2
+
+# verify both groups readable
+query RRRR
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT close, volume, alpha001, alpha002 FROM al.drop_tbl WHERE symbol = '000001'
+----
+10.5,1000,0.3,0.5
+
+# --- drop a single non-index column group ---
+# factor/alpha has 3 partition dirs (month=1970-01 placeholder, month=2026-01,
+# month=2026-02), each with 1 parquet file = 3 dirs + 3 files
+query III
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT * FROM aligned_drop('drop_tbl', 'factor/alpha', root => '{TEST_DIR}/drop_data')
+----
+3,3,1
+
+# --- index group still intact after dropping factor/alpha ---
+query I
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.drop_tbl
+----
+2
+
+query RR
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT symbol, close FROM al.drop_tbl ORDER BY symbol
+----
+000001,10.5
+000002,11.0
+
+# --- error: dropped group column no longer found ---
+statement error
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT alpha001 FROM al.drop_tbl
+----
+not found
+
+# --- error: unknown group name ---
+statement error
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT * FROM aligned_drop('drop_tbl', 'factor/nonexist', root => '{TEST_DIR}/drop_data')
+----
+unknown group
+
+# --- error: no data root configured ---
+statement error
+SELECT * FROM aligned_drop('nonexistent', 'index')
+----
+no data root
+
+# --- drop index = drop entire table ---
+# mytable has: index/ (2 dirs + 2 files), factor/alpha already dropped.
+# _tmp/ may exist. Total dirs and files vary, so just verify the table is gone.
+statement ok
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT * FROM aligned_drop('drop_tbl', 'index', root => '{TEST_DIR}/drop_data')
+
+# --- verify table directory is gone ---
+statement error
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.drop_tbl
+----
+does not exist
