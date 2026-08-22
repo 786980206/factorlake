@@ -13,12 +13,12 @@ class AlignedTableEntry;
 struct AlignedTableBindData;
 
 //! A logical table of the aligned attached database. Reads go straight to the
-//! parquet column groups via the aligned_scan scan 鈥?nothing is materialized.
+//! parquet column groups via the aligned_scan scan — nothing is materialized.
 class AlignedTableEntry : public TableCatalogEntry {
 public:
 	AlignedTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, string root_p);
 
-	//! Scan function = aligned_scan(root, table); bind data is pre-built.
+	//! Scan function = aligned_scan(table, root=...); bind data is pre-built.
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	void BindUpdateConstraints(Binder &binder, LogicalGet &get, LogicalProjection &proj, LogicalUpdate &update,
 	                           ClientContext &context) override;

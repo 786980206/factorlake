@@ -151,25 +151,20 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 
 	if (StringUtil::CIEquals(bind.group_name, "index")) {
 		// --- New table creation ---
-		// All columns go into the index group. Build a groups option string
-		// "index:col1,col2,..." and delegate to AlignedCreateTable.
+		// All columns go into the index group. Pass an empty groups_option —
+		// AlignedCreateTable defaults all unassigned columns to the index
+		// group, so no string round-trip is needed.
 		if (table_exists) {
 			throw BinderException("aligned_create: table '%s' already exists at '%s'",
 			                       bind.table_name, table_dir);
 		}
-		string groups_option = "index:";
-		for (idx_t i = 0; i < bind.columns.size(); i++) {
-			if (i > 0) {
-				groups_option += ",";
-			}
-			groups_option += bind.columns[i].Name();
-		}
 		AlignedCreateTable(context, bind.root, bind.table_name, bind.columns,
-		                   groups_option, bind.partition_template);
+		                   "", bind.partition_template);
 	} else {
 		// --- Column group extension ---
 		// Add a new column group to an existing table. Build a groups option
-		// "group_name:col1,col2,..." and delegate to AlignedCreateTable (extend mode).
+		// string "group_name:col1,col2,..." — AlignedCreateTable parses it to
+		// determine which columns belong to the new group.
 		if (!table_exists) {
 			throw BinderException("aligned_create: table '%s' does not exist at '%s' — "
 			                       "cannot add column group '%s' to a non-existent table",

@@ -125,8 +125,9 @@ index 行空间的一部分**（缺分区 → 该区行保留、该组列全 NUL
 footer 推导。
 
 **空表不是有效表**：`BuildTablePlan` 通过 glob 发现 Group，空表（无任何 part）
-返回空 plan。Writer 的 `aligned_upsert` 第一次写入时，从 `mapping` 参数推导
-Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认 `month=%Y-%m`。
+返回空 plan。Writer 的标准 DML（INSERT/UPDATE/DELETE via ATTACH）第一次写入时，
+从 `mapping` 参数推导 Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认
+`month=%Y-%m`。
 **例外**：`CREATE TABLE` DDL（§9.1）写 0 行占位 parquet，glob 可发现 → 有效表。
 
 ### 5.2 不存在的字段
@@ -194,8 +195,17 @@ Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认 `mo
 **API**：
 
 ```
-aligned_upsert(table, source_path [, mapping], root=...)  → (rows_inserted, rows_updated, parts_rewritten, txid)
-aligned_delete(table, keys_source, root=...)              → (rows_deleted, parts_rewritten, txid)
+-- 建表 / 扩展列组
+aligned_create(table, group, columns, root=..., partition_template=...)  → (dirs_created, files_created, txid)
+-- 合并 part
+aligned_compact(table, group_name, root=...)  → (dirs_compacted, parts_before, parts_after)
+-- 删除列组 / 整表
+aligned_drop(table, group_name, root=...)     → (dirs_removed, files_removed, txid)
+
+-- 标准 DML（via ATTACH ... TYPE ALIGNED）
+INSERT INTO al.<table> ...   → Count
+UPDATE al.<table> SET ...     → Count
+DELETE FROM al.<table> ...   → Count
 ```
 
 - `mapping` 对已存在的表可省略（按列名自动推断所属 Group）；空表首写必须显式给出。
@@ -215,8 +225,8 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
   1. 写入 `<table>/_tmp/transaction-<txid>/`，`_tmp/` 对 Reader 不可见。
   2. 提交时 part 以 v6 名 `{idx:04d}-{rows:10d}.parquet` 落位（rename 到正式位置）。
   3. 崩溃 → 丢弃 `_tmp/transaction-<txid>/`（读端从不读 `_tmp/`）。
-- `aligned_delete`：删空最高索引 part → 直接移除；删空单 part 分区 → 整分区移除；
-  删空内部 part → fail-fast（"run aligned_compact first"）。
+- DELETE：删空最高索引 part → 直接移除；删空单 part 分区 → 整分区移除；
+  删空内部 part → 原地重写为 0 行空文件（保留文件名索引，保持 index 连续）。
 - **Compaction**（`aligned_compact(table, 'all')`）：合并所有组的多 part 分区为
   单 part（同目录必须同列集，拒绝 schema-evolution 合并）。**两阶段提交**：所有组
   的合并 part 先全部写入 `_tmp/`，全部成功后再统一 move 到目标目录并删除旧 part；

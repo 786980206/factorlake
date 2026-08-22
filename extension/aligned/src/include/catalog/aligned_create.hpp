@@ -20,8 +20,8 @@ struct BoundCreateTableInfo;
 //! Rules:
 //!   - The first two columns must be (symbol VARCHAR, date DATE/TIMESTAMP) —
 //!     the v8 primary key contract (col0=symbol, col1=date).
-//!   - `groups` maps columns to column groups (same syntax as aligned_upsert
-//!     mapping). Columns not listed in any group default to the index group.
+//!   - `groups` maps columns to column groups (format "group:col1,col2;...").
+//!     Columns not listed in any group default to the index group.
 //!   - `partition_template` defaults to "month=%Y-%m".
 //!   - A placeholder parquet (0 rows) is written per group under
 //!     <table>/<group>/<partition_key>/0000-0000000000.parquet.

@@ -121,13 +121,13 @@ entirely.
 (diminishing returns — the 120-column chunk assembly saturates memory bandwidth).
 join p100 goes 1→4 = 1.93×, 4→8 = 1.07× (similar pattern). Both scale comparably.
 
-## Write Benchmark (aligned_upsert vs native parquet rewrite)
+## Write Benchmark (aligned DML vs native parquet rewrite)
 
 Date: 2026-08-22  Script: `scripts/bench_write.ps1`
 Dataset: 600,000 base rows in a single `month=2026-05` partition (worst case: one large
-part to rewrite on any update). Aligned uses `aligned_upsert` (reads affected part,
-merges, rewrites only that part + atomic commit). Native = DuckDB `read_parquet` +
-SQL merge + `COPY TO` a fresh parquet (full rewrite).
+part to rewrite on any update). Aligned uses standard DML via `ATTACH ... TYPE ALIGNED`
+(reads affected part, merges, rewrites only that part + atomic commit). Native = DuckDB
+`read_parquet` + SQL merge + `COPY TO` a fresh parquet (full rewrite).
 
 | scenario | batch | engine | seconds |
 |----------|-------|--------|---------|
@@ -154,7 +154,7 @@ At 100k the native path (UNION ALL + single COPY) becomes competitive (0.402s vs
 insert the new keys into the shared row space.
 
 **Update (same keys): aligned is slower (2.4s vs 0.5s).** This is the expected
-trade-off: `aligned_upsert` reads the entire 600k-row affected part, merges the 300k
+trade-off: aligned DML reads the entire 600k-row affected part, merges the 300k
 updates in memory, and rewrites that part. The native path does a `LEFT JOIN` + full
 `COPY TO` which DuckDB's vectorized engine optimizes well (hash join + streaming
 write). The aligned engine's per-part rewrite is O(part_size) regardless of how many
