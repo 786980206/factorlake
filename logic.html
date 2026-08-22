@@ -75,11 +75,12 @@ body{
 
 /* ===== Table box (top-level, no database wrapper) ===== */
 .db-wrap{
-  flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  flex:1;display:flex;align-items:stretch;justify-content:center;overflow:hidden;
 }
 .table-box{
   border:2px solid var(--org);border-radius:14px;
-  background:var(--panel);padding:3vh 3vw;width:100%;
+  background:var(--panel);padding:2.5vh 2vw;width:100%;
+  display:flex;flex-direction:column;
   position:relative;box-shadow:0 4px 24px rgba(0,0,0,.06);
 }
 .table-box::before{
@@ -94,7 +95,7 @@ body{
 
 /* ===== Group columns layout ===== */
 .groups{
-  display:flex;gap:1.2vw;align-items:stretch;flex-wrap:nowrap;
+  display:flex;gap:1.2vw;align-items:stretch;flex-wrap:nowrap;flex:1;
 }
 .group{
   flex:1;min-width:0;border-radius:10px;padding:1.5vh 1.2vw;
@@ -120,8 +121,9 @@ body{
 
 /* ===== Partition band ===== */
 .partition{
-  border:1px dashed var(--line);border-radius:7px;padding:.8vh 1vw;
-  margin-bottom:.8vh;background:rgba(0,0,0,.01);
+  border:1px dashed var(--line);border-radius:7px;padding:1vh 1vw;
+  margin-bottom:1vh;background:rgba(0,0,0,.01);
+  display:flex;flex-direction:column;flex:1;
 }
 .partition:last-child{margin-bottom:0}
 .part-label{
@@ -133,7 +135,8 @@ body{
 /* ===== Part file ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;
-  background:#f0f3f6;padding:.6vh .8vw;margin-bottom:.6vh;
+  background:#f0f3f6;padding:.8vh .8vw;margin-bottom:.6vh;
+  flex:1;display:flex;flex-direction:column;
 }
 .part:last-child{margin-bottom:0}
 .part-name{
@@ -143,9 +146,9 @@ body{
 .part-name .rows{color:var(--mut);font-size:1.3vh}
 
 /* ===== Row groups (RG) ===== */
-.rgs{display:flex;gap:4px;align-items:center}
+.rgs{display:flex;gap:4px;align-items:stretch;flex:1}
 .rg{
-  flex:1;height:3.5vh;border-radius:4px;min-width:10px;
+  flex:1;border-radius:4px;min-width:10px;
   display:flex;align-items:center;justify-content:center;
   font-size:1.3vh;font-family:Consolas,monospace;color:var(--tx);
   cursor:default;transition:transform .15s;position:relative;
