@@ -134,6 +134,10 @@ struct MutateBindData : public TableFunctionData {
 	// Function output schema.
 	vector<LogicalType> types;
 	vector<string> names;
+	// Internal API: when non-null, the mutator reads from this in-memory
+	// collection instead of opening source_path as a parquet file. Used by
+	// PhysicalAlignedInsert to avoid the temp-parquet double-write.
+	ColumnDataCollection *source_collection = nullptr;
 };
 
 struct MutateGlobalState : public GlobalTableFunctionState {
@@ -182,5 +186,21 @@ unique_ptr<GlobalTableFunctionState> MutateInitGlobal(ClientContext &context, Ta
 void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
 
 void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
+
+//! Internal API: upsert directly from an in-memory ColumnDataCollection,
+//! bypassing the temp-parquet file. Used by PhysicalAlignedInsert to avoid
+//! the double-write (buffer → temp parquet → aligned_upsert reads it back).
+//! The collection's column names must match the table's source columns.
+//! Returns (rows_inserted, rows_updated, parts_rewritten) via the output
+//! parameters.
+struct UpsertResult {
+	idx_t rows_inserted = 0;
+	idx_t rows_updated = 0;
+	idx_t parts_rewritten = 0;
+};
+UpsertResult AlignedUpsertFromCollection(ClientContext &context, const string &table_name,
+                                          const string &root, const string &mapping,
+                                          ColumnDataCollection &source_collection,
+                                          const vector<string> &source_col_names);
 
 } // namespace duckdb

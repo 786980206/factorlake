@@ -415,6 +415,210 @@ unique_ptr<GlobalTableFunctionState> MutateInitGlobal(ClientContext &context, Ta
 	return make_uniq<MutateGlobalState>();
 }
 
+//! Builds a MutateBindData for upsert, using an in-memory ColumnDataCollection
+//! as the source instead of a parquet file. This replicates the logic of
+//! MutateBind but sources schema info from the collection (types + names)
+//! rather than opening a ParquetReader.
+static unique_ptr<MutateBindData> BuildUpsertBindFromCollection(ClientContext &context,
+                                                                const string &table_name,
+                                                                const string &root,
+                                                                const string &mapping_str,
+                                                                const ColumnDataCollection &source_collection,
+                                                                const vector<string> &source_col_names) {
+	auto result = make_uniq<MutateBindData>();
+	result->is_delete = false;
+	result->table_name = table_name;
+	result->source_path = "<in-memory>";
+	result->source_collection = nullptr; // set by caller after bind
+	const char *fn = "aligned_upsert";
+
+	auto &fs = FileSystem::GetFileSystem(context);
+	string table_dir = root + "/" + table_name;
+
+	bool empty_table = !fs.DirectoryExists(table_dir) ||
+	                   fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY).empty();
+	if (empty_table) {
+		throw BinderException("%s: internal API does not support first write of empty table (use SQL path)", fn);
+	}
+	BuildTablePlan(context, root, table_name, result->plan);
+	result->empty_table = false;
+	result->plan.table_path = table_dir;
+	result->plan.table_name = table_name;
+
+	// Build source schema map from the collection's types + names
+	case_insensitive_map_t<LogicalType> source_schema;
+	for (idx_t c = 0; c < source_col_names.size(); c++) {
+		source_schema[source_col_names[c]] = source_collection.Types()[c];
+	}
+
+	// Parse mapping
+	case_insensitive_map_t<vector<string>> mapping;
+	if (!mapping_str.empty()) {
+		ParseMapping(mapping_str, fn, mapping);
+	}
+
+	// For a non-empty table, the mapping may name groups that don't exist yet
+	for (auto &kv : mapping) {
+		bool found = false;
+		for (auto &g : result->plan.groups) {
+			if (StringUtil::CIEquals(g.manifest.group, kv.first)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			GroupPlan gp;
+			gp.manifest.group = kv.first;
+			gp.group_path = table_dir + "/" + kv.first;
+			auto slash = kv.first.find('/');
+			if (slash != string::npos && kv.first.find('/', slash + 1) == string::npos) {
+				gp.lv1 = kv.first.substr(0, slash);
+				gp.lv2 = kv.first.substr(slash + 1);
+			}
+			result->plan.groups.push_back(std::move(gp));
+		}
+	}
+
+	result->group_mapping.resize(result->plan.groups.size());
+
+	if (mapping_str.empty()) {
+		// Auto-derive: each source column → the group whose schema owns it.
+		for (auto &name : source_col_names) {
+			for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
+				auto &group = result->plan.groups[gi];
+				bool owned = std::any_of(group.column_order.begin(), group.column_order.end(),
+				                         [&](const string &n) { return StringUtil::CIEquals(n, name); });
+				if (owned) {
+					result->group_mapping[gi].col_names.push_back(name);
+					break;
+				}
+			}
+		}
+	} else {
+		for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
+			auto &gm = result->group_mapping[gi];
+			auto &group = result->plan.groups[gi];
+			auto it = mapping.find(group.manifest.group);
+			if (it == mapping.end()) {
+				continue;
+			}
+			gm.col_names = it->second;
+		}
+	}
+
+	// Every mapping entry must name a real group
+	for (auto &kv : mapping) {
+		bool found = false;
+		for (auto &group : result->plan.groups) {
+			if (StringUtil::CIEquals(kv.first, group.manifest.group)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			throw BinderException("%s: unknown group '%s' in mapping", fn, kv.first);
+		}
+	}
+
+	// Primary key columns (non-empty table)
+	auto &index_group = result->plan.groups[0];
+	result->date_col = index_group.partition_source;
+	result->symbol_col = index_group.symbol_column;
+
+	// index mapping must include the key columns
+	{
+		auto &gm = result->group_mapping[0];
+		bool has_date = false, has_symbol = false;
+		for (auto &col : gm.col_names) {
+			if (StringUtil::CIEquals(col, result->date_col)) {
+				has_date = true;
+			}
+			if (StringUtil::CIEquals(col, result->symbol_col)) {
+				has_symbol = true;
+			}
+		}
+		if (!has_date || !has_symbol) {
+			throw BinderException("%s: the index group's mapping must include the primary key columns ('%s', '%s')",
+			                      fn, result->date_col, result->symbol_col);
+		}
+	}
+
+	// Validate all mapped columns exist in the source + resolve types
+	for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
+		auto &gm = result->group_mapping[gi];
+		auto &group = result->plan.groups[gi];
+		case_insensitive_map_t<LogicalType> group_types;
+		for (idx_t ci = 0; ci < group.column_order.size(); ci++) {
+			group_types[group.column_order[ci]] = group.schema_types[ci];
+		}
+		for (auto &col : gm.col_names) {
+			auto it = source_schema.find(col);
+			if (it == source_schema.end()) {
+				throw BinderException("%s: column '%s' (group '%s') not found in source", fn, col,
+				                      result->plan.groups[gi].manifest.group);
+			}
+			auto git = group_types.find(col);
+			gm.col_types.push_back(git != group_types.end() ? git->second : it->second);
+		}
+		if (gi == 0) {
+			auto it = source_schema.find(result->date_col);
+			if (it == source_schema.end()) {
+				throw BinderException("%s: partition column '%s' not found in source", fn, result->date_col);
+			}
+			if (it->second.id() != LogicalTypeId::DATE && it->second.id() != LogicalTypeId::TIMESTAMP) {
+				throw BinderException("%s: partition column '%s' must be DATE or TIMESTAMP (got %s)", fn,
+				                      result->date_col, it->second.ToString());
+			}
+		}
+	}
+	result->source_rows = source_collection.Count();
+
+	// Needed source columns
+	{
+		case_insensitive_map_t<idx_t> needed_pos;
+		for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
+			auto &gm = result->group_mapping[gi];
+			for (idx_t c = 0; c < gm.col_names.size(); c++) {
+				auto it = needed_pos.find(gm.col_names[c]);
+				if (it == needed_pos.end()) {
+					needed_pos[gm.col_names[c]] = result->needed_names.size();
+					result->needed_names.push_back(gm.col_names[c]);
+				}
+				gm.src_pos.push_back(needed_pos[gm.col_names[c]]);
+			}
+		}
+	}
+
+	result->types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
+	result->names = {"rows_inserted", "rows_updated", "parts_rewritten", "txid"};
+	return result;
+}
+
+UpsertResult AlignedUpsertFromCollection(ClientContext &context, const string &table_name,
+                                          const string &root, const string &mapping,
+                                          ColumnDataCollection &source_collection,
+                                          const vector<string> &source_col_names) {
+	auto bind = BuildUpsertBindFromCollection(context, table_name, root, mapping, source_collection,
+	                                           source_col_names);
+	bind->source_collection = &source_collection;
+
+	MutateGlobalState gstate;
+	DataChunk output;
+	output.Initialize(context, bind->types);
+
+	TableFunctionInput input(bind.get(), nullptr, &gstate);
+
+	AlignedUpsertFunction(context, input, output);
+
+	UpsertResult result;
+	if (output.size() > 0) {
+		result.rows_inserted = output.GetValue(0, 0).GetValue<int64_t>();
+		result.rows_updated = output.GetValue(1, 0).GetValue<int64_t>();
+		result.parts_rewritten = output.GetValue(2, 0).GetValue<int64_t>();
+	}
+	return result;
+}
+
 //===----------------------------------------------------------------------===//
 // Execution helpers
 //===----------------------------------------------------------------------===//
@@ -495,6 +699,53 @@ static unique_ptr<ColumnDataCollection> ReadSourceColumns(ClientContext &context
 			continue; // parquet emits empty setup chunks on row-group switches
 		}
 		out->Append(append_state, chunk);
+	}
+	return out;
+}
+
+//! Extract the needed columns from an in-memory ColumnDataCollection (used
+//! by PhysicalAlignedInsert to avoid the temp-parquet double-write). The
+//! collection's column order is matched by name (case-insensitive).
+static unique_ptr<ColumnDataCollection> ReadSourceFromCollection(ClientContext &context,
+                                                                 const ColumnDataCollection &src_collection,
+                                                                 const vector<string> &col_names,
+                                                                 const vector<string> &src_col_names) {
+	// Map needed names → source collection column indices
+	vector<idx_t> src_indices;
+	vector<LogicalType> types;
+	for (auto &name : col_names) {
+		idx_t pos = DConstants::INVALID_INDEX;
+		for (idx_t c = 0; c < src_col_names.size(); c++) {
+			if (StringUtil::CIEquals(src_col_names[c], name)) {
+				pos = c;
+				break;
+			}
+		}
+		if (pos == DConstants::INVALID_INDEX) {
+			throw IOException("Aligned table: column '%s' not found in source collection", name);
+		}
+		src_indices.push_back(pos);
+		types.push_back(src_collection.Types()[pos]);
+	}
+	auto out = make_uniq<ColumnDataCollection>(context, types);
+	ColumnDataAppendState append_state;
+	out->InitializeAppend(append_state);
+	ColumnDataScanState scan_state;
+	src_collection.InitializeScan(scan_state);
+	DataChunk scan_chunk;
+	src_collection.InitializeScanChunk(scan_chunk);
+	DataChunk out_chunk;
+	out_chunk.Initialize(context, types);
+	while (src_collection.Scan(scan_state, scan_chunk)) {
+		if (scan_chunk.size() == 0) {
+			continue;
+		}
+		out_chunk.Reset();
+		out_chunk.SetCardinality(scan_chunk.size());
+		for (idx_t c = 0; c < src_indices.size(); c++) {
+			VectorOperations::Copy(scan_chunk.data[src_indices[c]], out_chunk.data[c], scan_chunk.size(), 0, 0);
+		}
+		out->Append(append_state, out_chunk);
 	}
 	return out;
 }
@@ -915,8 +1166,15 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 	string template_str = IndexTemplate(bind);
 
 	// 1. Read the needed source columns (mapped columns; the index mapping
-	//    includes the primary key columns).
-	auto src = ReadSourceColumns(context, bind.source_path, bind.needed_names);
+	//    includes the primary key columns). When source_collection is set
+	//    (internal API from PhysicalAlignedInsert), read from the in-memory
+	//    collection instead of opening a parquet file.
+	unique_ptr<ColumnDataCollection> src;
+	if (bind.source_collection) {
+		src = ReadSourceFromCollection(context, *bind.source_collection, bind.needed_names, bind.needed_names);
+	} else {
+		src = ReadSourceColumns(context, bind.source_path, bind.needed_names);
+	}
 	SourceReader reader(context, *src);
 
 	// 2. Locate the key columns among the needed columns.

@@ -105,76 +105,31 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 		return SinkFinalizeType::READY;
 	}
 
-	// Stage the buffered rows as a temp parquet inside the table's _tmp dir
-	// (invisible to readers and to group discovery).
-	auto fs = FileSystem::CreateLocal();
-	string tmp_dir = root + "/" + table + "/_tmp";
-	fs->CreateDirectoriesRecursive(tmp_dir);
-	string staged = tmp_dir + "/dml-insert-" + StringUtil::Format("%lld", (long long)Timestamp::GetEpochMs(
-	                                                                    Timestamp::GetCurrentTimestamp())) +
-	                "-" + StringUtil::Format("%d", (int)(idx_t)this % 100000) + ".parquet";
-
-	auto &staged_names = row_names;
-	{
-		ParquetWriter writer(context, FileSystem::GetFileSystem(context), staged, row_types, staged_names,
-		                     duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(), ShreddingType(),
-		                     vector<pair<string, string>>(), nullptr, optional_idx(), 1073741824ULL, 1, 0.01,
-		                     ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
-		unique_ptr<ParquetWriteTransformData> transform;
-		ColumnDataCollection buffer(context, row_types);
-		ColumnDataAppendState append;
-		buffer.InitializeAppend(append);
-		ColumnDataScanState scan_state;
-		g.collection.InitializeScan(scan_state);
-		DataChunk scan_chunk;
-		g.collection.InitializeScanChunk(scan_chunk);
-		while (g.collection.Scan(scan_state, scan_chunk)) {
-			buffer.Append(scan_chunk);
-			if (buffer.Count() >= 122880) {
-				writer.Flush(buffer, transform);
-				buffer.Reset();
-				buffer.InitializeAppend(append);
-			}
-			scan_chunk.Reset();
-		}
-		writer.Flush(buffer, transform);
-		writer.Finalize();
-	}
-
-	// Run the mutator on a worker thread (nested-query deadlock avoidance).
+	// Direct upsert from the in-memory ColumnDataCollection — no temp parquet
+	// file, no intermediate serialization. The mutator reads the collection
+	// directly via the source_collection field in MutateBindData.
+	// Run on a worker thread (nested-query deadlock avoidance: the caller's
+	// context may be holding pipeline locks).
 	auto &db = DatabaseInstance::GetDatabase(context);
 	const string &tbl = table;
 	const string &rt = root;
-	const string staged_path = staged;
-	std::thread worker([&db, &g, tbl, rt, staged_path]() {
+	// Build the mapping string from the table's column groups + the insert's
+	// column names. Auto-derive mapping (no mapping string) lets the mutator
+	// assign each source column to the group that owns it.
+	std::thread worker([&db, &g, tbl, rt, this]() {
 		try {
 			Connection con(db);
-			auto result = con.Query("SELECT rows_inserted, rows_updated FROM aligned_upsert('" +
-			                        StringUtil::Replace(tbl, "'", "''") + "', '" +
-			                        StringUtil::Replace(staged_path, "'", "''") + "', root='" +
-			                        StringUtil::Replace(rt, "'", "''") + "')");
-			if (result->HasError()) {
-				g.error = result->GetError();
-				return;
-			}
-			auto &mat = result->Cast<MaterializedQueryResult>();
-			if (mat.RowCount() > 0) {
-				g.rows_inserted = mat.GetValue<int64_t>(0, 0);
-				g.rows_updated = mat.GetValue<int64_t>(1, 0);
-			}
+			auto result = AlignedUpsertFromCollection(*con.context, tbl, rt, "", g.collection, row_names);
+			g.rows_inserted = result.rows_inserted;
+			g.rows_updated = result.rows_updated;
 		} catch (std::exception &ex) {
 			g.error = ex.what();
+		} catch (...) {
+			g.error = "unknown error during aligned upsert";
 		}
 	});
 	worker.join();
 
-	// Best-effort cleanup of the staging file.
-	try {
-		if (g.error.empty()) {
-			fs->RemoveFile(staged);
-		}
-	} catch (...) {
-	}
 	if (!g.error.empty()) {
 		throw IOException("aligned INSERT failed: %s", g.error);
 	}
