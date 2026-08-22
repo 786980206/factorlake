@@ -14,6 +14,7 @@
   --l1:#0a7b83; --l1bg:rgba(10,123,131,.08); --l1bd:rgba(10,123,131,.45);  /* partition: teal */
   --l2:#9a6700; --l2bg:rgba(154,103,0,.08); --l2bd:rgba(154,103,0,.45);  /* part: amber */
   --l3:#8250df; --l3bg:rgba(130,80,223,.08); --l3bd:rgba(130,80,223,.45);  /* rg: purple */
+  --l4:#bc4c00; --l4bg:rgba(188,76,0,.08); --l4bd:rgba(188,76,0,.4);  /* fields: orange */
 }
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;overflow:hidden}
@@ -99,16 +100,16 @@ body{
 }
 .group-more span{font-size:2.5vh;color:var(--dim)}
 
-/* ===== Spotlight: when something is selected, dim unselected peers ===== */
-.table-box.has-sel .partition:not(.selected),
-.table-box.has-sel .part:not(.selected),
-.table-box.has-sel .rg:not(.selected){opacity:.45;filter:saturate(.5)}
-.table-box.has-sel-part .partition:not(.selected),
-.table-box.has-sel-part .part:not(.selected),
-.table-box.has-sel-part .rg:not(.selected){opacity:.35;filter:saturate(.3)}
-.table-box.has-sel-rg .partition:not(.selected),
-.table-box.has-sel-rg .part:not(.selected),
-.table-box.has-sel-rg .rg:not(.selected){opacity:.3;filter:saturate(.2)}
+/* ===== Spotlight: dim only unselected peers at the SAME level ===== */
+/* Partition selected → dim other partitions, but NOT their child parts */
+.table-box.has-sel .partition:not(.selected){opacity:.4;filter:saturate(.4)}
+/* Part selected → dim other partitions + other parts in selected partition */
+.table-box.has-sel-part .partition:not(.selected){opacity:.3;filter:saturate(.3)}
+.table-box.has-sel-part .partition.selected .part:not(.selected){opacity:.4;filter:saturate(.4)}
+/* RG selected → dim other partitions, other parts, other RGs */
+.table-box.has-sel-rg .partition:not(.selected){opacity:.25;filter:saturate(.2)}
+.table-box.has-sel-rg .partition.selected .part:not(.selected){opacity:.3;filter:saturate(.2)}
+.table-box.has-sel-rg .part.selected .rg:not(.selected){opacity:.35;filter:saturate(.3)}
 
 /* ===== L1: Partition — teal accent ===== */
 .partition{
@@ -200,7 +201,7 @@ body{
   flex:1 1 0;min-width:0;
   font-family:Consolas,monospace;font-size:1.1vh;
   padding:4px 4px;border-radius:4px;
-  background:var(--panel2);border:1px solid var(--line2);
+  background:var(--l4bg);border:1px solid var(--l4bd);color:var(--l4);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   display:flex;align-items:center;justify-content:center;
 }
