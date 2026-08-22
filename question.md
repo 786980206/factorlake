@@ -154,3 +154,77 @@ con.execute("SELECT * FROM aligned_scan('dg5')")
 - `SELECT count(*) FROM al.strict1` 返回 0（catalog 发现了表，但列定义为空）
 
 **关键确认**：这不是创建顺序问题（已严格按文档先 index 后 group），而是 ATTACH catalog 的 schema discovery 没有从 placeholder parquet footer 读取列定义。
+
+---
+
+## FactorLake 侧回复（2026-08-23）
+
+### 根因分析
+
+已定位并修复。问题根因 **不在 ATTACH schema discovery**，而在 `BuildTablePlan` 的文件发现阶段。
+
+**`HasIgnoredPathSegment` 函数 bug**：该函数用于过滤表目录内的 `_tmp/` 和 `.hidden/` 隐藏目录（契约 §2.1d）。但它检查的是 **绝对路径的所有目录段**，包括表目录 **上方** 的段。
+
+你的数据根目录是 `C:/Users/winds/.stkoe/factorlake`，其中 `.stkoe` 段以 `.` 开头。虽然 `.stkoe` 在表目录（`.../factorlake/dg5/`）上方，但旧代码将其判定为"隐藏目录"，导致 glob 发现的所有 parquet 文件被过滤掉。
+
+结果：`BuildTablePlan` 返回空 `TablePlan`（0 个 group），所有下游函数都看不到 schema：
+- `aligned_groups` → 0 行（无 group 可列）
+- `aligned_scan` → 无列定义 → "Table function must return at least one column"
+- ATTACH catalog → schema discovery 调 `BuildTablePlan` → 空 → `information_schema.columns` 为空
+
+### 修复
+
+**Commit `0fe5aa6`**：`HasIgnoredPathSegment` 只检查表目录 **下方** 的路径段，不再检查上方段。
+
+- 以表名（`table_prefix` 的最后一段，如 `dg5`）为锚点，定位路径中表目录的位置
+- 仅检查表目录 **之下** 的段是否有 `.`/`_` 前缀
+- 同时修复了 Windows `\` 分隔符未归一化的问题（`GlobFiles` 在 Windows 返回 `\`，但 `table_prefix` 用 `/`）
+
+### 验证结果
+
+修复后在 **你的数据根目录** `C:/Users/winds/.stkoe/factorlake` 上验证全部通过：
+
+`
+1. aligned_create → (2, 1, 1)                                      [OK]
+2. aligned_groups('dg5') → [('index', 'sym;date;close', 1)]        [OK]
+3. DESCRIBE aligned_scan('dg5') → sym VARCHAR, date DATE, close DOUBLE  [OK]
+4. count(*) FROM aligned_scan('dg5') → 0                           [OK]
+5. ATTACH → information_schema.columns → sym, date, close          [OK]
+6. DESCRIBE al.dg5 → sym VARCHAR, date DATE, close DOUBLE          [OK]
+7. INSERT INTO al.dg5 (...) → 成功                                  [OK]
+8. SELECT * FROM al.dg5 → ('000001', 2024-01-01, 10.5)            [OK]
+`
+
+### 补充说明：information_schema.columns 的 schema 字段
+
+你的查询用 `WHERE table_schema='al'` 返回空——这是查询条件的问题。`al` 是 **catalog 名**（`table_catalog='al'`），而非 **schema 名**。AlignedTable ATTACH 后 schema 名为 `'main'`。正确查询：
+
+`sql
+-- 按 catalog 名查询
+SELECT column_name FROM information_schema.columns
+    WHERE table_catalog='al' AND table_name='dg5'
+    ORDER BY ordinal_position;
+
+-- 或直接 DESCRIBE
+DESCRIBE al.dg5;
+`
+
+### 扩展更新
+
+已重新编译 `release/aligned.duckdb_extension`（23.4 MB）。请重新安装：
+
+`python
+con = duckdb.connect(config={{'allow_unsigned_extensions': True}})
+con.execute("FORCE INSTALL 'D:/proj/factorlake/release/aligned.duckdb_extension';")
+con.execute("LOAD aligned;")
+`
+
+注意必须用 `FORCE INSTALL`（不是 `INSTALL`），否则会使用缓存的旧版本。
+
+### 关于需求清单
+
+- **P0 问题 1**（ATTACH schema 可见）：已修复 [OK]
+- **P1 问题 2**（aligned_groups 返回空）：已修复 [OK]
+- **P1 问题 3**（aligned_scan 空表报错）：已修复 [OK]
+- **P2 需求 4**（aligned_partitions）：后续可补
+- **P2 需求 5**（aligned_storage_stats）：后续可补
