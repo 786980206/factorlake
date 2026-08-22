@@ -12,17 +12,48 @@ namespace duckdb {
 
 namespace {
 
-//! Contract §2.1d: true when any directory segment of the path starts with
-//! '.' or '_' (e.g. "_tmp/", ".hidden/"). The file name segment is excluded.
-bool HasIgnoredPathSegment(const string &path) {
-	auto start = path.find_first_of("/\\");
-	while (start != string::npos) {
-		auto end = path.find_first_of("/\\", start + 1);
-		string segment = path.substr(start + 1, end == string::npos ? string::npos : end - start - 1);
+//! Contract §2.1d: true when any directory segment **below the table root**
+//! starts with '.' or '_' (e.g. "_tmp/", ".hidden/"). Segments ABOVE the table
+//! root (e.g. a data root like "/home/user/.config/factorlake") are NOT checked
+//! — only segments within the table directory are invisible.
+//! The file name segment is excluded.
+//! Both `path` and `table_prefix` must be normalized to '/' separators.
+bool HasIgnoredPathSegment(const string &path, const string &table_prefix) {
+	// Extract the relative path below the table root.
+	// table_prefix = ".../table_name" (the table directory). The file path
+	// is ".../table_name/index/month=2026-01/0000-...parquet". We strip
+	// everything up to and including the table directory name.
+	// Since table_prefix may be relative while path is absolute (or vice
+	// versa), we anchor on the last segment of table_prefix (the table name).
+	auto prefix_slash = table_prefix.find_last_of('/');
+	string table_name_seg =
+	    prefix_slash == string::npos ? table_prefix : table_prefix.substr(prefix_slash + 1);
+	if (table_name_seg.empty()) {
+		return false;
+	}
+	// Find "/table_name/" as a full directory segment in the path.
+	string needle = "/" + table_name_seg + "/";
+	auto pos = path.rfind(needle);
+	if (pos == string::npos) {
+		return false; // can't locate table dir — don't filter
+	}
+	// rel is everything after "/table_name/"
+	string rel = path.substr(pos + needle.size());
+	// Check each directory segment of the relative path (the file name,
+	// i.e. the last segment after the final '/', is excluded).
+	// Walk from the beginning: the first segment (before the first '/') is
+	// a directory segment that must be checked too.
+	idx_t scan = 0;
+	while (scan < rel.size()) {
+		auto slash = rel.find_first_of('/', scan);
+		if (slash == string::npos) {
+			break; // last segment = file name, excluded
+		}
+		string segment = rel.substr(scan, slash - scan);
 		if (!segment.empty() && (segment[0] == '.' || segment[0] == '_')) {
 			return true;
 		}
-		start = end;
+		scan = slash + 1;
 	}
 	return false;
 }
@@ -216,10 +247,14 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 	{
 		auto files = fs.GlobFiles(table_prefix + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
 		for (auto &file : files) {
-			if (HasIgnoredPathSegment(file.path)) {
-				continue; // contract §2.1d: '_'/'_' directory segments are invisible
-			}
+			// Normalize the glob result to '/' separators before any path
+			// comparison — GlobFiles may return '\' on Windows, while
+			// table_prefix uses '/' (NormalizePath is applied later but
+			// HasIgnoredPathSegment needs a normalized path).
 			string norm = NormalizePath(file.path);
+			if (HasIgnoredPathSegment(norm, table_prefix)) {
+				continue; // contract §2.1d: '.'/'_' directory segments below table root are invisible
+			}
 			string group = DeriveGroupFromPath(norm, table_prefix);
 			if (group.empty()) {
 				throw IOException("Aligned table '%s': part file '%s' sits directly in the table root "

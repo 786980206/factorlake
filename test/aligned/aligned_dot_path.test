@@ -1,0 +1,35 @@
+# name: test/aligned/aligned_dot_path.test
+# description: Test that data root paths with dot-prefixed directories (e.g. .stkoe)
+#              do not cause files to be filtered as hidden (regression test for
+#              HasIgnoredPathSegment bug where segments above the table root
+#              were incorrectly checked).
+
+# --- create table with a dot-prefixed data root ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/.data_root'; SELECT * FROM aligned_create('dot_tbl', 'index', 'sym VARCHAR, date DATE, close DOUBLE')
+
+# aligned_groups must return the group (core fix: .data_root is above table root)
+query TTI
+SET aligned_data_root = '{TEST_DIR}/.data_root'; SELECT group_name, columns, partition_count FROM aligned_groups('dot_tbl')
+----
+index,sym;date;close,1
+
+# aligned_scan must return schema (not INTERNAL Error)
+query TTTTTT
+SET aligned_data_root = '{TEST_DIR}/.data_root'; DESCRIBE SELECT * FROM aligned_scan('dot_tbl')
+----
+sym,VARCHAR,YES,NULL,NULL,NULL
+date,DATE,YES,NULL,NULL,NULL
+close,DOUBLE,YES,NULL,NULL,NULL
+
+# count must be 0
+query I
+SET aligned_data_root = '{TEST_DIR}/.data_root'; SELECT count(*) FROM aligned_scan('dot_tbl')
+----
+0
+
+# Also test with explicit root parameter
+query TTI
+SELECT group_name, columns, partition_count FROM aligned_groups('dot_tbl', root => '{TEST_DIR}/.data_root')
+----
+index,sym;date;close,1
