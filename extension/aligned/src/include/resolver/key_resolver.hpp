@@ -70,16 +70,30 @@ private:
 	// Per-partition cached (symbol, date) columns (lazy, whole partition in
 	// memory: the index group is small; the cache makes batch resolution read
 	// each partition's key columns only once).
+	// Optimization: a lightweight symbol boundary index (min/max per Row Group)
+	// is built first; if the key's symbol falls outside the partition's symbol
+	// range, the full data is never loaded (fast rejection / append-at-end).
 	struct PartitionCache {
 		vector<Value> symbols;
 		vector<date_t> dates;
 		bool loaded = false;
+		// Symbol boundary index: min/max symbol per part (from RG stats).
+		// Built from Parquet Row Group min/max statistics without reading data.
+		vector<Value> part_sym_min;  // first (smallest) symbol in each part
+		vector<Value> part_sym_max;  // last (largest) symbol in each part
+		bool boundary_loaded = false;
 	};
 	std::map<string, PartitionCache> cache;
 
 	//! Reads + validates the (symbol, date) columns of every part of a
 	//! partition into the cache (strictly ascending, fail-fast on violation).
 	void LoadPartition(const GroupPartition &partition);
+
+	//! Builds the lightweight symbol boundary index (min/max per part) from
+	//! Parquet Row Group statistics, without reading the full data. This allows
+	//! fast rejection of keys whose symbol falls outside the partition's range
+	//! (a common case for append-at-end upserts).
+	void LoadPartitionBoundaries(const GroupPartition &partition);
 };
 
 } // namespace duckdb

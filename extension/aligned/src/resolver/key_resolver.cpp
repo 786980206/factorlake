@@ -4,6 +4,10 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/function/partition_stats.hpp"
+#include "duckdb/storage/statistics/base_statistics.hpp"
+#include "duckdb/storage/statistics/numeric_stats.hpp"
+#include "duckdb/storage/statistics/string_stats.hpp"
 #include "parquet_reader.hpp"
 
 namespace duckdb {
@@ -126,6 +130,76 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 	}
 }
 
+void KeyResolver::LoadPartitionBoundaries(const GroupPartition &partition) {
+	auto &entry = cache[partition.key];
+	if (entry.boundary_loaded) {
+		return;
+	}
+	entry.boundary_loaded = true;
+
+	// Build a lightweight symbol min/max index per part from Parquet Row Group
+	// statistics — no data read. This allows Resolve to fast-reject keys
+	// whose symbol is outside the partition's symbol range.
+	for (idx_t k = 0; k < partition.part_count; k++) {
+		auto &part = index_group->parts[partition.first_part + k];
+		auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(part.path), ParquetOptions(context));
+		// Find the symbol column index
+		idx_t symbol_pos = DConstants::INVALID_INDEX;
+		for (idx_t c = 0; c < reader->columns.size(); c++) {
+			if (StringUtil::CIEquals(reader->columns[c].name, index_group->symbol_column)) {
+				symbol_pos = c;
+				break;
+			}
+		}
+		if (symbol_pos == DConstants::INVALID_INDEX) {
+			// Skip boundary loading if the column is missing (will be caught
+			// by the full LoadPartition later).
+			entry.part_sym_min.push_back(Value());
+			entry.part_sym_max.push_back(Value());
+			continue;
+		}
+		vector<PartitionStatistics> rg_stats;
+		reader->GetPartitionStats(rg_stats);
+		// The symbol column stats min/max across all RGs gives the part's
+		// symbol range. Since rows are sorted by (symbol, date), the first
+		// RG's min is the part's min and the last RG's max is the part's max.
+		Value part_min, part_max;
+		bool have_stats = false;
+		for (idx_t rg = 0; rg < rg_stats.size(); rg++) {
+			auto &stats = rg_stats[rg];
+			if (!stats.partition_row_group) {
+				continue;
+			}
+			auto base_stats = stats.partition_row_group->GetColumnStatistics(StorageIndex(symbol_pos));
+			if (!base_stats) {
+				continue;
+			}
+			Value rg_min, rg_max;
+			if (base_stats->GetType().id() == LogicalTypeId::VARCHAR) {
+				rg_min = Value(StringStats::Min(*base_stats));
+				rg_max = Value(StringStats::Max(*base_stats));
+			} else {
+				rg_min = NumericStats::Min(*base_stats);
+				rg_max = NumericStats::Max(*base_stats);
+			}
+			if (!have_stats) {
+				part_min = rg_min;
+				part_max = rg_max;
+				have_stats = true;
+			} else {
+				if (rg_min < part_min) {
+					part_min = rg_min;
+				}
+				if (rg_max > part_max) {
+					part_max = rg_max;
+				}
+			}
+		}
+		entry.part_sym_min.push_back(std::move(part_min));
+		entry.part_sym_max.push_back(std::move(part_max));
+	}
+}
+
 KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 	KeyLocation loc;
 	string key;
@@ -143,8 +217,56 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 		if (partition.key != key) {
 			continue;
 		}
-		LoadPartition(partition);
+		// Optimization: first load the lightweight symbol boundary index
+		// (from Parquet RG stats, no data read). If the key's symbol is
+		// outside the partition's [min, max] symbol range, the key is an
+		// append-at-end — we can skip the full partition data load entirely.
+		LoadPartitionBoundaries(partition);
 		auto &cache_entry = cache[partition.key];
+		auto &bounds = cache_entry;
+
+		// Fast path: check if the symbol is outside the partition's range.
+		if (!bounds.part_sym_min.empty() && !bounds.part_sym_min[0].IsNull()) {
+			Value &part_min = bounds.part_sym_min.front();
+			Value &part_max = bounds.part_sym_max.back();
+			if (symbol_value < part_min || symbol_value > part_max) {
+				// Symbol is outside the partition's symbol range → append at end.
+				// Determine append_to_last vs append_new_part using the last
+				// part's row count (already known from the plan, no data read).
+				idx_t last_k = partition.part_count - 1;
+				auto &last_part = index_group->parts[partition.first_part + last_k];
+				loc.partition_key = key;
+				if (last_part.row_count < ALIGNED_DEFAULT_PART_ROWS) {
+					loc.part_index = last_part.partition_index;
+					loc.part_local_row = last_part.row_count;
+					loc.append_to_last = true;
+				} else {
+					idx_t max_index = 0;
+					for (auto &group : plan.groups) {
+						for (auto &gp : group.partitions) {
+							if (gp.key != key) {
+								continue;
+							}
+							for (idx_t k = 0; k < gp.part_count; k++) {
+								auto &pk = group.parts[gp.first_part + k];
+								if (pk.partition_index > max_index) {
+									max_index = pk.partition_index;
+								}
+							}
+							break;
+						}
+					}
+					loc.part_index = max_index + 1;
+					loc.part_local_row = 0;
+					loc.append_new_part = true;
+				}
+				loc.found = false;
+				return loc;
+			}
+		}
+
+		// Slow path: symbol is within range, need full binary search.
+		LoadPartition(partition);
 		auto &syms = cache_entry.symbols;
 		auto &dates = cache_entry.dates;
 
