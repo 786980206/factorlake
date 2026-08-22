@@ -1,0 +1,86 @@
+# name: test/aligned/aligned_create.test
+# description: CREATE TABLE on ATTACH ... TYPE ALIGNED catalog — schema + placeholder parquet + partition creation
+
+# --- basic create table: all columns default to index group ---
+# Use multi-statement batches to preserve ATTACH session state.
+query I
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.basic_tbl (symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT); SELECT count(*) FROM al.basic_tbl
+----
+0
+
+# insert + verify
+query I
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.basic_tbl VALUES ('000001', DATE '2026-09-01', 10.5, 1000); SELECT count(*) FROM al.basic_tbl
+----
+1
+
+query R
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); SELECT close FROM al.basic_tbl WHERE symbol = '000001'
+----
+10.5
+
+# --- multi-group create table with WITH clause ---
+query I
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.multi_tbl (symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT, alpha001 DOUBLE) WITH (groups = 'index:close,volume;factor/alpha:alpha001'); SELECT count(*) FROM al.multi_tbl
+----
+0
+
+# insert + verify
+query RRR
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.multi_tbl VALUES ('000002', DATE '2026-09-02', 20.5, 2000, 0.3); SELECT close, volume, alpha001 FROM al.multi_tbl WHERE symbol = '000002'
+----
+20.5,2000,0.3
+
+# --- partition creation on existing table ---
+query I
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.basic_tbl (symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT) WITH (partition = 'month=2026-10'); SELECT count(*) FROM al.basic_tbl WHERE date >= DATE '2026-10-01'
+----
+0
+
+# insert into pre-created partition
+query R
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.basic_tbl VALUES ('000003', DATE '2026-10-01', 30.5, 3000); SELECT close FROM al.basic_tbl WHERE symbol = '000003'
+----
+30.5
+
+# --- error: fewer than 2 columns ---
+statement error
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.bad_tbl (symbol VARCHAR)
+----
+at least 2 columns required
+
+# --- error: first two columns both VARCHAR ---
+statement error
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.bad_tbl2 (col1 VARCHAR, col2 VARCHAR, close DOUBLE)
+----
+first two columns must be exactly one
+
+# --- error: first two columns both DATE ---
+statement error
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.bad_tbl3 (col1 DATE, col2 DATE, close DOUBLE)
+----
+first two columns must be exactly one
+
+# --- error: table already exists ---
+statement error
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.basic_tbl (symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT)
+----
+already exists
+
+# --- partition_template option ---
+query I
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.date_tbl (symbol VARCHAR, date DATE, close DOUBLE) WITH (partition_template = 'date=%Y-%m-%d'); SELECT count(*) FROM al.date_tbl
+----
+0
+
+# insert into date-partitioned table
+query R
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.date_tbl VALUES ('000004', DATE '2026-09-03', 40.5); SELECT close FROM al.date_tbl WHERE symbol = '000004'
+----
+40.5
+
+# partition creation with date template
+query I
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.date_tbl (symbol VARCHAR, date DATE, close DOUBLE) WITH (partition = 'date=2026-10-15'); SELECT count(*) FROM al.date_tbl
+----
+1

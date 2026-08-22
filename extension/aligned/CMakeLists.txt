@@ -15,6 +15,7 @@ set(ALIGNED_EXTENSION_FILES
     src/extension.cpp
     src/catalog/manifest.cpp
     src/catalog/aligned_catalog.cpp
+    src/catalog/aligned_create.cpp
     src/resolver/row_space.cpp
     src/resolver/partition_resolver.cpp
     src/resolver/key_resolver.cpp

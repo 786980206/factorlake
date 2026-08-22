@@ -1,4 +1,4 @@
-﻿//! DuckLake-style catalog integration (Phase 8).
+//! DuckLake-style catalog integration (Phase 8).
 //!
 //! `ATTACH '<root>' AS name (TYPE ALIGNED)` creates an AlignedCatalog over the
 //! parquet column-group data root. Tables are LOGICAL: reads go straight to
@@ -9,6 +9,7 @@
 #include "catalog/aligned_catalog.hpp"
 
 #include "catalog/manifest.hpp"
+#include "catalog/aligned_create.hpp"
 #include "execution/aligned_dml.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
@@ -104,7 +105,9 @@ void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
 
 	auto fs = FileSystem::CreateLocal();
 	if (!fs->DirectoryExists(root)) {
-		throw IOException("aligned attach: data root does not exist: '%s'", root);
+		// Empty data root — no tables yet. CREATE TABLE will create the
+		// directory structure on demand.
+		return;
 	}
 	vector<string> candidates;
 	fs->ListFiles(root, [&](const string &fname, bool is_dir) {
@@ -164,8 +167,12 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::LookupEntry(CatalogTransaction tr
 		if (it != tables.end()) {
 			return optional_ptr<CatalogEntry>(it->second.get());
 		}
+		// Return nullptr instead of throwing — DuckDB calls LookupEntry to check
+		// for conflicts during CREATE TABLE and expects nullptr for "not found".
+		return nullptr;
 	}
-	throw CatalogException("Table with name %s does not exist!", lookup_info.GetEntryName());
+	// Non-table entries are not supported.
+	return nullptr;
 }
 
 optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateIndex(CatalogTransaction transaction, CreateIndexInfo &info,
@@ -175,7 +182,67 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateIndex(CatalogTransaction tr
 
 optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction transaction,
                                                            BoundCreateTableInfo &info) {
-	ALIGNED_DDL_UNSUPPORTED("CREATE TABLE")
+	auto &base = info.Base();
+	auto &columns = base.columns;
+
+	// Parse options from WITH (key=value, ...)
+	string groups_option;
+	string partition_template_option;
+	string partition_key;
+
+	for (auto &opt : base.options) {
+		auto &key = opt.first;
+		auto &expr = opt.second;
+		if (expr) {
+			// Evaluate constant expressions to get the string value
+			auto value = expr->ToString();
+			if (StringUtil::CIEquals(key, "groups")) {
+				// Strip quotes if present
+				groups_option = value;
+				if (groups_option.size() >= 2 && groups_option.front() == '\'' && groups_option.back() == '\'') {
+					groups_option = groups_option.substr(1, groups_option.size() - 2);
+				}
+			} else if (StringUtil::CIEquals(key, "partition_template")) {
+				partition_template_option = value;
+				if (partition_template_option.size() >= 2 &&
+				    partition_template_option.front() == '\'' && partition_template_option.back() == '\'') {
+					partition_template_option = partition_template_option.substr(1, partition_template_option.size() - 2);
+				}
+			} else if (StringUtil::CIEquals(key, "partition")) {
+				partition_key = value;
+				if (partition_key.size() >= 2 &&
+				    partition_key.front() == '\'' && partition_key.back() == '\'') {
+					partition_key = partition_key.substr(1, partition_key.size() - 2);
+				}
+			}
+		}
+	}
+
+	const string &root = catalog.Cast<AlignedCatalog>().GetRoot();
+
+	if (!partition_key.empty()) {
+		// Partition creation mode: table must already exist
+		AlignedCreatePartition(transaction.GetContext(), root, base.table, partition_key);
+	} else {
+		// Table creation mode
+		vector<ColumnDefinition> cols;
+		for (auto &col : columns.Logical()) {
+			cols.push_back(col.Copy());
+		}
+		AlignedCreateTable(transaction.GetContext(), root, base.table, cols,
+		                   groups_option, partition_template_option);
+	}
+
+	// Force re-discovery of tables (the new table is now on disk)
+	tables_loaded = false;
+	EnsureTablesLoaded(transaction.GetContext());
+
+	auto it = tables.find(base.table);
+	if (it == tables.end()) {
+		throw CatalogException("aligned CREATE TABLE: table '%s' was created but could not be loaded",
+		                        base.table);
+	}
+	return optional_ptr<CatalogEntry>(it->second.get());
 }
 optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateFunction(CatalogTransaction transaction,
                                                               CreateFunctionInfo &info) {
@@ -228,6 +295,24 @@ void AlignedCatalog::Initialize(bool load_builtin) {
 
 string AlignedCatalog::GetCatalogType() {
 	return "aligned";
+}
+
+ErrorData AlignedCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
+	// Allow WITH clause (options) for CREATE TABLE — our CreateTable
+	// implementation parses "groups", "partition_template", and "partition"
+	// options. All other base checks (partition_keys, sort_keys) still apply.
+	auto &base = info.Base().Cast<CreateTableInfo>();
+	if (!base.partition_keys.empty()) {
+		return ErrorData(ExceptionType::CATALOG,
+		                 StringUtil::Format("PARTITIONED BY is not supported for tables in a %s catalog",
+		                                     GetCatalogType()));
+	}
+	if (!base.sort_keys.empty()) {
+		return ErrorData(ExceptionType::CATALOG,
+		                 StringUtil::Format("SORTED BY is not supported for tables in a %s catalog",
+		                                     GetCatalogType()));
+	}
+	return ErrorData();
 }
 
 optional_ptr<CatalogEntry> AlignedCatalog::CreateSchema(CatalogTransaction transaction,

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -73,6 +73,7 @@ public:
 
 	void Initialize(bool load_builtin) override;
 	string GetCatalogType() override;
+	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction,
 	                                              const EntryLookupInfo &schema_lookup,
