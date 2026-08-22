@@ -1,9 +1,9 @@
-﻿//! Standard DML physical operators for aligned attached tables (Phase 8).
+//! Standard DML physical operators for aligned attached tables (Phase 8).
 //!
 //! INSERT: buffer rows -> temp parquet under <table>/_tmp/ -> aligned_upsert
 //! mutator places them into the column groups atomically. The upsert runs on
 //! a dedicated thread with its own Connection (nested queries on the caller's
-//! context deadlock 鈥?see aligned_attach.cpp).
+//! context deadlock 鈥?see aligned_catalog.cpp).
 
 #include "execution/aligned_dml.hpp"
 
@@ -154,16 +154,16 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 			                        StringUtil::Replace(staged_path, "'", "''") + "', root='" +
 			                        StringUtil::Replace(rt, "'", "''") + "')");
 			if (result->HasError()) {
-				g.error = result->GetError();
+				g.error = result->GetError();
 				return;
 			}
-			auto &mat = result->Cast<MaterializedQueryResult>();
+			auto &mat = result->Cast<MaterializedQueryResult>();
 			if (mat.RowCount() > 0) {
 				g.rows_inserted = mat.GetValue<int64_t>(0, 0);
-				g.rows_updated = mat.GetValue<int64_t>(1, 0);
+				g.rows_updated = mat.GetValue<int64_t>(1, 0);
 			}
 		} catch (std::exception &ex) {
-			g.error = ex.what();
+			g.error = ex.what();
 		}
 	});
 	worker.join();
@@ -678,9 +678,9 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 			}
 
 			auto fs_local = FileSystem::CreateLocal();
-			auto &fs = *fs_local;
+			auto &fs = *fs_local;
 			string tmp_dir = rt + "/" + tbl + "/_tmp";
-			fs.CreateDirectoriesRecursive(tmp_dir);
+			fs.CreateDirectoriesRecursive(tmp_dir);
 			staged = tmp_dir + "/dml-update-" +
 			         StringUtil::Format("%lld", (long long)Timestamp::GetEpochMs(Timestamp::GetCurrentTimestamp())) +
 			         "-" + StringUtil::Format("%d", (int)(idx_t)&rowids % 100000) + ".parquet";
@@ -688,9 +688,9 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 			ParquetWriter writer(wctx, fs, staged, staged_types, staged_names,
 			                     duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(), ShreddingType(),
 			                     vector<pair<string, string>>(), nullptr, optional_idx(), 1073741824ULL, 1, 0.01,
-			                     ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
+			                     ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
 			unique_ptr<ParquetWriteTransformData> transform;
-			writer.Flush(staged_coll, transform);
+			writer.Flush(staged_coll, transform);
 			writer.Finalize();
 
 			// Upsert mapping: index:date,symbol(+ any index-group set columns);

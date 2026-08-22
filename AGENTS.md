@@ -884,18 +884,18 @@ tive'）→ 断言 pattern 必须用
   - mapping 可选：已存在的表省略 mapping 时，按每个源列名在其所属 group 的 column_order 中自动推断（大小写不敏感）；空表首写仍必须显式给 mapping（无 schema 可推断，BinderException）。extension.cpp 用 `aligned_upsert_fn.varargs = LogicalType::VARCHAR`（v1.5.4 无 `max_argument_count` 成员）支持 2~3 个入参
   - 修复 append 碰撞：key_resolver.cpp `Resolve` 的 append part 索引原只取 index 组 max+1，当某非 index 组（如 alpha101 缺号 0000,0002）max 更大时新 part 与该组现有同号 part 行数冲突 → IO Error "shared indexes must agree on row counts"。改为跨**所有组**取分区内 max 索引 +1，对齐布局表正常；人造缺号测试布局（index 连续但 alpha 缺号到 0002）仍会因 index 连续索引契约失败（属 fixture 产物，mutator 写的真实表保持索引对齐，不受影响）
   - 验收：test_upsert 30/30（新增 auto-derive upsert + 空表首写缺 mapping 拒绝）、test_aligned 42/42、test_compaction 14/14、test_parallel 8/8 全 PASS
-- [x] **Phase 8（部分）：aligned_attach / aligned_detach —— catalog 集成 + 标准 DML（2026-08）**：
+- [x] **Phase 8（部分）：catalog 集成 + 标准 DML —— DuckLake 式逻辑 attach（2026-08）**：
   - **调研结论（重要，勿重踩）**：v1.5.4 的标准 DML 算子硬绑定 `DuckTableEntry`+`DataTable`——`PhysicalInsert` 的 GlobalState 直接收 `DuckTableEntry&`，`PhysicalDelete/Update` 走 `table.GetStorage()`（`DataTable&`），且 `DataTable` 的 Insert/Delete/Update **均非 virtual**；`TableFunction` 无 insert/update/delete 钩子，`in_out_function` 只用于 COPY/table-in-out；INSERT binder（bind_insert.cpp:538）要求 `Catalog::GetEntry<TableCatalogEntry>`。**结论：自定义存储引擎无法作为 v1.5.4 扩展承接标准 DML 写**；ATTACH 外部引擎同样不行（attached catalog 返回的是引擎自己的 entry，非 DuckTableEntry）
-  - **交付形态**：`aligned_attach('table'|空=全部, root=...)` 把逻辑表物化成**真正的 DuckDB catalog 表**（`CREATE OR REPLACE TABLE name AS SELECT * FROM aligned_table(name)`），之后裸表名即可跑标准 SELECT / INSERT / UPDATE / DELETE；`aligned_detach(...)` 反向 DROP。attach 出的表是**会话内物化快照**：DML 写入 DuckDB 自身存储、不回写 parquet 列组；持久化到列组仍走 aligned_upsert/aligned_delete（未来可加 sync 命令）。大表 attach 会全量物化（bench_ixday 1M×127 很慢），建议按表 attach
-  - **实现**：src/catalog/aligned_attach.cpp——DDL 在 init_global 里用**独立 Connection + 独立线程**执行（见下教训）；bind 只做 root 解析 + 目录发现（跳过 `.`/`_` 前缀）；函数输出 (table_name, status)，错误逐表报告不中断
-  - **验收**：scripts/test_attach.ps1 7/7 PASS（attach、裸名 SELECT、标准 INSERT 6000→6001、UPDATE 可见、DELETE 回 6000、detach、attach/detach 不动列组数据）；test_aligned 42 / test_upsert 30 / test_compaction 14 全 PASS
+  - **交付形态**：`ATTACH '<root>' AS al (TYPE ALIGNED)` 创建 AlignedCatalog over the parquet 列组数据根。表是**逻辑的**：读直走 parquet 文件（aligned_table 扫描，无物化）；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组**（按 (date,symbol) upsert、只重写受影响 part）。`DETACH al;` 卸载（数据始终在 parquet 列组里）。**旧的 `aligned_attach()`/`aligned_detach()` 物化快照辅助函数已删除**（DML 写入 DuckDB 自身存储、不回写列组，语义混淆且大表全量物化很慢，已被 DuckLake 式逻辑 attach 取代）
+  - **实现**：src/catalog/aligned_catalog.cpp（ATTACH ... TYPE ALIGNED 注册 AlignedCatalog）；src/execution/aligned_dml.cpp（PlanInsert/PlanDelete/PlanUpdate 返回自定义 sink 算子，DDL 在独立线程 + 独立 Connection 执行避免嵌套查询死锁）
+  - **验收**：scripts/test_dml.ps1 7/7 PASS；test_aligned 42 / test_upsert 30 / test_compaction 14 全 PASS
 - [x] **Phase 8c：标准 DELETE/UPDATE（DuckLake 式逻辑 attach，直写 parquet）完成（2026-08）**：
   - PlanDelete/PlanUpdate 返回自定义 sink 算子（PhysicalAlignedDelete/PhysicalAlignedUpdate），直接写 parquet 列组：
     - DELETE：收集 WHERE 选中的 rowid → 侧扫 index 组解析 (date,symbol) keys → 临时 keys parquet → worker 线程调 aligned_delete
     - UPDATE：只取 SET 列（base BindUpdateConstraints），sink 缓冲 (rowid, set值) → 解析 keys → stage [date,symbol,set...] → 调 aligned_upsert，mapping 只含被改列（老 part 缺列的 schema-evolution 列不被强制更新）
   - 扫描侧修复（catalog 的 LogicalGet ≠ 表函数）：① 虚拟 rowid 须映射到**有效输出位**（projection_ids 秩）而非 column_ids 下标（filter_prune 下 executor 按 projection_ids 分配输出 chunk）；② 重复列请求（UPDATE 子 GET 重复引用键列）复制填充而非覆盖单值 projected_pos；③ scratch=column_ids 位 / output=projection 秩两套索引空间分开；④ LogicalGet::GetTable() 需要 get_bind_info 返回归属 entry，否则 DELETE/UPDATE 报 "not a base table"
   - mutator 修复（被真实 DML 暴露的存量 bug）：① fresh part 在已存在组里用「组 schema ∪ 新增映射列」，否则窄 part 重定义组 schema 破坏老宽 part 重写；② RewritePart BulkCopyOld 按 scratch 容量分块——一次拷贝 >2048 行溢出 2048 行 scratch（0xc0000374 堆损坏，任何 >~2049 行的部分删除/插入合并都会崩）
-  - 验收：scripts/test_dml.ps1 7/7（标准 INSERT/UPDATE/DELETE 直写 parquet）；test_aligned 42 / test_upsert 30 / test_attach 7 / test_compaction 14 全 PASS
+  - 验收：scripts/test_dml.ps1 7/7（标准 INSERT/UPDATE/DELETE 直写 parquet）；test_aligned 42 / test_upsert 30 / test_compaction 14 全 PASS
 - [x] **Phase 8d：DELETE 删空最高索引 part 直接移除（标准 DML 边界完善，2026-08）**：
   - v7 契约原语义「多 part 分区删空任一 part → fail-fast」对标准 SQL UX 不友好（INSERT 新键成单行 part 后立刻 DELETE 同一键是常见序列）。修正：删空的 part 若是该组在该分区的**最高索引 part** → 直接移除该 part 文件（剩余索引仍连续，无需 renumber；各组同索引 part 行数一致故同步移除）。仅内部 part 仍 fail-fast（需 aligned_compact）
   - 实现：MutateTarget 加 `remove_part` 标志 + ExecuteAndCommit Pass D（RemoveFile + parts_removed++）；Pass A 跳过 staging
@@ -906,11 +906,11 @@ tive'）→ 断言 pattern 必须用
   - Bug 1（manifest 丢弃声明组）：BuildTablePlan 用「仅发现的组」覆盖 plan.table.groups → 重写的 _table.json 永久丢失声明但无 part 的组（g/m2 变成 "unknown group"）。修复：保留 **声明 ∪ 发现** 的并集
   - Bug 2（mutator 不合成缺失分区的 part）：MutateBind 现在将 manifest 声明但无 part 的组物化为空 GroupPlan 条目；UPDATE 路径（键已存在）合成该组的第一个对齐 part（R_i 行镜像 index 分区——除键行携带映射值外全 NULL；MutateTarget.synth/synth_rows/synth_values + 填充 pass 5.5）。首写空表回退源类型
   - 额外优化：UPDATE 跳过没有映射列的组（之前即使内容相同也重写它们的 parts——如更新一个 index 列时重写了所有 3 个组的 parts）
-  - 验收：test_upsert 33/33（新增 M1/M2 两阶段块）；aligned 42 / attach 7 / compaction 14 / dml 7 / parallel 8 全 PASS
+  - 验收：test_upsert 33/33（新增 M1/M2 两阶段块）；aligned 42 / compaction 14 / dml 7 / parallel 8 全 PASS
 - [x] **DataChunk 复用损坏修复 + AppendRowToBuffer 性能优化（2026-08）**：
   - AppendRowToBuffer 原先每源行分配一个新 DataChunk（逐行堆分配，大批量时的主要成本）。改为 caller-owned 复用 chunk 暴露了 DataChunk API 陷阱：Initialize() **追加**向量（其 D_ASSERT(data.empty()) 在 release 中是 noop）——复用已用过的 chunk 静默增长并留下旧类型向量（BIGINT SetValue 进 DATE 向量 → "Unimplemented type for cast (BIGINT -> DATE)"）。修复：当目标 buffer 变化时**原地重建** chunk（析构 + placement new）；稳态行用 Reset()/SetCardinality
   - 同 commit 清理：docs/STORAGE_CONTRACT.md 移除 §14 历史 v2–v7 清单（替换为当前状态列表），移除版本前缀历史叙述，新增 §9 标准-DML + upsert + 两阶段合成 + 最高索引 part 移除语义；logic.html（单文件交互式解释器 v3）；删除 scripts/run_bench.ps1（引用已删除的 build/duckdb_aligned.exe）；删除 .commandcode/ 垃圾目录
-  - 验收：upsert 33 / dml 7 / aligned 42 / attach 7 / compaction 14 / parallel 8 全 PASS
+  - 验收：upsert 33 / dml 7 / aligned 42 / compaction 14 / parallel 8 全 PASS
 - [x] **读+写基准完成（2026-08-22）**：
   - **读基准**（bench_ixday 1M×127 列，4 引擎×5 工作负载×3 线程数）：aligned vs join 在 p100 1 线程 2.06s vs 1.79s（aligned 1.15× 慢——位置组装固定开销），4 线程 1.04s vs 0.93s（差距收窄）；aligned 在 s25 分区剪枝上 **快于** join（0.159s vs 0.177s 1t——3 组独立剪枝 vs join 仍需开 3 文件）；wide（单 parquet）在此规模最快；polars 在小投影最快但 p100 仍付 hstack 代价。详见 docs/BENCHMARK.md
   - **写基准**（bench_write.ps1，600k 基础行单分区最坏情况）：append 1k 新键 aligned 4× 快（0.088s vs 0.356s——只写新分区）；append 100k native 追平（0.402s vs 0.505s——aligned 须重写基础分区 part）；update 300k/600k aligned 慢（2.4s vs 0.5s——per-part 重写 O(part_size) 与改行数无关；native LEFT JOIN+COPY O(n) 常数更低）。**aligned 写优势 = 多分区 part 级粒度**（单分区布局隐藏此优势）
@@ -937,16 +937,16 @@ tive'）→ 断言 pattern 必须用
 
 - [x] **SQLLogicTest 基础设施（2026-08）**：
   - 新增 `test/run_sqllogictest.py`（Python 运行器，解析 DuckDB `.test` 格式，批处理执行保持
-    会话状态）、`test/aligned/*.test`（6 个测试文件，91 断言，覆盖原有 6 个 PS 测试脚本）
+    会话状态）、`test/aligned/*.test`（5 个测试文件，84 断言）
   - 测试文件：`aligned_scan.test`（27 断言）、`aligned_upsert.test`（37 断言）、
-    `aligned_compact.test`（7 断言）、`aligned_parallel.test`（7 断言）、
-    `aligned_attach.test`（7 断言）、`aligned_dml.test`（6 断言）
+    `aligned_compact.test`（7 断言）、`aligned_parallel.test`（7 断言）、`aligned_dml.test`（6 断言）
   - 运行器特性：`{DATA_ROOT}`/`{TEST_DIR}` 占位符、`mkdir`/`writejson`/`writefile` 自定义指令
     （DuckDB COPY TO 不创建嵌套目录）、批处理执行（SET 保留为 preamble，保持 session state）、
     `statement error` 用 `----` 分隔 SQL 与预期错误文本、`query <types> [rowsort]` + expected
-  - 验收：91/91 PASS；`python test/run_sqllogictest.py`（默认跑 test/aligned/*.test）
+  - 验收：84/84 PASS；`python test/run_sqllogictest.py`（默认跑 test/aligned/*.test）
   - 与 PS 脚本对比：PS 5.1 的 78 列 stderr 折行、`-c` 引号 mangle 等痛点全部消除（Python 运行器
-    用 subprocess + temp file stdin）；attach/dml 测试需同进程批处理（preamble 机制）
+    用 subprocess + temp file stdin）；dml 测试需同进程批处理（preamble 机制）。原
+    `aligned_attach.test`（7 断言）已随 aligned_attach 函数删除而移除
 - [x] **删除 `_table.json`（无 manifest 契约，2026-08）**：
   - **设计**：`_table.json` 原仅用于空表 bootstrap（告诉 writer 用哪些 group/分区模板）。
     现完全删除——空表不是有效表（无 index = 无表），`BuildTablePlan` glob 无 part 返回空 plan
@@ -972,5 +972,22 @@ tive'）→ 断言 pattern 必须用
   - **文档**：docs/STORAGE_CONTRACT.md §5 重写（无 Manifest）、目录图删 `_table.json`、
     §9 Writer 删 "重写 `_table.json`"、§10 读取协议删 manifest 读取步骤、错误处理表
     改；AGENTS.md §2 目录图/§5/§9 同步。
-  - **验收**：SQLLogicTest 91/91 PASS；test_aligned.ps1 18/18、test_upsert.ps1 31/31、
-    test_compaction.ps1 8/8 全 PASS
+  - **验收**：SQLLogicTest 84/84 PASS（原 91 含 aligned_attach.test 7 断言，随本条删除）；
+    test_aligned.ps1 18/18、test_upsert.ps1 31/31、test_compaction.ps1 8/8 全 PASS
+- [x] **删除 `aligned_attach()` / `aligned_detach()` 物化快照函数（2026-08）**：
+  - **背景**：`aligned_attach('table', root=...)` / `aligned_detach(...)` 是 Phase 8 早期的
+    会话内物化快照辅助函数——`CREATE OR REPLACE TABLE name AS SELECT * FROM aligned_table(name)`
+    在独立线程执行，之后裸名可跑标准 SQL，但 DML 写入 DuckDB 自身存储、不回写 parquet 列组
+    （语义混淆），且大表全量物化很慢（bench_ixday 1M×127）。已被 DuckLake 式逻辑 attach
+    （`ATTACH ... TYPE ALIGNED`，表保持逻辑、直写 parquet 列组）完全取代。
+  - **删除**：`src/catalog/aligned_attach.cpp`（195 行）、
+    `src/include/catalog/aligned_attach.hpp`、`test/aligned/aligned_attach.test`（7 断言）、
+    `scripts/test_attach.ps1`；`extension.cpp` 删 include + `CreateAlignedAttachFunctions`/
+    `CreateAlignedDetachFunctions` 注册；`CMakeLists.txt` 删 `src/catalog/aligned_attach.cpp`；
+    `aligned_dml.cpp` 注释引用 `aligned_attach.cpp` 改为 `aligned_catalog.cpp`。
+  - **保留**：`aligned_catalog.cpp`（ATTACH TYPE ALIGNED）、`aligned_dml.cpp`
+    （PlanInsert/PlanDelete/PlanUpdate 钩子）——catalog 集成不依赖 aligned_attach。
+  - **文档**：README 删 aligned_attach 示例段 + 功能矩阵 "另有 aligned_attach() 物化快照"；
+    AGENTS Phase 8 条目重写为 catalog 集成 + 标准 DML；SQLLogicTest 条目改 84/84（5 文件）。
+  - **验收**：SQLLogicTest 84/84 PASS；test_dml 7/7、test_aligned 18/18、test_upsert 31/31、
+    test_compaction 8/8、test_parallel 8/8 全 PASS（catalog 集成功能无回归）

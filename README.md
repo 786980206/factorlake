@@ -55,11 +55,6 @@ DELETE FROM al.cnstk_ixday WHERE symbol = '009999';
 -- INSERT/UPDATE 按 (date, symbol) 主键 upsert，只重写受影响 part；原子提交。
 -- DETACH al; 即可卸载（数据始终在 parquet 列组里）。
 
--- aligned_attach()（旧，物化快照）：把逻辑表物化成 DuckDB 原生表（快照），
--- DML 写入 DuckDB 自身存储、不回写列组；仅适合临时分析，持久化仍走 upsert/delete：
-SELECT * FROM aligned_attach('cnstk_ixday');          -- 单表；aligned_attach() 为全表
-SELECT * FROM aligned_detach('cnstk_ixday');
-
 -- 不 attach、直接流式写列组（超大数据首选）：
 SELECT * FROM aligned_upsert('cnstk_ixday', '/data/stage/2026-08-17.parquet', root='/data');
 ```
@@ -116,7 +111,7 @@ index）用**同一种一层分区段**（`year=`/`month=`/`date=`）；Group �
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
 | 写入 | ✅ | `aligned_upsert()` / `aligned_delete()`（v7 mutator）：按 (date, symbol) 主键插入 / 更新 / 追加新分区 / 删除行；只重写受影响 part；`_tmp` 暂存 + 原子提交（last_txid+1） |
 | 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，按分区目录合并 part，原子切换 |
-| catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组**（按 (date,symbol) upsert、只重写受影响 part）。另有 `aligned_attach()` 物化快照辅助函数 |
+| catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组**（按 (date,symbol) upsert、只重写受影响 part） |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
 
 不支持（明确不做）：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。
