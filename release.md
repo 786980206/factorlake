@@ -384,3 +384,25 @@ SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE
 - 新增测试：`test/aligned/aligned_delete_empty.test`（12 个断言）——3 分区表
   删空中间分区、验证前后行数、验证清空分区可再插入。
 - 当前总：SQLLogicTest 106/106 + 4 PS 套件全 PASS。
+
+## v0.16-compact-normalize — aligned_compact 规范化重写
+
+重写 `aligned_compact` 从"简单合并多 part 到单 part"改为"按 `ALIGNED_DEFAULT_PART_ROWS`
+(1M) 规范化重新切分"。
+
+- **设计理由**：经过 INSERT/DELETE 后各 parquet 行数不统一（有些删后少行、有些
+  插后多行）。需要一次重整：保证前面所有 part 满行（恰好 1M 行），只有末 part
+  可能少行。旧的简单合并无法处理 >1M 行的分区（会产出超大的单文件）。
+- **行为**：
+  - 每个分区的所有 part 按 `ALIGNED_DEFAULT_PART_ROWS` (1048576) 重新切分。
+  - 前面的 part 恰好 1M 行，末 part ≤ 1M 行。
+  - 0 行占位 part（从 delete-empty-part 产生）被合并吸收。
+  - **跳过优化**：已规范化的分区（单 part ≤ 1M，或多 part 均满行 + 末 part ≤ 1M）
+    跳过不重写（`IsAlreadyNormalized` 检查），保证效率。
+  - 两阶段提交不变：所有组先 stage 到 `_tmp/`，全部成功后统一 move + 删旧文件。
+- **改动**：`aligned_compactor.cpp` 重写（~340 行），新增 `IsAlreadyNormalized`
+  和 `MergePartsToWriter` 辅助函数。多 part 切分时按行流式读取，在 1M 行边界
+  flush writer + 开新 writer。
+- 新增测试：`test/aligned/aligned_compact.test` 新增 9 个断言（0-row middle part
+  合并、幂等性、skip 优化、error case）。
+- 当前总：SQLLogicTest 115/115 + 4 PS 套件全 PASS。

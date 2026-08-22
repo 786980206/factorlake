@@ -33,10 +33,6 @@ struct AlignedCompactGlobalState : public GlobalTableFunctionState {
 	idx_t parts_after = 0;
 };
 
-//! In-process transaction counter (starts at 1, increments each call). Not
-//! persisted — only used for the staging directory name.
-// NextTransactionId is now shared with the mutator (see aligned_mutator.hpp).
-
 //===----------------------------------------------------------------------===//
 // Bind
 //===----------------------------------------------------------------------===//
@@ -92,6 +88,101 @@ unique_ptr<GlobalTableFunctionState> AlignedCompactInitGlobal(ClientContext &con
 }
 
 //===----------------------------------------------------------------------===//
+// Helpers
+//===----------------------------------------------------------------------===//
+
+//! Check whether a partition's parts are already normalized: every part
+//! (except possibly the last) has exactly ALIGNED_DEFAULT_PART_ROWS, and the
+//! last has ≤ ALIGNED_DEFAULT_PART_ROWS. 0-row parts are treated as already
+//! fine (they keep the index consecutive).
+static bool IsAlreadyNormalized(const vector<const PartInfo *> &parts) {
+	for (idx_t i = 0; i < parts.size(); i++) {
+		idx_t rc = parts[i]->row_count;
+		if (rc == 0) {
+			continue; // 0-row placeholder — leave as-is
+		}
+		if (i < parts.size() - 1) {
+			if (rc != ALIGNED_DEFAULT_PART_ROWS) {
+				return false;
+			}
+		} else {
+			// Last part: can be ≤ threshold
+			if (rc > ALIGNED_DEFAULT_PART_ROWS) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+//! Read all rows from a set of parts into a writer, flushing at RG boundaries.
+//! The parts are read in order (position alignment preserved). Returns the
+//! total row count written.
+static idx_t MergePartsToWriter(ClientContext &context, FileSystem &fs,
+                                const vector<const PartInfo *> &parts,
+                                const vector<string> &columns,
+                                const vector<LogicalType> &col_types,
+                                const string &out_path) {
+	idx_t rgs = ALIGNED_DEFAULT_RG_ROWS;
+	auto writer = CreateParquetWriter(context, fs, out_path, columns, col_types);
+	unique_ptr<ParquetWriteTransformData> transform;
+	auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
+	ColumnDataAppendState append_state;
+	buffer->InitializeAppend(append_state);
+
+	idx_t total_rows = 0;
+	for (auto &part : parts) {
+		if (part->row_count == 0) {
+			continue; // skip 0-row placeholder parts
+		}
+		auto part_reader =
+		    make_uniq<ParquetReader>(context, OpenFileInfo(part->path), ParquetOptions(context));
+		// Validate schema matches the reference
+		if (part_reader->columns.size() != columns.size()) {
+			throw IOException("Aligned table: cannot compact — parts have different column counts");
+		}
+		for (idx_t ci = 0; ci < columns.size(); ci++) {
+			if (part_reader->columns[ci].name != columns[ci]) {
+				throw IOException("Aligned table: cannot compact — parts have different column sets");
+			}
+		}
+		for (idx_t i = 0; i < part_reader->columns.size(); i++) {
+			part_reader->column_ids.push_back(MultiFileLocalColumnId(i));
+		}
+		ParquetReaderScanState scan_state;
+		vector<PartitionStatistics> rg_stats;
+		part_reader->GetPartitionStats(rg_stats);
+		vector<idx_t> all_rgs;
+		for (idx_t i = 0; i < rg_stats.size(); i++) {
+			all_rgs.push_back(i);
+		}
+		part_reader->InitializeScan(context, scan_state, all_rgs);
+		DataChunk chunk;
+		chunk.Initialize(context, col_types);
+		while (true) {
+			auto res = part_reader->Scan(context, scan_state, chunk);
+			auto async_type = res.GetResultType();
+			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+				break;
+			}
+			if (chunk.size() == 0) {
+				continue;
+			}
+			buffer->Append(append_state, chunk);
+			if (buffer->Count() >= rgs) {
+				writer->Flush(*buffer, transform);
+				buffer->Reset();
+				buffer->InitializeAppend(append_state);
+			}
+		}
+		total_rows += part->row_count;
+	}
+	writer->Flush(*buffer, transform);
+	writer->Finalize();
+	return total_rows;
+}
+
+//===----------------------------------------------------------------------===//
 // Compaction
 //===----------------------------------------------------------------------===//
 
@@ -107,7 +198,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	// Acquire the table-level write lock (file-based mutual exclusion across
-	// concurrent aligned_upsert/aligned_delete/aligned_compact invocations).
+	// concurrent mutator / compactor invocations).
 	TableWriteLock write_lock(fs, bind.plan.table_path);
 
 	// txid for the staging directory name (in-process counter, not persisted)
@@ -119,19 +210,15 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 		idx_t parts_before = 0;
 		idx_t parts_after = 0;
 
-		// === Phase 1: Stage all merged parts in _tmp ===
+		// === Phase 1: Stage all normalized parts in _tmp ===
 		// All groups are staged first. If any group/partition fails during
 		// staging, we clean up _tmp and the table is unchanged — no old
 		// parts have been deleted and no new parts have been moved into place.
 
-		// Collect a list of staged→target moves + old-part deletions to
-		// execute in Phase 2.
 		struct PendingMove {
 			string staged_path;
 			string target_path;
 			vector<string> old_paths;
-			GroupPlan *group;
-			string dir;
 		};
 		vector<PendingMove> pending_moves;
 
@@ -148,155 +235,263 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 				auto &dir = kv.first;
 				auto &parts = kv.second;
 				parts_before += parts.size();
-				parts_after += parts.size();
-				if (parts.size() < 2) {
-					continue; // nothing to merge
+
+				// --- Check if normalization is needed ---
+				// Skip if already normalized (all parts except last == threshold,
+				// last <= threshold; 0-row parts left as-is).
+				if (IsAlreadyNormalized(parts)) {
+					parts_after += parts.size();
+					continue;
 				}
 
-			// All parts must share the same column set (schema evolution
-			// within a directory cannot be compacted in v1). The merged part's
-			// schema is the first part's FILE schema (per-part column metadata
-			// is not stored in the plan — it is read from the footer here).
-			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(parts[0]->path), ParquetOptions(context));
-			vector<string> columns;
-			vector<LogicalType> col_types;
-			for (auto &rc : reader->columns) {
-				columns.push_back(rc.name);
-				col_types.push_back(rc.type);
-			}
-
-			// Rows must be contiguous within the directory
-			idx_t start_row = parts[0]->start_row;
-			idx_t row_count = 0;
-			for (idx_t i = 0; i < parts.size(); i++) {
-				if (i > 0 && parts[i]->start_row != parts[i - 1]->start_row + parts[i - 1]->row_count) {
-					throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts are not "
-					                  "contiguous (alignment violation)",
-					                  bind.plan.table_name, group.manifest.group, dir);
+				// Count non-zero rows
+				idx_t total_rows = 0;
+				for (auto &p : parts) {
+					total_rows += p->row_count;
 				}
-				row_count += parts[i]->row_count;
-			}
 
-			// Staged new part. v6: the merged part is the only part of the
-			// partition, so its self-describing name is "{idx:04d}-{rows:10d}"
-			// with idx = 0 (every group merges the same partition together, so
-			// cross-group indexes stay consistent). The staging path includes
-			// the partition's relative path so that multiple partitions of one
-			// group do not collide.
-			idx_t rgs = ALIGNED_DEFAULT_RG_ROWS;
-			if (row_count > 9999999999ULL) {
-				throw IOException("Aligned table '%s' group '%s': merged part '%s' holds %llu rows — more than the "
-				                  "self-describing name can represent (10 digits)",
-				                  bind.plan.table_name, group.manifest.group, dir, row_count);
-			}
-			string part_name = StringUtil::Format("0000-%010llu", (unsigned long long)row_count);
-			string group_rel = dir.substr(group.group_path.size());
-			string staged_dir = tmp_root + "/" + group.manifest.group + group_rel;
-			fs.CreateDirectoriesRecursive(staged_dir);
-			string staged_path = staged_dir + "/" + part_name + ".parquet";
-			// Standard aligned-extension writer options (shared with aligned_create
-			// / part_rewriter — see io::CreateParquetWriter).
-			auto writer = CreateParquetWriter(context, fs, staged_path, columns, col_types);
-			unique_ptr<ParquetWriteTransformData> transform;
-			auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
-			ColumnDataAppendState append_state;
-			buffer->InitializeAppend(append_state);
-
-			// Read each old part in order and append (position alignment
-			// preserved: the merged part covers [start_row, start_row + row_count))
-			for (auto &part : parts) {
-				auto part_reader =
-				    make_uniq<ParquetReader>(context, OpenFileInfo(part->path), ParquetOptions(context));
-				// Every part must share the first part's column set (same names,
-				// same order) — schema evolution within a directory is rejected
-				if (part_reader->columns.size() != columns.size()) {
-					throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts have "
-					                  "different column sets (schema evolution within a directory)",
-					                  bind.plan.table_name, group.manifest.group, dir);
+				// Compute the target number of output parts
+				// (ceil(total_rows / threshold), minimum 1 even for 0 rows)
+				idx_t num_parts = (total_rows + ALIGNED_DEFAULT_PART_ROWS - 1) / ALIGNED_DEFAULT_PART_ROWS;
+				if (num_parts == 0) {
+					num_parts = 1; // all 0-row → keep one 0-row part
 				}
-				for (idx_t ci = 0; ci < columns.size(); ci++) {
-					if (part_reader->columns[ci].name != columns[ci]) {
-						throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts have "
-						                  "different column sets (schema evolution within a directory)",
+
+				// Read the reference schema from the first non-zero part
+				vector<string> columns;
+				vector<LogicalType> col_types;
+				const PartInfo *ref_part = nullptr;
+				for (auto &p : parts) {
+					if (p->row_count > 0) {
+						ref_part = p;
+						break;
+					}
+				}
+				if (!ref_part) {
+					// All parts are 0-row — just keep them as-is
+					parts_after += parts.size();
+					continue;
+				}
+				auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(ref_part->path), ParquetOptions(context));
+				for (auto &rc : reader->columns) {
+					columns.push_back(rc.name);
+					col_types.push_back(rc.type);
+				}
+
+				// Validate contiguity (parts must be contiguous in row space)
+				for (idx_t i = 1; i < parts.size(); i++) {
+					if (parts[i]->start_row != parts[i - 1]->start_row + parts[i - 1]->row_count) {
+						throw IOException("Aligned table '%s' group '%s': cannot compact directory '%s' — parts are not "
+						                  "contiguous (alignment violation)",
 						                  bind.plan.table_name, group.manifest.group, dir);
 					}
 				}
-				// fresh reader: read ALL columns in file order (the merged part
-				// keeps the first part's column order)
-				for (idx_t i = 0; i < part_reader->columns.size(); i++) {
-					part_reader->column_ids.push_back(MultiFileLocalColumnId(i));
-				}
-				ParquetReaderScanState scan_state;
-				vector<PartitionStatistics> rg_stats;
-				part_reader->GetPartitionStats(rg_stats);
-				vector<idx_t> all_rgs;
-				for (idx_t i = 0; i < rg_stats.size(); i++) {
-					all_rgs.push_back(i);
-				}
-				part_reader->InitializeScan(context, scan_state, all_rgs);
-				DataChunk chunk;
-				chunk.Initialize(context, col_types);
-				while (true) {
-					auto res = part_reader->Scan(context, scan_state, chunk);
-					auto async_type = res.GetResultType();
-					if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
-						break;
-					}
-					if (chunk.size() == 0) {
-						continue;
-					}
-					buffer->Append(append_state, chunk);
-					if (buffer->Count() >= rgs) {
-						writer->Flush(*buffer, transform);
-						buffer->Reset();
-						buffer->InitializeAppend(append_state);
-					}
-				}
-			}
-			writer->Flush(*buffer, transform);
-			writer->Finalize();
 
-			// Record the pending move — do NOT move into place or delete
-			// old parts yet. This is the key change for cross-group atomicity:
-			// if a later group fails during staging, the old parts of earlier
-			// groups are still on disk and the table is unchanged.
-			string target_path = dir + "/" + part_name + ".parquet";
-			if (fs.FileExists(target_path)) {
-				throw IOException("Aligned table '%s' group '%s': part '%s' already exists in '%s'",
-				                  bind.plan.table_name, group.manifest.group, part_name, dir);
-			}
+				// Compute the split points: which rows go into which output part
+				// Part 0: rows [0, threshold)
+				// Part 1: rows [threshold, 2*threshold)
+				// ...
+				// Last part: rows [(num_parts-1)*threshold, total_rows)
+				// Each output part is a SEPARATE parquet file.
 
-			PendingMove pm;
-			pm.staged_path = staged_path;
-			pm.target_path = target_path;
-			for (auto &part : parts) {
-				pm.old_paths.push_back(part->path);
-			}
-			pending_moves.push_back(std::move(pm));
+				string group_rel = dir.substr(group.group_path.size());
+				string staged_dir = tmp_root + "/" + group.manifest.group + group_rel;
+				fs.CreateDirectoriesRecursive(staged_dir);
 
-			dirs_compacted++;
-				parts_after -= parts.size();
-				parts_after += 1;
+				// Strategy: read all parts into a single stream, write out
+				// split parts. We read row-by-row via chunk scanning and
+				// accumulate into per-output-part buffers.
+				// For efficiency: if num_parts == 1, just merge all into one.
+				// If num_parts > 1, read the stream and flush at threshold boundaries.
+
+				vector<string> staged_paths;
+				vector<idx_t> part_row_counts;
+
+				if (num_parts == 1) {
+					// Single output part — merge all source parts into one file
+					string part_name = StringUtil::Format("0000-%010llu", (unsigned long long)total_rows);
+					string staged_path = staged_dir + "/" + part_name + ".parquet";
+					MergePartsToWriter(context, fs, parts, columns, col_types, staged_path);
+					staged_paths.push_back(staged_path);
+					part_row_counts.push_back(total_rows);
+				} else {
+					// Multiple output parts — read the stream and split at
+					// ALIGNED_DEFAULT_PART_ROWS boundaries.
+					idx_t rgs = ALIGNED_DEFAULT_RG_ROWS;
+					// One writer per output part
+					unique_ptr<ParquetWriter> writer;
+					unique_ptr<ParquetWriteTransformData> transform;
+					auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
+					ColumnDataAppendState append_state;
+					buffer->InitializeAppend(append_state);
+
+					idx_t rows_written = 0;
+					idx_t current_part = 0;
+
+					auto flush_current_part = [&]() {
+						if (writer) {
+							writer->Flush(*buffer, transform);
+							writer->Finalize();
+							writer.reset();
+							buffer->Reset();
+							buffer->InitializeAppend(append_state);
+						}
+					};
+
+					for (auto &part : parts) {
+						if (part->row_count == 0) {
+							continue;
+						}
+						auto part_reader =
+						    make_uniq<ParquetReader>(context, OpenFileInfo(part->path), ParquetOptions(context));
+						for (idx_t i = 0; i < part_reader->columns.size(); i++) {
+							part_reader->column_ids.push_back(MultiFileLocalColumnId(i));
+						}
+						ParquetReaderScanState scan_state;
+						vector<PartitionStatistics> rg_stats;
+						part_reader->GetPartitionStats(rg_stats);
+						vector<idx_t> all_rgs;
+						for (idx_t i = 0; i < rg_stats.size(); i++) {
+							all_rgs.push_back(i);
+						}
+						part_reader->InitializeScan(context, scan_state, all_rgs);
+						DataChunk chunk;
+						chunk.Initialize(context, col_types);
+						while (true) {
+							auto res = part_reader->Scan(context, scan_state, chunk);
+							auto async_type = res.GetResultType();
+							if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+								break;
+							}
+							if (chunk.size() == 0) {
+								continue;
+							}
+
+							// Append chunk to buffer, checking for part boundary
+							idx_t chunk_rows = chunk.size();
+							idx_t chunk_consumed = 0;
+							while (chunk_consumed < chunk_rows) {
+								idx_t remaining_in_chunk = chunk_rows - chunk_consumed;
+								idx_t rows_in_current_part = rows_written - current_part * ALIGNED_DEFAULT_PART_ROWS;
+								idx_t capacity_in_current_part =
+								    ALIGNED_DEFAULT_PART_ROWS - rows_in_current_part;
+								idx_t to_take = MinValue<idx_t>(remaining_in_chunk, capacity_in_current_part);
+
+								if (to_take > 0) {
+									// Open writer for this part if not yet open
+									if (!writer) {
+										idx_t this_part_rows = (current_part == num_parts - 1)
+										                           ? (total_rows - current_part * ALIGNED_DEFAULT_PART_ROWS)
+										                           : ALIGNED_DEFAULT_PART_ROWS;
+										string part_name = StringUtil::Format("%04llu-%010llu",
+										                                       (unsigned long long)current_part,
+										                                       (unsigned long long)this_part_rows);
+										string staged_path = staged_dir + "/" + part_name + ".parquet";
+										writer = CreateParquetWriter(context, fs, staged_path, columns, col_types);
+										staged_paths.push_back(staged_path);
+										part_row_counts.push_back(this_part_rows);
+									}
+									// Append a slice of the chunk
+									if (to_take == chunk_rows) {
+										buffer->Append(append_state, chunk);
+									} else {
+										// Slice the chunk: use a SelectionVector
+										SelectionVector sel(to_take);
+										for (idx_t s = 0; s < to_take; s++) {
+											sel.set_index(s, chunk_consumed + s);
+										}
+										DataChunk sliced;
+										sliced.Initialize(context, col_types);
+										sliced.Slice(chunk, sel, to_take);
+										buffer->Append(append_state, sliced);
+									}
+									if (buffer->Count() >= rgs) {
+										writer->Flush(*buffer, transform);
+										buffer->Reset();
+										buffer->InitializeAppend(append_state);
+									}
+									rows_written += to_take;
+									chunk_consumed += to_take;
+								}
+
+								// Check if we've filled the current part
+								rows_in_current_part = rows_written - current_part * ALIGNED_DEFAULT_PART_ROWS;
+								if (rows_in_current_part >= ALIGNED_DEFAULT_PART_ROWS &&
+								    current_part < num_parts - 1) {
+									flush_current_part();
+									current_part++;
+								}
+							}
+						}
+					}
+					// Flush the last part
+					flush_current_part();
+				}
+
+				// Record pending moves
+				for (idx_t pi = 0; pi < staged_paths.size(); pi++) {
+					PendingMove pm;
+					pm.staged_path = staged_paths[pi];
+					string part_name = StringUtil::Format("%04llu-%010llu.parquet",
+					                                       (unsigned long long)pi,
+					                                       (unsigned long long)part_row_counts[pi]);
+					pm.target_path = dir + "/" + part_name;
+					pending_moves.push_back(std::move(pm));
+				}
+				// All old parts in this directory will be replaced
+				for (auto &pm : pending_moves) {
+					if (pm.target_path.rfind(dir, 0) == 0) {
+						// This is from this dir — already handled below
+					}
+				}
+
+				// Collect old paths for this directory
+				// (We'll delete them in Phase 2)
+				dirs_compacted++;
+				parts_after += num_parts;
+			}
+		}
+
+		// Collect old paths per directory (all old parts in compacted dirs)
+		// We need to know which directories were compacted to delete old files.
+		std::set<string> compacted_dirs;
+		for (auto &pm : pending_moves) {
+			auto slash = pm.target_path.find_last_of("/\\");
+			string dir = slash == string::npos ? "" : pm.target_path.substr(0, slash);
+			compacted_dirs.insert(dir);
+		}
+		// For each compacted dir, collect all old part paths
+		vector<string> old_files_to_delete;
+		for (auto &group : bind.plan.groups) {
+			for (auto &part : group.parts) {
+				auto slash = part.path.find_last_of("/\\");
+				string dir = slash == string::npos ? "" : part.path.substr(0, slash);
+				if (compacted_dirs.count(dir)) {
+					old_files_to_delete.push_back(part.path);
+				}
 			}
 		}
 
 		// === Phase 2: Commit — move all staged parts into place, then delete old ===
-		// All staging succeeded. Now we atomically switch: move every new part
-		// into its target directory, then delete all old parts. If a move fails
-		// mid-way, the already-moved new parts are valid (they cover the same
-		// row range), but the not-yet-moved groups still have their old parts.
-		// The reader's fail-fast on part-count mismatch will catch this, but
-		// this is a best-effort phase — MoveFile on the same volume is atomic.
 		for (auto &pm : pending_moves) {
+			auto slash = pm.target_path.find_last_of("/\\");
+			fs.CreateDirectoriesRecursive(pm.target_path.substr(0, slash));
 			fs.MoveFile(pm.staged_path, pm.target_path);
 		}
+		// Delete old files (but skip any that happen to have the same name
+		// as a new file — those were overwritten by the move)
+		std::set<string> new_paths;
 		for (auto &pm : pending_moves) {
-			for (auto &old : pm.old_paths) {
-				fs.RemoveFile(old);
+			new_paths.insert(pm.target_path);
+		}
+		for (auto &old : old_files_to_delete) {
+			if (new_paths.count(old)) {
+				continue; // overwritten by move
 			}
+			fs.RemoveFile(old);
 		}
 
-		// Cleanup the staging tree (best-effort for the empty parent)
+		// Cleanup the staging tree
 		if (fs.DirectoryExists(tmp_root)) {
 			fs.RemoveDirectory(tmp_root);
 		}

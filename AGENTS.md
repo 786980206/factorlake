@@ -170,6 +170,10 @@ aligned_drop(table, group_name, root=...)         → (dirs_removed, files_remov
   同目录必须同列集（拒绝 schema-evolution 合并）。**两阶段提交**：所有组的合并
   part 先写入 `_tmp/`，全部成功后再统一 move 到目标目录 + 删除旧 part；任一组
   合并失败则清理 `_tmp`、表状态不变（旧 part 仍在原位）。
+  **规范化重写**：每个分区的所有 part 按 `ALIGNED_DEFAULT_PART_ROWS` (1M)
+  重新切分——前面的 part 满行（恰好 1M 行），末 part ≤ 1M 行。0 行占位 part
+  被合并吸收。已规范化的分区（单 part ≤ 1M，或多 part 均满行）跳过不重写
+  （`IsAlreadyNormalized` 检查）。
 
 ### CREATE TABLE DDL
 
@@ -254,7 +258,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 106/106 + 4 PS 套件全 PASS
+- 当前总：SQLLogicTest 115/115 + 4 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`

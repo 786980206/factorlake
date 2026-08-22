@@ -36,3 +36,48 @@ query IIIIII
 SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT count(*), count(alpha001), count(alpha002), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('compacttest')
 ----
 4000,800,364,7998000,0
+
+# --- idempotent: second compact is a no-op (already normalized) ---
+query III
+SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT * FROM aligned_compact('compacttest', 'all')
+----
+0,2,2
+
+# --- setup: table with 0-row middle part (from delete) ---
+statement ok
+SET aligned_data_root='{TEST_DIR}/compact2'; SELECT * FROM aligned_create('ct2', 'symbol VARCHAR, date DATE, v DOUBLE', groups => 'index:v')
+
+mkdir {TEST_DIR}/compact2/ct2/index/month=2026-01
+
+statement ok
+COPY (SELECT printf('%06d', i) AS symbol, DATE '2026-01-10' AS date, i::DOUBLE AS v FROM (SELECT range AS i FROM range(0, 30)) t) TO '{TEST_DIR}/compact2/ct2/index/month=2026-01/0000-0000000030.parquet' (FORMAT PARQUET)
+
+statement ok
+COPY (SELECT 'x' AS symbol WHERE 1=0) TO '{TEST_DIR}/compact2/ct2/index/month=2026-01/0001-0000000000.parquet' (FORMAT PARQUET)
+
+statement ok
+COPY (SELECT printf('%06d', i) AS symbol, DATE '2026-01-20' AS date, i::DOUBLE AS v FROM (SELECT range AS i FROM range(30, 80)) t) TO '{TEST_DIR}/compact2/ct2/index/month=2026-01/0002-0000000050.parquet' (FORMAT PARQUET)
+
+# --- compact: 3 parts (30+0+50) → 1 part (80), plus placeholder skipped ---
+query III
+SET aligned_data_root='{TEST_DIR}/compact2'; SELECT * FROM aligned_compact('ct2', 'all')
+----
+1,4,2
+
+# --- verify 80 rows ---
+query I
+SET aligned_data_root='{TEST_DIR}/compact2'; ATTACH '{TEST_DIR}/compact2' AS al (TYPE ALIGNED); SELECT count(*) FROM al.ct2
+----
+80
+
+# --- verify data range ---
+query RR
+SET aligned_data_root='{TEST_DIR}/compact2'; ATTACH '{TEST_DIR}/compact2' AS al (TYPE ALIGNED); SELECT min(v), max(v) FROM al.ct2
+----
+0.0,79.0
+
+# --- error: unknown group ---
+statement error
+SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT * FROM aligned_compact('compacttest', 'nonexistent')
+----
+unknown group
