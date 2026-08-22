@@ -281,28 +281,24 @@ unique_ptr<FunctionData> AlignedBindForCatalog(ClientContext &context, const str
 }
 unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindInput &input,
                                      vector<LogicalType> &return_types, vector<string> &names) {
+	// aligned_scan(table_name, root=...)
+	if (input.inputs.size() != 1) {
+		throw BinderException("aligned_scan: expected (table_name)");
+	}
+	string table = StringValue::Get(input.inputs[0]);
+
 	string root;
-	string table;
-	if (input.inputs.size() >= 2) {
-		// aligned_scan(root, table)
-		root = StringValue::Get(input.inputs[0]);
-		table = StringValue::Get(input.inputs[1]);
+	auto entry = input.named_parameters.find("root");
+	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
+		root = StringValue::Get(entry->second);
 	} else {
-		// aligned_table(table, root=...)
-		table = StringValue::Get(input.inputs[0]);
-		auto entry = input.named_parameters.find("root");
-		if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
-			root = StringValue::Get(entry->second);
-		} else {
-			Value setting_value;
-			auto lookup = context.TryGetCurrentSetting("aligned_data_root", setting_value);
-			if (!lookup) {
-				throw BinderException(
-				    "aligned_table: no data root configured. Use aligned_table('name', root='...') or "
-				    "SET aligned_data_root = '...'");
-			}
-			root = StringValue::Get(setting_value);
+		Value setting_value;
+		if (!context.TryGetCurrentSetting("aligned_data_root", setting_value)) {
+			throw BinderException(
+			    "aligned_scan: no data root configured. Use aligned_scan('name', root='...') or "
+			    "SET aligned_data_root = '...'");
 		}
+		root = StringValue::Get(setting_value);
 	}
 	return AlignedBindInternal(context, root, table, return_types, names);
 }
@@ -449,7 +445,7 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			continue;
 		}
 		if (col_id >= bind.names.size()) {
-			throw InternalException("aligned_table: column id %llu out of range (schema has %llu columns)", col_id,
+			throw InternalException("aligned_scan: column id %llu out of range (schema has %llu columns)", col_id,
 			                        bind.names.size());
 		}
 		requested[col_id] = 1;
@@ -492,7 +488,7 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			auto key = entry.first;
 			auto &filter = *entry.second;
 			if (key >= input.column_ids.size()) {
-				throw InternalException("aligned_table: filter column id %llu out of range", key);
+				throw InternalException("aligned_scan: filter column id %llu out of range", key);
 			}
 			auto full_col = input.column_ids[key];
 			// The filter definition is shared by all threads; each thread

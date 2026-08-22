@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bench_aligned.sh — Linux equivalent of bench_aligned.ps1
-# Phase 6 benchmark: aligned_table vs plain-parquet JOIN vs single wide parquet.
+# Phase 6 benchmark: aligned_scan vs plain-parquet JOIN vs single wide parquet.
 # Dataset: bench_ixday (configurable rows, default 1M) x 127 cols, 4 daily
 # partitions, sparse factors. Dimensions: projection 5/25/120 cols,
 # scan 25%/100%, threads 1/4/8.
@@ -69,7 +69,7 @@ gen_baseline "$WIDE" "$index_list, $alpha_list, $ma_list"
 
 # ---- Partition-pruning self-check (guards the bug fixed in aligned_scan.cpp) --
 echo "Partition-pruning self-check (non-first partition) ..."
-PRUNE_CHECK=$("$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$DATA_ROOT'; SELECT count(*) FROM aligned_table('bench_ixday') WHERE date = DATE '2026-09-02';" 2>&1 | tail -1)
+PRUNE_CHECK=$("$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$DATA_ROOT'; SELECT count(*) FROM aligned_scan('bench_ixday') WHERE date = DATE '2026-09-02';" 2>&1 | tail -1)
 if [ "$PRUNE_CHECK" != "$ROWS_PER_DAY" ]; then
   echo "FAIL: partition pruning self-check: expected $ROWS_PER_DAY, got '$PRUNE_CHECK'" >&2
   exit 1
@@ -99,11 +99,11 @@ AGG100=$(count_list "$A100,$M20")
 ALIGNED_PRELUDE="SET aligned_data_root='$DATA_ROOT';"
 aligned_sql() { # workload
   case "$1" in
-    p5)   echo "SELECT $AGG5 FROM (SELECT $A5 FROM aligned_table('bench_ixday'));" ;;
-    p25)  echo "SELECT $AGG25 FROM (SELECT $A25 FROM aligned_table('bench_ixday'));" ;;
-    p100) echo "SELECT $AGG100 FROM (SELECT $A100, $M20 FROM aligned_table('bench_ixday'));" ;;
-    s25)  echo "SELECT $AGG25 FROM (SELECT $A25 FROM aligned_table('bench_ixday') WHERE date = $DATE_FILTER);" ;;
-    s100) echo "SELECT $AGG25 FROM (SELECT $A25 FROM aligned_table('bench_ixday'));" ;;
+    p5)   echo "SELECT $AGG5 FROM (SELECT $A5 FROM aligned_scan('bench_ixday'));" ;;
+    p25)  echo "SELECT $AGG25 FROM (SELECT $A25 FROM aligned_scan('bench_ixday'));" ;;
+    p100) echo "SELECT $AGG100 FROM (SELECT $A100, $M20 FROM aligned_scan('bench_ixday'));" ;;
+    s25)  echo "SELECT $AGG25 FROM (SELECT $A25 FROM aligned_scan('bench_ixday') WHERE date = $DATE_FILTER);" ;;
+    s100) echo "SELECT $AGG25 FROM (SELECT $A25 FROM aligned_scan('bench_ixday'));" ;;
   esac
 }
 wide_sql() { # workload
@@ -209,7 +209,7 @@ REPORT="$ROOT/docs/BENCHMARK.md"
   echo ""
   echo "## Engines"
   echo ""
-  echo "- **aligned** - \`aligned_table('bench_ixday')\`: 3 groups assembled into one DataChunk,"
+  echo "- **aligned** - \`aligned_scan('bench_ixday')\`: 3 groups assembled into one DataChunk,"
   echo "  no JOIN, projection pushdown, partition pruning, parallel range scan, metadata cache, window carry reuse."
   echo "- **wide** - single wide Parquet ($TOTAL rows), DuckDB \`read_parquet\`."
   echo "- **join** - three separate Parquet files (index/alpha/ma) joined on rowid (keyed layout)."

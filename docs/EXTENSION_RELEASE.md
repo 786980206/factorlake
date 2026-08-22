@@ -12,7 +12,7 @@
 - 扩展内嵌 **DuckDB engine version**（v1.5.4），加载时强校验与 CLI 版本一致（1.5.4 ≠ 1.5.5）。
 - 本仓库扩展**自包含**（静态链接 DuckDB 核心 + parquet 扩展源码）→ 用户**无需**先装 parquet。
 - 本地已全链路验证：官方 CLI v1.5.4 + `-unsigned` + `INSTALL 'D:/.../aligned.duckdb_extension'`
-  + `LOAD aligned` + `SELECT * FROM aligned_table('writetest')` → 6000 行、mis=0 ✓；
+  + `LOAD aligned` + `SELECT * FROM aligned_scan('writetest')` → 6000 行、mis=0 ✓；
   不带 `-unsigned` → `IO Error: ... doesn't have a valid signature`（按预期拒绝）。
 
 ## 2. INSTALL 的三种输入（v1.5.4 源码路径）
@@ -105,7 +105,7 @@ INSTALL 'https://github.com/<org>/<repo>/releases/download/v0.1.0/aligned-window
 -- 使用
 LOAD aligned-windows_amd64;   -- 扩展名 = URL 文件 base name
 SET aligned_data_root='D:/data';
-SELECT * FROM aligned_table('cnstk_ixday');
+SELECT * FROM aligned_scan('cnstk_ixday');
 ```
 
 > 说明：

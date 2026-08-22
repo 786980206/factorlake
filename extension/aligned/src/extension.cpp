@@ -12,39 +12,21 @@
 namespace duckdb {
 
 void AlignedExtension::Load(ExtensionLoader &loader) {
-	// aligned_table(table_name, root=...)
-	TableFunction aligned_table_fn("aligned_table", {LogicalType::VARCHAR}, AlignedScanFunction, AlignedBind,
-	                               AlignedInitGlobal, AlignedInitLocal);
-	aligned_table_fn.named_parameters["root"] = LogicalType::VARCHAR;
-	aligned_table_fn.cardinality = AlignedCardinality;
-	aligned_table_fn.projection_pushdown = true; // Phase 2: only open requested groups/columns
-	// Filter pushdown is what lets partition/row-group pruning actually reach
-	// the aligned scan: with filter_pushdown the executor passes WHERE predicates
-	// into TableFunctionInitInput::filters; the optimizer always keeps filtered
-	// columns in column_ids (remove_unused_columns keeps filter columns alive
-	// regardless of filter_prune), so the scan can prune partitions / row groups
-	// and apply row-level filters on filter-only columns even when they are not
-	// projected (verified: SELECT alpha001 WHERE date=... prunes without date
-	// being projected).
-	aligned_table_fn.filter_pushdown = true;
-	// filter_prune=true: additionally prune the filter-only columns from the
-	// scan OUTPUT (projection_ids). The scan still reads them (hidden read
-	// columns for pruning + row filters) but the output chunk only carries the
-	// projected columns, saving the upstream PROJECTION operator. The
-	// scratch-chunk + ReferenceColumns path in the scan already implements this.
-	aligned_table_fn.filter_prune = true;
-	loader.RegisterFunction(aligned_table_fn);
-
-	// aligned_scan(root, table_name)
-	TableFunction aligned_scan_fn("aligned_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AlignedScanFunction,
+	// aligned_scan(table_name, root=...)
+	// Scan a logical AlignedTable: reads parquet column groups and assembles
+	// them into a single DataChunk (no JOIN, no materialization).
+	TableFunction aligned_scan_fn("aligned_scan", {LogicalType::VARCHAR}, AlignedScanFunction,
 	                              AlignedBind, AlignedInitGlobal, AlignedInitLocal);
+	aligned_scan_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	aligned_scan_fn.cardinality = AlignedCardinality;
-	aligned_scan_fn.projection_pushdown = true; // Phase 2
+	aligned_scan_fn.projection_pushdown = true;
+	// Filter pushdown lets partition/row-group pruning reach the aligned scan.
 	aligned_scan_fn.filter_pushdown = true;
+	// filter_prune=true: prune filter-only columns from the scan output.
 	aligned_scan_fn.filter_prune = true;
 	loader.RegisterFunction(aligned_scan_fn);
 
-	// Setting that supplies the default data root for aligned_table(name)
+	// Setting that supplies the default data root for aligned_scan(name)
 	auto &db = loader.GetDatabaseInstance();
 	db.config.AddExtensionOption("aligned_data_root", "Root directory for AlignedTable logical tables",
 	                             LogicalType::VARCHAR);

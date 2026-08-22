@@ -16,7 +16,7 @@ Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 
 
 ## Engines
 
-- **aligned** - aligned_table('bench_ixday'): 3 groups assembled into one DataChunk,
+- **aligned** - aligned_scan('bench_ixday'): 3 groups assembled into one DataChunk,
   no JOIN, projection pushdown, partition pruning, parallel range scan, metadata cache, window carry reuse.
 - **wide** - single wide Parquet (127 columns, 1M rows), DuckDB read_parquet.
 - **join** - three separate Parquet files (index/alpha/ma) joined on rowid (keyed layout).

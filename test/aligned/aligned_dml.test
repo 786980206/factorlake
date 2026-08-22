@@ -36,8 +36,8 @@ SET aligned_data_root='{TEST_DIR}/dml_data'; ATTACH '{TEST_DIR}/dml_data' AS al 
 ----
 0
 
-# --- aligned_table sees same state (uses aligned_data_root, not the attached catalog) ---
+# --- aligned_scan sees same state (uses aligned_data_root, not the attached catalog) ---
 query I
-SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT count(*) FROM aligned_table('upserttest')
+SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT count(*) FROM aligned_scan('upserttest')
 ----
 100

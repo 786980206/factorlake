@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -6,7 +6,7 @@
 
 namespace duckdb {
 
-//! Bind data of aligned_table()/aligned_scan(): the built table plan plus the
+//! Bind data of aligned_scan()/aligned_scan(): the built table plan plus the
 //! resolved output schema. Defined here so catalog integration
 //! (AlignedTableEntry::GetScanFunction) can build/cast it too.
 struct AlignedTableBindData : public TableFunctionData {
@@ -15,7 +15,7 @@ struct AlignedTableBindData : public TableFunctionData {
 	vector<LogicalType> types;
 	idx_t total_rows = 0;
 	//! Owning catalog entry when scanned through an attached table (Phase 8);
-	//! nullptr for direct aligned_table()/aligned_scan() calls.
+	//! nullptr for direct aligned_scan()/aligned_scan() calls.
 	class TableCatalogEntry *catalog_entry = nullptr;
 };
 
@@ -24,7 +24,7 @@ struct AlignedTableBindData : public TableFunctionData {
 unique_ptr<FunctionData> AlignedBindForCatalog(ClientContext &context, const string &root, const string &table,
                                                vector<LogicalType> &return_types, vector<string> &names);
 
-// aligned_table(name, root=...) / aligned_scan(root, name) table function.
+// aligned_scan(name, root=...) / aligned_scan(root, name) table function.
 unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindInput &input,
                                      vector<LogicalType> &return_types, vector<string> &names);
 

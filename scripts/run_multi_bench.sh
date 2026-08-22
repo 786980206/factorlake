@@ -136,7 +136,7 @@ engine_sql() { # e q f sel rows -> sql
   proj=$(projection_of "$q")
   where=$(filter_of "$f" "$sel" "$rows")
   case "$e" in
-    A-ALIGNED) tbl="$ALIGNED_TABLE"; echo "SELECT count(*) FROM (SELECT $proj FROM aligned_table('$tbl')$where);";;
+    A-ALIGNED) tbl="$ALIGNED_TABLE"; echo "SELECT count(*) FROM (SELECT $proj FROM aligned_scan('$tbl')$where);";;
     D-WIDE)    echo "SELECT count(*) FROM (SELECT $proj FROM read_parquet('$WIDE')$where);";;
     D-JOIN)
       # index rt join alpha on rowid=rowid_alpha join fieldset on rowid=rowid_fs
@@ -202,7 +202,7 @@ run_one(){ # e q f sel th -> prints "cold warm"
 }
 
 # ---------- correctness guard: partition pruning on a non-first partition ---------------
-sc_a=$("$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM aligned_table('$ALIGNED_TABLE') WHERE date=DATE '2026-09-02';" | tail -1)
+sc_a=$("$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM aligned_scan('$ALIGNED_TABLE') WHERE date=DATE '2026-09-02';" | tail -1)
 expected=$((ROWS/4))
 if [ "$sc_a" != "$expected" ]; then echo "SELF-CHECK FAIL: got '$sc_a' expected $expected"; exit 1; fi
 echo "SELF-CHECK OK: A-ALIGNED prunes to $expected rows on non-first partition."
@@ -214,7 +214,7 @@ echo "SELF-CHECK OK: A-ALIGNED prunes to $expected rows on non-first partition."
 check_count(){ # engine -> rows after (date='2026-09-02')
   local e="$1"
   case "$e" in
-    A-ALIGNED) "$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM (SELECT date,symbol,close FROM aligned_table('$ALIGNED_TABLE') WHERE date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
+    A-ALIGNED) "$DUCKDB" -light-mode -csv -noheader -c "SET aligned_data_root='$OUT'; SELECT count(*) FROM (SELECT date,symbol,close FROM aligned_scan('$ALIGNED_TABLE') WHERE date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
     D-WIDE)    "$DUCKDB" -light-mode -csv -noheader -c "SELECT count(*) FROM (SELECT date,symbol,close FROM read_parquet('$WIDE') WHERE date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
     D-JOIN)    "$DUCKDB" -light-mode -csv -noheader -c "SELECT count(*) FROM (SELECT i.date,i.symbol,i.close FROM read_parquet('$BASE/join_index.parquet') i JOIN read_parquet('$JOINAL') a ON i.rowid=a.rowid_alpha WHERE i.date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
     P-CONCAT|P-JOIN)

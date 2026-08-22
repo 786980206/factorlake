@@ -1,5 +1,5 @@
 # bench_aligned.ps1
-# Phase 6 benchmark: aligned_table vs plain-parquet JOIN vs single wide parquet
+# Phase 6 benchmark: aligned_scan vs plain-parquet JOIN vs single wide parquet
 # vs polars horizontal concat (position-aligned concat of per-group files).
 # Dataset: bench_ixday (1M rows x 127 cols, 4 daily partitions, sparse factors).
 # Dimensions: projection 5/25/100+ cols, scan 25%/100%, threads 1/4/8.
@@ -55,11 +55,11 @@ $ma20 = $M20 -join ', '
 
 $alignedPrelude = "SET aligned_data_root='$dataRoot';"
 $alignedQ = @{
-    p5   = "SELECT $agg5 FROM (SELECT $alpha5 FROM aligned_table('bench_ixday'));"
-    p25  = "SELECT $agg25 FROM (SELECT $alpha25 FROM aligned_table('bench_ixday'));"
-    p100 = "SELECT $agg100 FROM (SELECT $alpha100, $ma20 FROM aligned_table('bench_ixday'));"
-    s25  = "SELECT $agg25 FROM (SELECT $alpha25 FROM aligned_table('bench_ixday') WHERE date = DATE '2026-09-01');"
-    s100 = "SELECT $agg25 FROM (SELECT $alpha25 FROM aligned_table('bench_ixday'));"
+    p5   = "SELECT $agg5 FROM (SELECT $alpha5 FROM aligned_scan('bench_ixday'));"
+    p25  = "SELECT $agg25 FROM (SELECT $alpha25 FROM aligned_scan('bench_ixday'));"
+    p100 = "SELECT $agg100 FROM (SELECT $alpha100, $ma20 FROM aligned_scan('bench_ixday'));"
+    s25  = "SELECT $agg25 FROM (SELECT $alpha25 FROM aligned_scan('bench_ixday') WHERE date = DATE '2026-09-01');"
+    s100 = "SELECT $agg25 FROM (SELECT $alpha25 FROM aligned_scan('bench_ixday'));"
 }
 $wideQ = @{
     p5   = "SELECT $agg5 FROM (SELECT $alpha5 FROM read_parquet('$($wide.Replace('\','/'))'));"

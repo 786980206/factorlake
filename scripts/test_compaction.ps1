@@ -70,7 +70,7 @@ $before = (Get-ChildItem $alphaDir -Filter '*.parquet').Count
 Expect-Equal 'alpha parts before compact' $before 2
 
 # ---- verify read-back correctness before compaction --------------------------
-$o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*), count(alpha001), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('$table');"
+$o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*), count(alpha001), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_scan('$table');"
 $vals = $o.Trim() -split ','
 Expect-Equal 'total rows (4000)' $vals[0] '4000'
 Expect-Equal 'alpha001 non-null (r%5==0)' $vals[1] '800'
@@ -93,7 +93,7 @@ $idxParts = (Get-ChildItem $idxDir -Filter '*.parquet').Count
 Expect-Equal 'index parts after compact' $idxParts 1
 
 # ---- verify read-back correctness AFTER compaction ---------------------------
-$o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*), count(alpha001), count(alpha002), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('$table');"
+$o = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*), count(alpha001), count(alpha002), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_scan('$table');"
 $vals = $o.Trim() -split ','
 Expect-Equal 'total rows (4000)' $vals[0] '4000'
 Expect-Equal 'alpha001 non-null' $vals[1] '800'

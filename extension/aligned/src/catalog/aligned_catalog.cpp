@@ -2,7 +2,7 @@
 //!
 //! `ATTACH '<root>' AS name (TYPE ALIGNED)` creates an AlignedCatalog over the
 //! parquet column-group data root. Tables are LOGICAL: reads go straight to
-//! the parquet files via the aligned_table scan; nothing is materialized.
+//! the parquet files via the aligned_scan scan; nothing is materialized.
 //! Standard DML routes through the catalog's PlanInsert/PlanDelete/PlanUpdate
 //! hooks (the same mechanism DuckLake uses).
 
@@ -50,9 +50,9 @@ TableFunction AlignedTableEntry::GetScanFunction(ClientContext &context, unique_
 	vector<string> names;
 	bind_data = AlignedBindForCatalog(context, root, name, types, names);
 
-	// Same shape/flags as the registered aligned_table function: projection &
+	// Same shape/flags as the registered aligned_scan function: projection &
 	// filter pushdown reach the scan through these flags.
-	TableFunction fn("aligned_table", {LogicalType::VARCHAR}, AlignedScanFunction, nullptr, AlignedInitGlobal,
+	TableFunction fn("aligned_scan", {LogicalType::VARCHAR}, AlignedScanFunction, nullptr, AlignedInitGlobal,
 	                 AlignedInitLocal);
 	fn.named_parameters["root"] = LogicalType::VARCHAR;
 	fn.cardinality = AlignedCardinality;

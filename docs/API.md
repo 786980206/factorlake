@@ -86,7 +86,7 @@ DETACH al;
 
 ```sql
 SET aligned_data_root = 'D:/data/factorlake';
-SELECT * FROM aligned_table('cnstk_ixday') WHERE date = DATE '2026-08-17';
+SELECT * FROM aligned_scan('cnstk_ixday') WHERE date = DATE '2026-08-17';
 ```
 
 ---
@@ -144,7 +144,7 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 ## 4. 表函数 API
 
-除了标准 SQL DML，还提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+除了标准 SQL DML，还提供 4 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
 ### 4.0 `aligned_create` — 建表 / 扩展列组
 
@@ -179,10 +179,10 @@ SELECT * FROM aligned_create('ptbl', 'index', 'symbol VARCHAR, date DATE, close 
                              partition_template => 'date=%Y-%m-%d');
 ```
 
-### 4.1 `aligned_table` — 扫描逻辑表
+### 4.1 `aligned_scan` — 扫描逻辑表
 
 ```sql
-SELECT * FROM aligned_table(table_name [, root => '...']);
+SELECT * FROM aligned_scan(table_name [, root => '...']);
 ```
 
 | 参数 | 位置 | 类型 | 必填 | 说明 |
@@ -194,31 +194,14 @@ SELECT * FROM aligned_table(table_name [, root => '...']);
 
 ```sql
 SET aligned_data_root = 'D:/data/factorlake';
-SELECT symbol, date, close FROM aligned_table('cnstk_ixday')
+SELECT symbol, date, close FROM aligned_scan('cnstk_ixday')
   WHERE date >= DATE '2026-01-01' AND date <= DATE '2026-01-31';
 
 -- 或指定 root
-SELECT * FROM aligned_table('cnstk_ixday', root => 'D:/data/factorlake');
+SELECT * FROM aligned_scan('cnstk_ixday', root => 'D:/data/factorlake');
 ```
 
-### 4.2 `aligned_scan` — 扫描逻辑表（root 为位置参数）
-
-```sql
-SELECT * FROM aligned_scan(root, table_name);
-```
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|------|------|------|------|------|
-| `root` | 位置参数 1 | VARCHAR | 是 | 数据根目录。 |
-| `table_name` | 位置参数 2 | VARCHAR | 是 | 逻辑表名。 |
-
-**返回**：同 `aligned_table`。
-
-```sql
-SELECT * FROM aligned_scan('D:/data/factorlake', 'cnstk_ixday') WHERE date = DATE '2026-08-17';
-```
-
-### 4.3 `aligned_compact` — 合并 part 碎片
+### 4.2 `aligned_compact` — 合并 part 碎片
 
 ```sql
 SELECT * FROM aligned_compact(table_name, group_name [, root => '...']);
@@ -240,7 +223,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha001');
 SELECT * FROM aligned_compact('cnstk_ixday', 'all');
 ```
 
-### 4.4 `aligned_drop` — 删除列组或整表
+### 4.3 `aligned_drop` — 删除列组或整表
 
 ```sql
 SELECT * FROM aligned_drop(table_name, group_name [, root => '...']);
@@ -284,7 +267,7 @@ SELECT * FROM aligned_drop('cnstk_ixday', 'index');
 
 ```sql
 SET aligned_data_root = 'D:/data/factorlake';
--- 之后所有 aligned_table/upsert/delete/compact 调用无需传 root
+-- 之后所有 aligned_scan/create/compact/drop 调用无需传 root
 ```
 
 ### 5.2 `parquet_metadata_cache`

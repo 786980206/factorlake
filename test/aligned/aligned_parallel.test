@@ -5,34 +5,34 @@
 
 # --- correctness: identical results at any thread count ---
 query IIIII
-SET aligned_data_root='{DATA_ROOT}'; SET threads=1; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_table('bench_ixday')
+SET aligned_data_root='{DATA_ROOT}'; SET threads=1; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_scan('bench_ixday')
 ----
 1000000,142858,142858,499999500000
 
 query IIIII
-SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_table('bench_ixday')
+SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_scan('bench_ixday')
 ----
 1000000,142858,142858,499999500000
 
 # --- parallel filters across part boundary ---
 query I
-SET aligned_data_root='{DATA_ROOT}'; SET threads=1; SELECT count(*) FROM aligned_table('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010
+SET aligned_data_root='{DATA_ROOT}'; SET threads=1; SELECT count(*) FROM aligned_scan('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010
 ----
 21
 
 query I
-SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(*) FROM aligned_table('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010
+SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(*) FROM aligned_scan('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010
 ----
 21
 
 # --- parallel projection ---
 query II
-SET aligned_data_root='{DATA_ROOT}'; SET threads=1; SELECT count(alpha099), count(rowid_ma) FROM aligned_table('bench_ixday')
+SET aligned_data_root='{DATA_ROOT}'; SET threads=1; SELECT count(alpha099), count(rowid_ma) FROM aligned_scan('bench_ixday')
 ----
 142858,1000000
 
 query II
-SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(alpha099), count(rowid_ma) FROM aligned_table('bench_ixday')
+SET aligned_data_root='{DATA_ROOT}'; SET threads=8; SELECT count(alpha099), count(rowid_ma) FROM aligned_scan('bench_ixday')
 ----
 142858,1000000
 

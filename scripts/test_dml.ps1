@@ -95,12 +95,12 @@ SELECT count(*) FROM al.$table WHERE symbol = '009991';
 "@
 Expect-Equal 'deleted key gone' ($out -split "`r?`n")[-1].Trim() '0'
 
-# ---- aligned_table sees same state (read + write consistency) -----------------
+# ---- aligned_scan sees same state (read + write consistency) -----------------
 $out = Run-DuckDB @"
 $setRoot
-SELECT count(*) FROM aligned_table('$table');
+SELECT count(*) FROM aligned_scan('$table');
 "@
-Expect-Equal 'aligned_table sees same state' $out.Trim() $afterDelete
+Expect-Equal 'aligned_scan sees same state' $out.Trim() $afterDelete
 
 # ---- large batch INSERT (>1M rows, exercises batched upsert path) ------------
 $batchDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'testdata_batchtmp'

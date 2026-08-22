@@ -23,18 +23,18 @@ function Expect-Equal([string]$name, $actual, $expected) {
 }
 
 # --- correctness: identical results at any thread count ----------------------
-$t1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_table('bench_ixday');"
-$t8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_table('bench_ixday');"
+$t1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_scan('bench_ixday');"
+$t8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(*), count(alpha000), count(alpha099), sum(rowid) FROM aligned_scan('bench_ixday');"
 Expect-Equal 'parallel aggregates (t1 == t8)' $t1.Trim() $t8.Trim()
 if ($t1 -match '(?m)^1000000,142858,142858,499999500000\r?$') { Write-Host 'PASS: aggregate values (1M rows, r%7 sparse, sum 0..999999)' } else { Write-Host "FAIL: aggregate values ($($t1.Trim()))"; $script:failures++ }
 
-$t1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(*) FROM aligned_table('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010;"
-$t8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(*) FROM aligned_table('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010;"
+$t1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(*) FROM aligned_scan('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010;"
+$t8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(*) FROM aligned_scan('bench_ixday') WHERE rowid BETWEEN 249990 AND 250010;"
 Expect-Equal 'parallel filters across part boundary (t1 == t8)' $t1.Trim() $t8.Trim()
 Expect-Equal 'filter row count' $t1.Trim() '21'
 
-$t1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(alpha099), count(rowid_ma) FROM aligned_table('bench_ixday');"
-$t8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(alpha099), count(rowid_ma) FROM aligned_table('bench_ixday');"
+$t1 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=1; SELECT count(alpha099), count(rowid_ma) FROM aligned_scan('bench_ixday');"
+$t8 = Run-DuckDB "SET aligned_data_root='$dataRoot'; SET threads=8; SELECT count(alpha099), count(rowid_ma) FROM aligned_scan('bench_ixday');"
 Expect-Equal 'parallel projection (t1 == t8)' $t1.Trim() $t8.Trim()
 Expect-Equal 'projection values' $t1.Trim() '142858,1000000'
 
@@ -52,7 +52,7 @@ function Time-Ms([string]$sql) {
     if (-not $m.Success) { throw "no timer output: $raw" }
     return [double]$m.Groups[1].Value
 }
-$q = "SET aligned_data_root='$dataRoot'; SET threads={0}; SELECT count(alpha000), count(alpha050), sum(ma005), sum(rowid) FROM (SELECT alpha000, alpha050, ma005, rowid FROM aligned_table('bench_ixday'));"
+$q = "SET aligned_data_root='$dataRoot'; SET threads={0}; SELECT count(alpha000), count(alpha050), sum(ma005), sum(rowid) FROM (SELECT alpha000, alpha050, ma005, rowid FROM aligned_scan('bench_ixday'));"
 $t1ms = Time-Ms ($q -f 1)
 $t8ms = Time-Ms ($q -f 8)
 Write-Host "scaling: 1 thread = $t1ms s, 8 threads = $t8ms s"

@@ -20,7 +20,7 @@ SET aligned_data_root = '/data';
 
 -- 逻辑上是一张超宽表：
 SELECT date, symbol, close, alpha001, alpha002, ma20
-FROM aligned_table('cnstk_ixday')
+FROM aligned_scan('cnstk_ixday')
 WHERE date = DATE '2026-08-17';
 ```
 
@@ -115,7 +115,7 @@ index）用**同一种一层分区段**（`year=`/`month=`/`date=`）；Group �
 
 | 能力 | 状态 | 说明 |
 |------|------|------|
-| 读取 | ✅ | `aligned_table()` / `aligned_scan()`，多 Group 并行读、跨 part/RG 行窗口、Schema Evolution（缺失列补 NULL）、跨 Group 重复列遮蔽、Row Space 校验 |
+| 读取 | ✅ | `aligned_scan()` / `aligned_scan()`，多 Group 并行读、跨 part/RG 行窗口、Schema Evolution（缺失列补 NULL）、跨 Group 重复列遮蔽、Row Space 校验 |
 | 投影下推 | ✅ | 只打开被选中的 Group、只读被选中的列（`SELECT alpha001` 只碰 alpha101） |
 | 过滤下推 | ✅ | Hive 分区剪枝 + Parquet Row Group stats 剪枝 + 行级 filter（`WHERE date=...` 剪到 1/4 数据时约 2-3× 收益） |
 | 并行扫描 | ✅ | Aligned Row Group 为任务单元，8 线程实测 ≈4.2× 加速 |

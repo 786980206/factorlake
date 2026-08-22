@@ -21,7 +21,7 @@ COPY (WITH r AS (SELECT range AS r FROM range(2000, 4000)) SELECT CAST(r AS BIGI
 
 # --- verify read-back BEFORE compaction ---
 query IIII
-SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT count(*), count(alpha001), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('compacttest')
+SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT count(*), count(alpha001), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_scan('compacttest')
 ----
 4000,800,7998000,0
 
@@ -33,7 +33,7 @@ SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT dirs_compacted, part
 
 # --- verify read-back AFTER compaction ---
 query IIIIII
-SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT count(*), count(alpha001), count(alpha002), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_table('compacttest')
+SET aligned_data_root='{TEST_DIR}/compacttest_data'; SELECT count(*), count(alpha001), count(alpha002), sum(rowid), sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) FROM aligned_scan('compacttest')
 ----
 4000,800,364,7998000,0
 

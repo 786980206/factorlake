@@ -10,7 +10,7 @@
 ### Phase 0–7
 
 - **Phase 0**：`docs/STORAGE_CONTRACT.md` 定稿（v1.1）。
-- **Phase 1 Read MVP**：`aligned_table()` / `aligned_scan()` 跑通。多 Group 并行
+- **Phase 1 Read MVP**：`aligned_scan()` / `aligned_scan()` 跑通。多 Group 并行
   读取、RG 窗口调度、跨 part/RG 行窗口、Schema Evolution（缺失列补 NULL）、
   跨 Group 重复列遮蔽、Row Space 校验。验收：test_aligned.ps1 11/11 PASS。
   构建产物：`duckdb/build/duckdb_aligned.exe`（shell 输出名可配
@@ -435,4 +435,46 @@ SELECT * FROM aligned_create('mytable', 'factor/alpha', 'alpha001 DOUBLE');
 - **更新测试**：`aligned_create_fn.test` 重写（新签名），`aligned_dml.test`、
   `aligned_delete_empty.test`、`aligned_compact.test` 改用新签名。
   `bench_write.ps1` 同步更新。
+- 当前总：SQLLogicTest 118/118 + 4 PS 套件全 PASS。
+
+## v0.18-unify-scan — 删除 aligned_table，统一表函数参数格式
+
+两项改动：
+
+### 1. 删除 `aligned_table`，保留 `aligned_scan`
+
+`aligned_table` 和 `aligned_scan` 功能完全重复（都是扫描逻辑表），删除
+`aligned_table`，统一用 `aligned_scan`。同时统一参数格式：
+
+```sql
+-- 旧：两个函数，参数格式不同
+SELECT * FROM aligned_table('mytable');                    -- 1 位置参数
+SELECT * FROM aligned_scan('/data/root', 'mytable');        -- 2 位置参数 (root, table)
+
+-- 新：统一为 1 位置参数 + root 命名参数
+SELECT * FROM aligned_scan('mytable');
+SELECT * FROM aligned_scan('mytable', root => '/data/root');
+```
+
+- `AlignedBind` 简化：移除 2-参数 vs 1-参数分支，只保留 `(table_name)` + `root => ...`。
+- `extension.cpp`：删除 `aligned_table_fn` 注册，`aligned_scan_fn` 改为 1 位置参数。
+- `aligned_catalog.cpp`：内部 catalog 函数名从 `"aligned_table"` 改为 `"aligned_scan"`。
+- 全项目替换 `aligned_table(` → `aligned_scan(`（test/*.test、scripts/*.ps1、
+  scripts/*.sh、docs/*、README.md）。
+- `aligned_scan(root, name)` 2-位置参数调用全部改为 `aligned_scan(name, root => ...)`。
+
+### 2. 统一表函数参数格式
+
+所有表函数现在遵循统一约定：
+- **第 1 位置参数**：`table_name`（逻辑表名）
+- **后续位置参数**：各函数特定的参数（`group_name`、`columns` 等）
+- **命名参数**：`root`（可选，默认 `aligned_data_root`）、`partition_template`（仅 create）
+
+| 函数 | 位置参数 | 命名参数 |
+|------|---------|---------|
+| `aligned_scan` | `(table_name)` | `root` |
+| `aligned_create` | `(table_name, group_name, columns)` | `root`, `partition_template` |
+| `aligned_compact` | `(table_name, group_name)` | `root` |
+| `aligned_drop` | `(table_name, group_name)` | `root` |
+
 - 当前总：SQLLogicTest 118/118 + 4 PS 套件全 PASS。

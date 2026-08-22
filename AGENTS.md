@@ -138,9 +138,10 @@ AlignedTableScan
 
 ---
 
-## 7. Writer（aligned_upsert / aligned_delete / CREATE TABLE）
+## 7. Writer（aligned_create / aligned_compact / aligned_drop / CREATE TABLE / DML）
 
 ```
+aligned_scan(table, root=...)                    → (table columns)
 aligned_create(table, group, columns, root=..., partition_template=...)  → (dirs_created, files_created, txid)
 aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
 aligned_drop(table, group_name, root=...)         → (dirs_removed, files_removed, txid)
