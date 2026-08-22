@@ -152,8 +152,9 @@ body{
 .rg{
   flex:1;border-radius:4px;min-width:10px;
   display:flex;align-items:center;justify-content:center;
-  font-size:1.3vh;font-family:Consolas,monospace;color:var(--tx);
+  font-size:1.1vh;font-family:Consolas,monospace;color:var(--tx);
   cursor:default;transition:transform .15s;position:relative;
+  overflow:hidden;white-space:nowrap;
 }
 .rg:hover{transform:scale(1.15);z-index:2}
 .rg[data-tip]:hover::after{
@@ -262,15 +263,15 @@ body{
               <div class="part" style="flex-grow:2998">
                 <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
-                  <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">B</div>
+                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
+                  <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">RG-B</div>
                 </div>
               </div>
               <div class="part" style="flex-grow:3000">
                 <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">B</div>
-                  <div class="rg rg-C" data-tip="RG-C · rows 4998–5997">C</div>
+                  <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">RG-B</div>
+                  <div class="rg rg-C" data-tip="RG-C · rows 4998–5997">RG-C</div>
                 </div>
               </div>
             </div>
@@ -280,9 +281,9 @@ body{
               <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
-                  <div class="rg rg-B" data-tip="RG-B · rows 16384–32767">B</div>
-                  <div class="rg rg-C" data-tip="RG-C · rows 32768–5997">C</div>
+                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
+                  <div class="rg rg-B" data-tip="RG-B · rows 16384–32767">RG-B</div>
+                  <div class="rg rg-C" data-tip="RG-C · rows 32768–5997">RG-C</div>
                 </div>
               </div>
             </div>
@@ -292,7 +293,7 @@ body{
               <div class="part" style="flex-grow:0;flex-basis:auto;border-color:rgba(26,127,55,.3)">
                 <div class="part-name">0000-0000000001.parquet <span class="rows">1 row</span></div>
                 <div class="rgs">
-                  <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">D</div>
+                  <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">RG-D</div>
                 </div>
               </div>
             </div>
@@ -307,15 +308,15 @@ body{
               <div class="part" style="flex-grow:2998">
                 <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index part 0000 同行区间">A</div>
-                  <div class="rg rg-B" data-tip="RG-B">B</div>
+                  <div class="rg rg-A" data-tip="RG-A · 与 index part 0000 同行区间">RG-A</div>
+                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
                 </div>
               </div>
               <div class="part" style="flex-grow:3000">
                 <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-B" data-tip="RG-B">B</div>
-                  <div class="rg rg-C" data-tip="RG-C">C</div>
+                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
                 </div>
               </div>
             </div>
@@ -325,9 +326,9 @@ body{
               <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">A</div>
-                  <div class="rg rg-B" data-tip="RG-B">B</div>
-                  <div class="rg rg-C" data-tip="RG-C">C</div>
+                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
+                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
                 </div>
               </div>
             </div>
@@ -349,15 +350,15 @@ body{
               <div class="part" style="flex-grow:2998">
                 <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">A</div>
-                  <div class="rg rg-B" data-tip="RG-B">B</div>
+                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
+                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
                 </div>
               </div>
               <div class="part" style="flex-grow:3000">
                 <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-B" data-tip="RG-B">B</div>
-                  <div class="rg rg-C" data-tip="RG-C">C</div>
+                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
                 </div>
               </div>
             </div>
@@ -367,9 +368,9 @@ body{
               <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">A</div>
-                  <div class="rg rg-B" data-tip="RG-B">B</div>
-                  <div class="rg rg-C" data-tip="RG-C">C</div>
+                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
+                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
                 </div>
               </div>
             </div>
