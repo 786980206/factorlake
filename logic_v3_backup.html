@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AlignedTable 读写全解 v3</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --line:#30363d;
+  --tx:#c9d1d9; --mut:#8b949e; --cyan:#58a6ff; --teal:#39d2c0;
+  --org:#f78166; --grn:#3fb950; --prp:#bc8cff; --red:#f85149;
+  --A:#58a6ff; --B:#f78166; --C:#3fb950; --D:#bc8cff; --X:#6e7681;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--tx);
+  font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;line-height:1.65}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+
+header{padding:48px 0 24px;border-bottom:1px solid var(--line);
+  background:radial-gradient(1200px 400px at 15% -10%,#132a3f 0%,transparent 60%)}
+header h1{margin:0 0 8px;font-size:38px}
+header h1 .hl{color:var(--teal)}
+header .sub{color:var(--mut);margin:0;font-size:15.5px}
+
+nav{position:sticky;top:0;z-index:60;background:rgba(13,17,23,.93);backdrop-filter:blur(6px);
+  border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;gap:4px;flex-wrap:wrap;padding:8px 20px}
+nav a{color:var(--mut);text-decoration:none;font-size:14px;padding:6px 12px;border-radius:8px}
+nav a:hover{color:var(--tx);background:var(--panel)}
+
+main section{padding:40px 0 8px}
+h2{display:flex;align-items:center;gap:10px;font-size:25px;margin:0 0 16px}
+h2::before{content:"";width:6px;height:26px;border-radius:3px;
+  background:linear-gradient(180deg,var(--cyan),var(--teal))}
+h3{font-size:17px;margin:20px 0 10px;color:var(--cyan)}
+p{margin:8px 0}
+code,.mono{font-family:Consolas,"Cascadia Mono",monospace}
+.codeblock{background:#010409;border:1px solid var(--line);border-radius:10px;
+  padding:13px 16px;font-family:Consolas,monospace;font-size:14px;
+  overflow-x:auto;white-space:pre;color:#a5d6ff;margin-bottom:4px}
+.codeblock .kw{color:#ff7b72}.codeblock .st{color:#a5d6ff}
+.codeblock .cm{color:#8b949e;font-style:italic}
+
+/* cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:15px 18px;transition:transform .18s,border-color .18s}
+.card:hover{transform:translateY(-4px);border-color:var(--cyan)}
+.card .ico{font-size:23px}
+.card h3{margin:7px 0 5px;color:var(--tx)}
+.card p{margin:0;color:var(--mut);font-size:14px}
+.card p b{color:var(--teal)}
+
+/* ============ 模式条 / 控件 ============ */
+.stage{position:relative;padding-top:54px}
+.modebar{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.tab{background:var(--panel2);border:1px solid var(--line);color:var(--mut);
+  padding:9px 20px;border-radius:10px;cursor:pointer;font-size:15px;transition:all .2s}
+.tab.acc{border-color:var(--teal);color:var(--teal);font-weight:600;
+  box-shadow:0 0 14px rgba(57,210,192,.18)}
+.controls{display:flex;align-items:center;gap:12px;margin:14px 0;flex-wrap:wrap}
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--tx);
+  padding:8px 18px;border-radius:8px;cursor:pointer;font-size:14px}
+.btn:hover{border-color:var(--cyan);color:var(--cyan)}
+.btn.primary{background:var(--teal);border-color:var(--teal);color:#0d1117;font-weight:600}
+.dots{display:flex;gap:6px}.dot{width:9px;height:9px;border-radius:50%;
+  background:var(--line);cursor:pointer}.dot.on{background:var(--teal);transform:scale(1.35)}
+.stitle{font-size:17px;font-weight:600;color:var(--teal);margin-top:14px}
+.sdesc{color:var(--mut);font-size:14.5px;min-height:52px;margin-top:6px;max-width:1000px}
+.sdesc b{color:var(--tx)}
+
+.qchip{position:absolute;top:0;left:14px;display:none;max-width:92%;
+  font-family:Consolas,monospace;font-size:13px;color:#0d1117;
+  background:var(--teal);padding:7px 14px;border-radius:8px;z-index:5;
+  box-shadow:0 4px 18px rgba(57,210,192,.35)}
+.qchip.show{display:inline-block;animation:dropin .45s cubic-bezier(.2,.9,.3,1.3)}
+@keyframes dropin{from{transform:translateY(-14px);opacity:0}to{transform:none;opacity:1}}
+
+/* ============ 大方块表格 ============ */
+.tablewrap{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
+.bigtable{flex:1 1 660px;border:2px solid var(--line);border-radius:16px;
+  background:linear-gradient(180deg,#0b1017,#0a0e14);padding:16px;
+  transition:border-color .4s}
+.bt-head{display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:12px;gap:10px;flex-wrap:wrap}
+.bt-title{font-weight:600;font-size:15px}
+.bt-title small{color:var(--mut);font-weight:400;margin-left:8px}
+.jsonmini{font-family:Consolas,monospace;font-size:11.5px;color:var(--mut);
+  background:#010409;border:1px solid var(--line);border-radius:8px;padding:4px 10px}
+.jsonmini b{color:var(--tx)}
+#bt-txid.tick{color:var(--grn);animation:tickf .8s;display:inline-block}
+@keyframes tickf{30%{transform:scale(1.5);text-shadow:0 0 12px var(--grn)}}
+
+.sliceswrap{overflow-x:auto}
+.slices{display:flex;gap:10px;min-width:640px}
+.slice{--c:var(--cyan);flex:1;border:1.5px solid color-mix(in srgb,var(--c) 50%,transparent);
+  border-radius:11px;padding:9px;background:color-mix(in srgb,var(--c) 6%,transparent);
+  transition:opacity .45s,border-color .3s,box-shadow .3s;min-width:148px}
+.slice.glowc{box-shadow:0 0 0 1.5px color-mix(in srgb,var(--c) 80%,transparent),
+  0 0 18px color-mix(in srgb,var(--c) 30%,transparent)}
+.slice.off{opacity:.14}
+.slice.off .sname::after{content:"🚫 0 IO";font-size:9.5px;color:var(--red);
+  margin-left:5px;font-family:"Segoe UI"}
+.slice.dimsl{opacity:.32}
+.sname{font-size:12.5px;font-weight:600;color:var(--c);white-space:nowrap;margin-bottom:2px}
+
+/* 对齐核心区：四个组结构完全一致 → 同色 RG 等高 */
+.pband{margin-top:9px;border-radius:8px;padding:6px;transition:all .4s;position:relative}
+.plabel{display:flex;justify-content:space-between;font-family:Consolas,monospace;
+  font-size:10px;color:var(--mut);margin-bottom:5px}
+.pband.pruned{opacity:.16}
+.pband.pruned .plabel span:first-child{text-decoration:line-through}
+.pband.lit{background:rgba(57,210,192,.06);outline:1px dashed rgba(57,210,192,.4)}
+.pband.newband{animation:newin .55s cubic-bezier(.2,.9,.3,1.4);
+  border:1px solid var(--grn);background:rgba(63,185,80,.07)}
+.part{border:1px solid var(--line);border-radius:7px;background:#11161d;
+  padding:5px 6px;font-family:Consolas,monospace;transition:all .35s}
+.part + .part{margin-top:6px}
+.pname{font-size:9.5px;color:var(--mut);margin-bottom:4px;white-space:nowrap}
+.rgs{display:flex;gap:3px}
+.rg{--rc:var(--cyan);flex:1;height:18px;border-radius:3px;
+  background:color-mix(in srgb,var(--rc) 42%,transparent);
+  border:1px solid color-mix(in srgb,var(--rc) 68%,transparent);
+  display:flex;align-items:center;justify-content:center;
+  font-size:8.5px;color:var(--tx);transition:all .3s;cursor:pointer}
+.rg.skip{background:repeating-linear-gradient(45deg,#2a2f36,#2a2f36 3px,#444 3px,#444 6px);
+  border-color:var(--red);opacity:.55}
+.rg.skip::after{content:"✕";color:var(--red);font-size:9px}
+.rg.flash{box-shadow:0 0 0 2px var(--teal),0 0 12px var(--teal);z-index:2}
+.rg.hitp{animation:hitp .9s ease-in-out infinite;border-color:var(--org)}
+@keyframes hitp{50%{box-shadow:0 0 12px 3px rgba(247,129,102,.75)}}
+.part.hot{border-color:var(--org);box-shadow:0 0 14px rgba(247,129,102,.35)}
+.part.newin{animation:newin .5s cubic-bezier(.2,.9,.3,1.4);border-color:var(--grn)}
+@keyframes newin{from{transform:scale(.5);opacity:0}to{transform:scale(1);opacity:1}}
+.part.pop{transform:scale(.1) rotate(18deg);opacity:0}
+.part.mini .pname{font-size:8.5px}
+
+/* index 追加/更新区（不参与跨组对齐） */
+.extrazone{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}
+.zlabel{font-size:10px;color:var(--mut);font-family:Consolas,monospace;margin-bottom:6px}
+#np{display:none}
+#np.np-show{display:block;animation:newin .55s cubic-bezier(.2,.9,.3,1.4);
+  border-color:var(--grn)}
+
+/* 扫描线 */
+.slice.scanning{overflow:hidden}
+.slice.scanning .pband::after{content:"";position:absolute;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--teal),transparent);
+  animation:sweep 1.1s linear infinite}
+@keyframes sweep{from{top:0}to{top:100%}}
+
+/* 右侧盒 */
+.sidecol{flex:1 1 250px;display:flex;flex-direction:column;gap:16px;min-width:240px}
+.sidebox{display:none;border-radius:12px;padding:14px;min-height:216px}
+.mode-read #chunkbox{display:block;border:1.5px solid var(--teal);
+  background:rgba(57,210,192,.05)}
+.mode-insert #tmpbox,.mode-update #tmpbox,.mode-delete #tmpbox{
+  display:block;border:1.5px dashed var(--prp);background:rgba(188,140,255,.05)}
+.ptitle{font-size:12px;color:var(--mut);letter-spacing:1.5px;margin-bottom:10px}
+.rglane{--rc:var(--A);height:17px;border-radius:4px;margin:7px 0;width:12%;
+  background:color-mix(in srgb,var(--rc) 55%,transparent);
+  font-size:9.5px;display:flex;align-items:center;justify-content:center;color:var(--tx);
+  transition:width .7s cubic-bezier(.2,.8,.2,1)}
+.rglane.on{width:96%}
+#chunkbox p{font-size:11.5px;color:var(--mut);text-align:center;margin:8px 0 0}
+#clone{opacity:0;transform:translateY(8px);border-style:dashed;transition:all .4s}
+#clone.vis{opacity:.45;transform:none}
+#clone.solid{opacity:1;transform:none;border-style:solid;border-color:var(--prp)}
+#clone.solid .pname{color:var(--prp)}
+#clone.gone{opacity:0;transform:scale(.4)}
+.wnote{font-size:12px;color:var(--mut);margin-top:10px}
+.keybadge{display:none;margin-top:10px;font-family:Consolas,monospace;font-size:11.5px;
+  color:var(--org);border:1px dashed var(--org);border-radius:8px;padding:6px 9px}
+.keybadge.show{display:block}
+
+/* tooltip / summary / chain / feats / inv / footer —— 同前版 */
+#tip{position:fixed;z-index:99;display:none;max-width:270px;background:#0a0e14;
+  border:1px solid var(--teal);border-radius:8px;padding:7px 10px;font-size:12px;
+  color:var(--tx);pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.5)}
+[data-tip]{cursor:help}
+.summary{margin-top:14px;padding:10px 14px;border-radius:10px;display:none;
+  background:rgba(57,210,192,.08);border:1px solid rgba(57,210,192,.35);
+  color:var(--teal);font-size:14px}
+.summary.show{display:block}
+.chain{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:16px 0}
+.chain .cnode{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:7px 13px;font-family:Consolas,monospace;font-size:13px}
+.chain .acc{border-color:var(--teal);color:var(--teal)}
+.chain .arr{color:var(--mut)}
+ul.feats{list-style:none;margin:10px 0 0;padding-left:0}
+ul.feats li{padding:6px 0 6px 26px;position:relative;color:var(--mut)}
+ul.feats li::before{content:"▸";position:absolute;left:6px;color:var(--cyan)}
+ul.feats li b{color:var(--tx)}
+.invbadges{display:flex;flex-wrap:wrap;gap:12px}
+.inv{background:linear-gradient(135deg,rgba(88,166,255,.10),rgba(57,210,192,.10));
+  border:1px solid rgba(88,166,255,.35);border-radius:22px;padding:9px 20px;font-size:14.5px;
+  transition:transform .15s}.inv:hover{transform:translateY(-3px)}
+footer{margin-top:56px;border-top:1px solid var(--line);padding:24px 0 44px;
+  color:var(--mut);font-size:13px}
+footer code{color:var(--teal)}
+</style>
+</head>
+<body>
+
+<!-- ===================== HEADER ===================== -->
+<header>
+  <div class="wrap">
+    <h1><span class="hl">AlignedTable</span> 读写全解</h1>
+    <p class="sub">这个<b style="color:var(--tx)">大方块就是一张逻辑表</b>：竖条 = 列组（index / alpha101 / ma / alpha191），
+    每条内部的小块 = part（parquet 文件）→ RG（行组）。<br>
+    四个模式分别演示 <b style="color:var(--teal)">读 · INSERT · UPDATE · DELETE</b>，动画直接标在图上；悬停任意小块可看说明。</p>
+  </div>
+</header>
+<nav>
+  <div class="wrap">
+    <a href="#concepts">核心概念</a>
+    <a href="#flow">交互演示</a>
+    <a href="#attach">ATTACH 与标准 DML</a>
+    <a href="#inv">关键不变量</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+<!-- ===================== 一、核心概念 ===================== -->
+<section id="concepts">
+  <h2>一、核心概念</h2>
+  <div class="cards">
+    <div class="card"><div class="ico">🗂</div><h3>Logical Table 逻辑表</h3>
+      <p><b>cnstk_ixday</b> 是一张逻辑表；<b>目录即 Catalog</b>——没有独立元数据库，_table.json 只是轻量清单。</p></div>
+    <div class="card"><div class="ico">🧱</div><h3>Column Group 列组</h3>
+      <p>图中每个<b>竖条</b>是一个列组，独立存 Parquet，物理布局可不同。</p></div>
+    <div class="card"><div class="ico">🔑</div><h3>Key 只存一份</h3>
+      <p>主键 <b>(date, symbol)</b> 只在 index 组；其余组不重复存键。</p></div>
+    <div class="card"><div class="ico">↔️</div><h3>Logical Row Space</h3>
+      <p>所有组按行号严格对齐：<b>index[N] == alpha[N] == ma[N]</b>。同色 RG 跨组等高就是对齐的可视化——查询绝不 JOIN。</p></div>
+    <div class="card"><div class="ico">📦</div><h3>Part = Parquet 文件</h3>
+      <p>文件名自描述行区间：<b>0000-0000005998.parquet</b> = 索引0000 · 5998 行。行区间由文件名推导，零 footer IO。</p></div>
+    <div class="card"><div class="ico">🧩</div><h3>RG = Row Group</h3>
+      <p>part 内部的最小读取单元（默认 16384 行），带 <b>min/max 统计</b>可整段跳过。index 下方的「追加/更新区」是新写入的落点，不参与跨组对齐展示。</p></div>
+  </div>
+</section>
+
+<!-- ===================== 二、交互演示 ===================== -->
+<section id="flow">
+  <h2>二、在大方块上看 读 / INSERT / UPDATE / DELETE</h2>
+
+  <div class="modebar">
+    <button class="tab acc" id="tab-read">📖 读流程</button>
+    <button class="tab" id="tab-insert">➕ INSERT</button>
+    <button class="tab" id="tab-update">✏️ UPDATE</button>
+    <button class="tab" id="tab-delete">🗑 DELETE</button>
+  </div>
+  <div class="controls">
+    <button class="btn" id="x-prev">◀ 上一步</button>
+    <button class="btn primary" id="x-next">下一步 ▶</button>
+    <button class="btn" id="x-replay">↺ 重播</button>
+    <span class="dots" id="x-dots"></span>
+  </div>
+  <div class="stitle" id="x-title"></div>
+  <div class="sdesc" id="x-desc"></div>
+
+  <div class="stage mode-read" id="stage">
+    <div class="qchip" id="qchip"></div>
+
+    <div class="tablewrap">
+      <!-- ======== 大方块：一张逻辑表 ======== -->
+      <div class="bigtable" data-tip="一张逻辑表 = 一个目录。每个竖条是一个列组（Column Group），独立存 Parquet。">
+        <div class="bt-head">
+          <span class="bt-title">🗂 cnstk_ixday<small>逻辑表 · 目录即元数据</small></span>
+          <span class="jsonmini">_table.json · last_txid <b id="bt-txid">41</b></span>
+        </div>
+        <div class="sliceswrap"><div class="slices">
+
+          <!-- ===== index 主键组 ===== -->
+          <div class="slice" data-g="index" data-tip="主键列组：(date,symbol) + close 等。Key 全表仅此一份。" style="--c:var(--org)">
+            <div class="sname">🔑 index</div>
+            <div class="pband b07" data-m="07" data-tip="2026-07 分区：将被 WHERE date='2026-09-10' 剪枝。">
+              <div class="plabel"><span>2026-07</span></div>
+              <div class="part"><div class="pname">0000 · 2998 行</div>
+                <div class="rgs"><span class="rg rA" style="--rc:var(--A)">A</span><span class="rg rB" style="--rc:var(--B)">B</span></div>
+              </div>
+            </div>
+            <div class="pband b09" data-m="09" data-tip="2026-09 分区：WHERE 命中。四个组的这一层结构完全一致 → 同色 RG 等高即对齐。">
+              <div class="plabel"><span>2026-09</span><span class="hitmark">✓ 命中</span></div>
+              <div class="part"><div class="pname">0000 · 5998 行</div>
+                <div class="rgs">
+                  <span class="rg rA" data-tip="RG-A：逻辑行 [0,16384)。同色跨组等高 = 对齐。" style="--rc:var(--A)">A</span>
+                  <span class="rg rB" data-tip="RG-B：逻辑行 [16384,32768)。" style="--rc:var(--B)">B</span>
+                  <span class="rg rX" data-skip="1" data-tip="RG-X：min/max 不命中本次 WHERE → 整段跳过。" style="--rc:var(--X)">X</span>
+                  <span class="rg rC" data-tip="RG-C：逻辑行 [32768,…)。" style="--rc:var(--C)">C</span>
+                </div>
+              </div>
+            </div>
+            <div class="extrazone" data-tip="追加/更新区：新写入的 part 先落在这里（真实布局中它们也在同一分区目录下，编号顺延）。">
+              <div class="zlabel">追加 / 更新区（不参与对齐演示）</div>
+              <div class="part" id="wp-hot" data-tip="Part 0001：UPDATE 的目标 part；DELETE 演示中也会重写它。">
+                <div class="pname">0001 · 3000 行</div>
+                <div class="rgs">
+                  <span class="rg rB" data-tip="RG-B（续）" style="--rc:var(--B)">B'</span>
+                  <span class="rg rC hit-target" data-tip="★ 命中行所在 RG —— UPDATE / DELETE 的精确落点。" style="--rc:var(--C)">C★</span>
+                </div>
+              </div>
+              <div class="part mini poppart" id="dp-part" data-tip="单行小 part：INSERT 追加的典型产物。删空且为最高索引时可直接移除。">
+                <div class="pname">0002 · 1 行</div>
+                <div class="rgs"><span class="rg rD" style="--rc:var(--D)">D</span></div>
+              </div>
+              <div class="part mini" id="np" data-tip="INSERT 提交后新出现的 part。">
+                <div class="pname">0002 · 1 行（新键）</div>
+                <div class="rgs"><span class="rg rD" style="--rc:var(--D)">D</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== alpha101 因子组 ===== -->
+          <div class="slice" data-g="alpha101" data-tip="因子列组：alpha001… 没有 key 列——靠行号与 index 对齐。" style="--c:var(--prp)">
+            <div class="sname">🧮 alpha101</div>
+            <div class="pband b07" data-m="07">
+              <div class="plabel"><span>2026-07</span></div>
+              <div class="part"><div class="pname">0000 · 2998 行</div>
+                <div class="rgs"><span class="rg rA" style="--rc:var(--A)">A</span><span class="rg rB" style="--rc:var(--B)">B</span></div>
+              </div>
+            </div>
+            <div class="pband b09" data-m="09">
+              <div class="plabel"><span>2026-09</span><span class="hitmark">✓</span></div>
+              <div class="part"><div class="pname">0000 · 5998 行</div>
+                <div class="rgs">
+                  <span class="rg rA" data-tip="与 index 的 RG-A 同一逻辑行区间——同色等高即对齐。" style="--rc:var(--A)">A</span>
+                  <span class="rg rB" style="--rc:var(--B)">B</span>
+                  <span class="rg rC" style="--rc:var(--C)">C</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== ma 均线组 ===== -->
+          <div class="slice" data-g="ma" data-tip="均线列组：ma5 / ma20…" style="--c:var(--grn)">
+            <div class="sname">📐 ma</div>
+            <div class="pband b07" data-m="07">
+              <div class="plabel"><span>2026-07</span></div>
+              <div class="part"><div class="pname">0000 · 2998 行</div>
+                <div class="rgs"><span class="rg rA" style="--rc:var(--A)">A</span><span class="rg rB" style="--rc:var(--B)">B</span></div>
+              </div>
+            </div>
+            <div class="pband b09" data-m="09">
+              <div class="plabel"><span>2026-09</span><span class="hitmark">✓</span></div>
+              <div class="part"><div class="pname">0000 · 5998 行</div>
+                <div class="rgs">
+                  <span class="rg rA" style="--rc:var(--A)">A</span>
+                  <span class="rg rB" style="--rc:var(--B)">B</span>
+                  <span class="rg rC" style="--rc:var(--C)">C</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== alpha191 未请求组 ===== -->
+          <div class="slice" data-g="alpha191" data-tip="未请求的列组：投影下推后整组 0 次 IO。几万列场景下这一步决定数量级。" style="--c:#6e7681">
+            <div class="sname">🧮 alpha191</div>
+            <div class="pband b07" data-m="07">
+              <div class="plabel"><span>2026-07</span></div>
+              <div class="part"><div class="pname">0000 · 2998 行</div>
+                <div class="rgs"><span class="rg rX" style="--rc:var(--X)">·</span><span class="rg rX" style="--rc:var(--X)">·</span></div>
+              </div>
+            </div>
+            <div class="pband b09" data-m="09">
+              <div class="plabel"><span>2026-09</span></div>
+              <div class="part"><div class="pname">0000 · 5998 行</div>
+                <div class="rgs">
+                  <span class="rg rX" style="--rc:var(--X)">·</span>
+                  <span class="rg rX" style="--rc:var(--X)">·</span>
+                  <span class="rg rX" style="--rc:var(--X)">·</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div></div><!-- /sliceswrap /slices -->
+      </div><!-- /bigtable -->
+
+      <!-- ======== 右侧盒 ======== -->
+      <div class="sidecol">
+        <div class="sidebox" id="chunkbox">
+          <div class="ptitle">DATA CHUNK · 同一块内存</div>
+          <div class="rglane" style="--rc:var(--A)" id="cl-A">A · rows 0–16k</div>
+          <div class="rglane" style="--rc:var(--B)" id="cl-B">B · rows 16k–32k</div>
+          <div class="rglane" style="--rc:var(--C)" id="cl-C">C · rows 32k–…</div>
+          <p>三个 Reader 的 Vector 直接并排装入<br><b style="color:var(--teal)">没有 JOIN · 没有横向拼接</b></p>
+        </div>
+        <div class="sidebox" id="tmpbox">
+          <div class="ptitle" id="tmp-title">_TMP / TRANSACTION-42 · 读者不可见</div>
+          <div class="part" id="clone">
+            <div class="pname" id="clone-name">…</div>
+            <div class="rgs" id="clone-rgs"></div>
+          </div>
+          <div class="wnote">暂存满后 <b style="color:var(--prp)">move 同卷 rename 原子落位</b>；失败则整个事务目录丢弃。</div>
+        </div>
+        <div class="keybadge" id="kb2"></div>
+        <span class="summary" id="x-summary"></span>
+      </div>
+    </div><!-- /tablewrap -->
+  </div><!-- /stage -->
+
+</section><!-- /flow -->
+
+<!-- ===================== 三、ATTACH 与标准 DML ===================== -->
+<section id="attach">
+  <h2>三、ATTACH：让标准 SQL 直写列组</h2>
+  <div class="codeblock"><span class="kw">ATTACH</span> <span class="st">'/data'</span> <span class="kw">AS</span> al (TYPE ALIGNED);
+
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> al.cnstk_ixday;                      <span class="cm">-- 裸名查询，零物化</span>
+<span class="kw">INSERT INTO</span> al.cnstk_ixday (date, symbol, close) <span class="kw">VALUES</span> (...);
+<span class="kw">UPDATE</span> al.cnstk_ixday <span class="kw">SET</span> close = <span class="st">123.4</span> <span class="kw">WHERE</span> symbol=<span class="st">'009999'</span>;
+<span class="kw">DELETE FROM</span> al.cnstk_ixday <span class="kw">WHERE</span> symbol=<span class="st">'009999'</span>;
+<span class="kw">DETACH</span> al;   <span class="cm">-- 数据始终在 parquet 列组目录里</span></div>
+
+  <div class="chain">
+    <span class="cnode">标准 SQL</span><span class="arr">→</span>
+    <span class="cnode">Binder</span><span class="arr">→</span>
+    <span class="cnode acc">PlanInsert / PlanUpdate / PlanDelete 钩子</span><span class="arr">→</span>
+    <span class="cnode acc">Sink 算子</span><span class="arr">→</span>
+    <span class="cnode">mutator（upsert / delete）</span><span class="arr">→</span>
+    <span class="cnode acc">只重写受影响 part → 原子提交</span>
+  </div>
+
+  <ul class="feats">
+    <li><b>DuckLake 式逻辑 attach</b>：表保持逻辑表，SELECT 走 aligned 扫描，不物化、不复制数据。</li>
+    <li><b>写路径复用 mutator</b>：INSERT/UPDATE 按 (date, symbol) upsert，DELETE 按键剔除，全部只重写受影响 part。</li>
+    <li><b>只 SET 被修改的列</b>：UPDATE 先解析 rowid→键，再按列组映射精确回写；schema-evolution 的老 part 不会被强制补列。</li>
+    <li><b>读路径完好</b>：投影 / 分区 / RG 三级剪枝对 catalog 表同样生效。</li>
+  </ul>
+</section>
+
+<!-- ===================== 四、关键不变量 ===================== -->
+<section id="inv">
+  <h2>四、关键不变量</h2>
+  <div class="invbadges">
+    <span class="inv">↔️ 所有组行号严格对齐</span>
+    <span class="inv">🔑 Key 只存一份</span>
+    <span class="inv">🚫 查询绝不 JOIN</span>
+    <span class="inv">✂️ 只重写受影响 part</span>
+    <span class="inv">🔒 _tmp 暂存 + 原子提交</span>
+    <span class="inv">🏷 文件名即行区间</span>
+    <span class="inv">📐 分区对齐唯一契约</span>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    本页是仓库内的可视化讲解；权威契约见 <code>docs/STORAGE_CONTRACT.md</code>，
+    进度与决策记录见 <code>AGENTS.md</code>。
+    <br>AlignedTable · DuckDB Extension + Parquet · 单文件自包含（需较新的 Chrome/Edge）。
+  </div>
+</footer>
+
+</main><!-- /wrap -->
+
+<!-- ===================== SCRIPT ===================== -->
+<script>
+"use strict";
+
+/* ---------- tooltip ---------- */
+const tip = document.createElement("div");
+tip.id = "tip";
+document.body.appendChild(tip);
+document.querySelectorAll("[data-tip]").forEach(function(el){
+  el.addEventListener("mouseenter", function(e){
+    tip.textContent = el.getAttribute("data-tip");
+    tip.style.display = "block"; move(e);
+  });
+  el.addEventListener("mousemove", move);
+  el.addEventListener("mouseleave", function(){ tip.style.display = "none"; });
+  function move(e){
+    const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 10);
+    const y = Math.min(e.clientY + 16, window.innerHeight - tip.offsetHeight - 10);
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+});
+
+/* ---------- 共享控件 ---------- */
+const stage = document.getElementById("stage");
+const dotsEl = document.getElementById("x-dots");
+let cur = null;
+
+function showStep(st, n){
+  n = Math.max(0, Math.min(n, st.steps.length - 1));
+  st.reset();
+  for (let k = 0; k <= n; k++) st.steps[k].fn();
+  document.getElementById("x-title").textContent =
+    "步骤 " + (n+1) + "/" + st.steps.length + " · " + st.steps[n].t;
+  document.getElementById("x-desc").innerHTML = st.steps[n].d;
+  Array.prototype.forEach.call(dotsEl.children, function(d, k){
+    d.classList.toggle("on", k === n);
+  });
+  st.i = n;
+}
+function activate(st){
+  cur = st;
+  dotsEl.innerHTML = "";
+  st.steps.forEach(function(){
+    const d = document.createElement("span"); d.className = "dot";
+    dotsEl.appendChild(d);
+  });
+  Array.prototype.forEach.call(dotsEl.children, function(d, idx){
+    d.onclick = function(){ showStep(cur, idx); };
+  });
+  showStep(st, 0);
+}
+document.getElementById("x-prev").onclick = function(){ if(cur) showStep(cur, cur.i - 1); };
+document.getElementById("x-next").onclick = function(){ if(cur) showStep(cur, cur.i + 1); };
+document.getElementById("x-replay").onclick = function(){ if(cur) showStep(cur, 0); };
+
+/* ---------- 全量复位：任何模式任何步骤都先回到干净底图 ---------- */
+function resetAll(){
+  const q = document.getElementById("qchip"); q.classList.remove("show");
+  document.getElementById("kb2").classList.remove("show");
+  document.querySelectorAll(".slice").forEach(function(s){
+    s.classList.remove("off","glowc","dimsl","scanning");
+  });
+  document.querySelectorAll(".b07").forEach(function(b){ b.classList.remove("pruned"); });
+  document.querySelectorAll(".b09").forEach(function(b){ b.classList.remove("lit"); });
+  document.querySelectorAll(".rg.skip,.rg.flash,.rg.hitp").forEach(function(r){
+    r.classList.remove("skip","flash","hitp");
+  });
+  const hot = document.getElementById("wp-hot");
+  hot.classList.remove("hot","newin");
+  document.getElementById("dp-part").classList.remove("pop");
+  document.getElementById("np").classList.remove("np-show");
+  const nb = document.getElementById("nb");
+  if (nb) nb.remove();
+  const cl = document.getElementById("clone");
+  cl.classList.remove("vis","solid","gone");
+  document.getElementById("clone-name").textContent = "…";
+  document.getElementById("clone-rgs").innerHTML = "";
+  ["cl-A","cl-B","cl-C"].forEach(function(id){ document.getElementById(id).classList.remove("on"); });
+  const tx = document.getElementById("bt-txid");
+  tx.textContent = "41"; tx.classList.remove("tick");
+  document.getElementById("x-summary").classList.remove("show");
+}
+function setClone(name, colors){
+  document.getElementById("clone-name").textContent = name;
+  document.getElementById("clone-rgs").innerHTML = colors.map(function(c){
+    return '<span class="rg r' + c + '" style="--rc:var(--' + c + ')">' + c + '</span>';
+  }).join("");
+}
+function flash(sel, delay){
+  setTimeout(function(){
+    document.querySelectorAll(sel).forEach(function(r){
+      r.classList.add("flash");
+      setTimeout(function(){ r.classList.remove("flash"); }, 650);
+    });
+  }, delay);
+}
+
+/* ================= 读流程 ================= */
+const readSteps = [
+  { t:"SQL 绑定",
+    d:"语句经 <b>catalog 绑定</b>为 aligned 扫描。ATTACH 之后直接写裸表名即可——它看起来是一张表，实际是上面这个目录大方块。",
+    fn(){ document.getElementById("qchip").classList.add("show"); } },
+  { t:"Projection Pushdown 投影下推",
+    d:"只要 5 列 ⇒ 只打开 <b>index / alpha101 / ma</b> 三个竖条（青色描边）。<b>alpha191 整组一次 IO 都不发生</b>——几万列场景下，这一步决定数量级。",
+    fn(){
+      document.querySelector('.slice[data-g="alpha191"]').classList.add("off");
+      ["index","alpha101","ma"].forEach(function(g){
+        document.querySelector('.slice[data-g="'+g+'"]').classList.add("glowc");
+      });
+    } },
+  { t:"Partition Pruning 分区剪枝",
+    d:"WHERE date='2026-09-10' 等值 ⇒ 只保留 <b>2026-09</b> 分区带；所有 <b>2026-07</b> 带整段折叠（划线）。目录即元数据，这一步零 IO。",
+    fn(){
+      document.querySelectorAll(".b07").forEach(function(b){ b.classList.add("pruned"); });
+      document.querySelectorAll(".b09").forEach(function(b){ b.classList.add("lit"); });
+    } },
+  { t:"RowGroup Stats Pruning",
+    d:"分区内再用 Parquet <b>min/max 统计</b>裁掉不可能命中的行组：灰色的 <b>RG-X</b> 被打上红叉——连解压都不做。行号区间由文件名已知，缺失段按 NULL 对齐填充。",
+    fn(){
+      document.querySelectorAll(".rg[data-skip]").forEach(function(r){ r.classList.add("skip"); });
+    } },
+  { t:"Aligned Scan 对齐扫描",
+    d:"核心时刻：<b>同色 RG 跨组等高</b>——先闪蓝色 A（三组同时），再闪橙色 B；每个 Reader 的 Vector 直接装入右侧<b>同一个 DataChunk</b> 的对应 lane。<b>没有 JOIN、没有横向 materialize</b>。并行按连续行 Range 发放多线程。",
+    fn(){
+      ["index","alpha101","ma"].forEach(function(g){
+        document.querySelector('.slice[data-g="'+g+'"]').classList.add("scanning");
+      });
+      flash(".rA", 0); flash(".rB", 700);
+      setTimeout(function(){
+        ["cl-A","cl-B","cl-C"].forEach(function(id){ document.getElementById(id).classList.add("on"); });
+      }, 500);
+    } },
+  { t:"完成 · 成本盘点",
+    d:"这个查询的真实代价：<b>3 个组 · 1 个分区 · 跳过 RG-X · 零 JOIN</b>。传统宽表要扫全部列或做哈希连接；这里只剩投影 + 三级剪枝 + 向量化对齐扫描。",
+    fn(){
+      const s = document.getElementById("x-summary");
+      s.textContent = "✔ 读：打开 3 组 · 命中 1 个分区 · 跳过 RG-X · 零 JOIN";
+      s.classList.add("show");
+    } }
+];
+
+/* ================= INSERT ================= */
+const insertSteps = [
+  { t:"INSERT 到达 · 定位插入点",
+    d:"新键 <b>(2026-10-01,'NEW01')</b> 属于全新分区 <b>month=2026-10</b>，按排序契约排在所有现有分区之后 ⇒ 追加为该分区的首个 part。",
+    fn(){
+      const q = document.getElementById("qchip");
+      q.textContent = "INSERT INTO al.cnstk_ixday (date,symbol,close) VALUES ('2026-10-01','NEW01',88.0)";
+      q.classList.add("show");
+      const k = document.getElementById("kb2");
+      k.textContent = "key_resolver ⇒ 新分区 month=2026-10 · 排序位于末尾 ⇒ 追加 part 0000";
+      k.classList.add("show");
+    } },
+  { t:"只有映射过的组建 part",
+    d:"本次 mapping 覆盖 <b>index(date,symbol,close)</b> ⇒ 只有 index 组在新分区建 part；<b>alpha101 / ma 不建</b>——读这行时它们的列按 NULL 对齐填充（schema evolution 的镜像操作）。",
+    fn(){
+      document.querySelector('.slice[data-g="index"]').classList.add("glowc");
+      ["alpha101","ma","alpha191"].forEach(function(g){
+        document.querySelector('.slice[data-g="'+g+'"]').classList.add("dimsl");
+      });
+    } },
+  { t:"写入 _tmp 暂存",
+    d:"新 part 先写到 <b>_tmp/transaction-42/month=2026-10/0000-*.parquet</b>（右侧虚线盒）——对读者永不可见。",
+    fn(){
+      setClone("month=2026-10/0000 · 1 行（新键）", ["D"]);
+      document.getElementById("clone").classList.add("vis");
+    } },
+  { t:"暂存就绪 · 事务未生效",
+    d:"文件完整落盘（实线紫框）。此刻崩溃则整个事务目录一弃了之，表毫发无损。",
+    fn(){
+      const c = document.getElementById("clone");
+      c.classList.remove("vis"); c.classList.add("solid");
+    } },
+  { t:"原子提交 · 新分区出现",
+    d:"move 落位 + last_txid 41→42。<b>index 组末尾弹出绿色的新分区带 month=2026-10</b>；其余组保持不变（NULL 填充由读端处理）。",
+    fn(){
+      document.getElementById("clone").classList.add("gone");
+      const idx = document.querySelector('.slice[data-g="index"]');
+      const band = document.createElement("div");
+      band.className = "pband newband"; band.id = "nb";
+      band.innerHTML = '<div class="plabel"><span>2026-10</span><span style="color:var(--grn)">✓ 新分区</span></div>'
+        + '<div class="part mini"><div class="pname">0000 · 1 行</div><div class="rgs"><span class="rg" style="--rc:var(--D)">D</span></div></div>';
+      idx.appendChild(band);
+      const tx = document.getElementById("bt-txid");
+      tx.textContent = "42"; tx.classList.add("tick");
+      const s = document.getElementById("x-summary");
+      s.textContent = "✔ INSERT：新分区只建映射过的组；未映射组读该行为 NULL";
+      s.classList.add("show");
+    } }
+];
+
+/* ================= UPDATE ================= */
+const updateSteps = [
+  { t:"UPDATE 到达 · 主键解析",
+    d:"经 ATTACH 的 <b>PlanUpdate 钩子</b>进入 mutator。<b>key_resolver</b> 把 WHERE 命中行解析成主键 <b>(date, symbol)</b>，精确定位到 index 组 part 0001 · RG-C★ 里的那一行（脉冲高亮）。",
+    fn(){
+      const q = document.getElementById("qchip");
+      q.textContent = "UPDATE al.cnstk_ixday SET close=123.4 WHERE symbol='009999'";
+      q.classList.add("show");
+      const k = document.getElementById("kb2");
+      k.textContent = "key_resolver ⇒ (2026-09-10,'009999') ⇒ part 0001 · RG-C · local row 5";
+      k.classList.add("show");
+      document.querySelector(".hit-target").classList.add("hitp");
+    } },
+  { t:"定位受影响的 part",
+    d:"只有 <b>part 0001</b> 会被重写（橙框）；其余列组变暗——<b>一字不动</b>。这就是列组引擎对「写放大」的解药。",
+    fn(){
+      document.getElementById("wp-hot").classList.add("hot");
+      ["alpha101","ma","alpha191"].forEach(function(g){
+        document.querySelector('.slice[data-g="'+g+'"]').classList.add("dimsl");
+      });
+    } },
+  { t:"RewritePart 内存合并",
+    d:"老 part 行流 + 新值在内存中按位置合并：<b>close 改为新值，其余列保持原值</b>（只 SET 被修改的列）。结果写入右侧暂存盒（虚线半透明）。",
+    fn(){
+      setClone("0001 · 3000 行（重写中）", ["B","C"]);
+      document.getElementById("clone").classList.add("vis");
+    } },
+  { t:"_tmp 暂存 · 事务就绪",
+    d:"暂存文件完整落盘（实线紫框）。此刻事务仍未生效：崩溃则整个事务目录丢弃，表毫发无损。",
+    fn(){
+      const c = document.getElementById("clone");
+      c.classList.remove("vis"); c.classList.add("solid");
+    } },
+  { t:"原子提交 · last_txid 41→42",
+    d:"move 同卷 rename 原子落位 + 删除旧 part + last_txid 递增。读者要么看到旧状态要么看到新状态，<b>绝不看到半成品</b>。",
+    fn(){
+      document.getElementById("clone").classList.add("gone");
+      const hot = document.getElementById("wp-hot");
+      hot.classList.remove("hot"); hot.classList.add("newin");
+      const tx = document.getElementById("bt-txid");
+      tx.textContent = "42"; tx.classList.add("tick");
+      const s = document.getElementById("x-summary");
+      s.textContent = "✔ UPDATE：只重写 1 个 part · 未触及的列保持原值";
+      s.classList.add("show");
+    } }
+];
+
+/* ================= DELETE ================= */
+const deleteSteps = [
+  { t:"DELETE 到达 · 解析 keys",
+    d:"经 <b>PlanDelete 钩子</b>：先收集 WHERE 选中的 <b>rowid</b>，再侧扫 index 组把 rowid 解析成 <b>(date, symbol)</b> 键集——命中行仍在 part 0001 · RG-C★。",
+    fn(){
+      const q = document.getElementById("qchip");
+      q.textContent = "DELETE FROM al.cnstk_ixday WHERE symbol='009999'";
+      q.classList.add("show");
+      const k = document.getElementById("kb2");
+      k.textContent = "rowid ⇒ (2026-09-10,'009999') ⇒ 重写 part 0001（剔除该行）";
+      k.classList.add("show");
+      document.querySelector(".hit-target").classList.add("hitp");
+    } },
+  { t:"定位受影响的 part",
+    d:"与 UPDATE 相同：只有 <b>part 0001</b> 需要重写（剔除一行，2999 行保留）；其余组一字不动。",
+    fn(){
+      document.getElementById("wp-hot").classList.add("hot");
+      ["alpha101","ma","alpha191"].forEach(function(g){
+        document.querySelector('.slice[data-g="'+g+'"]').classList.add("dimsl");
+      });
+    } },
+  { t:"重写剔除 · 暂存",
+    d:"合并器跳过被删行，写出 <b>2999 行</b>的新 part 到 _tmp 暂存盒。",
+    fn(){
+      setClone("0001 · 2999 行（剔除后）", ["B","C"]);
+      document.getElementById("clone").classList.add("vis");
+    } },
+  { t:"原子提交",
+    d:"move 落位 + last_txid 41→42。跨组一致性由契约保证：同逻辑行的行在所有组同步消失。",
+    fn(){
+      document.getElementById("clone").classList.add("gone");
+      const hot = document.getElementById("wp-hot");
+      hot.classList.remove("hot"); hot.classList.add("newin");
+      const tx = document.getElementById("bt-txid");
+      tx.textContent = "42"; tx.classList.add("tick");
+    } },
+  { t:"边界①：删空单行小 part",
+    d:"若删的是 <b>0002·1行</b> 这种追加小 part 且它是分区<b>最高索引</b> ⇒ 直接移除文件即可（剩余索引仍连续，无需 renumber）。看它被弹出消失。",
+    fn(){
+      const pp = document.getElementById("dp-part");
+      requestAnimationFrame(function(){ pp.classList.add("pop"); });
+      const s = document.getElementById("x-summary");
+      s.textContent = "✔ 删空最高索引 part → 直接移除文件，索引保持连续";
+      s.classList.add("show");
+    } },
+  { t:"边界②：删空内部 part",
+    d:"若删空的是分区<b>中部</b>的 part，移除会让索引断号 ⇒ fail-fast 并提示 <b>run aligned_compact first</b>（compact 把整个分区合并成一个 part 后再删即合法）。",
+    fn(){
+      const s = document.getElementById("x-summary");
+      s.textContent = "✘ 删空内部 part → fail-fast：先 aligned_compact 再删";
+      s.style.borderColor = "var(--red)";
+      s.style.color = "var(--red)";
+      s.classList.add("show");
+    } }
+];
+
+/* ================= 组装 ================= */
+const MODES = {
+  read:   makeStepper(readSteps),
+  insert: makeStepper(insertSteps),
+  update: makeStepper(updateSteps),
+  delete: makeStepper(deleteSteps)
+};
+function makeStepper(steps){
+  return { steps: steps, reset: resetAll, i: 0 };
+}
+function setMode(m){
+  stage.classList.remove("mode-read","mode-insert","mode-update","mode-delete");
+  stage.classList.add("mode-" + m);
+  ["read","insert","update","delete"].forEach(function(k){
+    document.getElementById("tab-" + k).classList.toggle("acc", k === m);
+  });
+  activate(MODES[m]);
+}
+document.getElementById("tab-read").onclick = function(){ setMode("read"); };
+document.getElementById("tab-insert").onclick = function(){ setMode("insert"); };
+document.getElementById("tab-update").onclick = function(){ setMode("update"); };
+document.getElementById("tab-delete").onclick = function(){ setMode("delete"); };
+
+/* DELETE 最后一步把 summary 染红，切模式时要恢复默认配色 */
+const _origShow = showStep;
+showStep = function(st, n){
+  const s = document.getElementById("x-summary");
+  s.style.borderColor = ""; s.style.color = "";
+  _origShow(st, n);
+};
+
+setMode("read");
+</script>
+</body>
+</html>
