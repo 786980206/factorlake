@@ -252,7 +252,7 @@ SELECT * FROM aligned_create(table_name, group_name, columns [, root => '...']
 **返回**：单行 `(dirs_created BIGINT, files_created BIGINT, txid BIGINT)`。
 
 **两种模式**：
-- **`group_name='index'`**：**建表**。前两列必须 `(symbol VARCHAR, date DATE/TIMESTAMP)`（v8 主键契约）。所有列写入 index 组。创建 0 行占位 parquet。
+- **`group_name='index'`**：**建表**。前两列的**类型**必须满足主键契约：col0 = VARCHAR（symbol 列），col1 = DATE/TIMESTAMP（date 列，分区源列）。列名可自定义（详见 §7.4）。所有列写入 index 组。创建 0 行占位 parquet。
 - **`group_name='lv1/lv2'`**：**扩展列组**。表必须已存在。新组的列定义不需含主键。每个已有分区写 N 行全 NULL 占位 parquet（N = index 分区行数），满足分区对齐契约。已有列组不受影响。
 
 ```sql
@@ -426,7 +426,7 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 - 类型：VARCHAR
 - 含义：列组路径，用于 `aligned_create`、`aligned_compact`、`aligned_drop`。
 - 特殊值：
-  - `'index'`：index 组（Key 列 symbol/date 所在组）。`aligned_create` 中表示新建表；`aligned_drop` 中表示删除整张表。
+  - `'index'`：index 组（Key 列所在组，详见 §7.4 主键契约）。`aligned_create` 中表示新建表；`aligned_drop` 中表示删除整张表。
   - `'all'`：`aligned_compact` 专用，合并表中所有列组（单事务原子切换）。
 - 非 index 组名格式：必须是 `lv1/lv2` 两级路径，如 `factor/alpha101`、`fieldset/ma`。
 - **各函数用法**：
@@ -434,7 +434,57 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
   - `aligned_compact`：`group='factor/alpha'` → 合并该组；`group='all'` → 合并所有组。
   - `aligned_drop`：`group='factor/alpha'` → 删除该列组目录；`group='index'` → 删除整张表。
 
-### 7.4 WITH 子句参数（CREATE TABLE）
+### 7.4 主键契约（symbol 列与 date 列）
+
+AlignedTable 的主键是 `(symbol, date)` 复合键，但 **列名不固定**——引擎按 index 组
+前两列的**类型**动态推断哪列是 symbol、哪列是 date，而非按列名匹配。
+
+#### 类型约束
+
+| 位置 | 约束 | 角色 |
+|------|------|------|
+| index 组 col0 | 必须 VARCHAR | symbol 列（标的标识） |
+| index 组 col1 | 必须 DATE 或 TIMESTAMP | date 列（分区源列） |
+
+- 前两列中**恰好一列 VARCHAR + 一列 DATE/TIMESTAMP**，否则建表报错。
+- 两列都是 VARCHAR 或两列都是 DATE/TIMESTAMP → 报错。
+- col0 非 VARCHAR 或 col1 非 DATE/TIMESTAMP → 读取端报错。
+- **建议**统一使用 `(symbol VARCHAR, date DATE)` 顺序，col0=symbol、col1=date。
+
+#### 列名可自定义
+
+建表时可用任意列名，只要类型满足约束：
+
+```sql
+-- 合法：列名不叫 symbol / date，但类型符合
+SELECT * FROM aligned_create('mytable', 'index',
+    'ticker VARCHAR, trade_date DATE, close DOUBLE, volume BIGINT');
+-- col0 = ticker (VARCHAR → symbol 列)
+-- col1 = trade_date (DATE → date 列)
+-- col2+ = close, volume (数据列)
+```
+
+后续所有 INSERT / UPDATE / DELETE / scan 操作均使用建表时的列名，引擎从 Parquet
+footer 动态提取实际列名传递给内部链路（mutator、key resolver、DML executor），**绝不
+硬编码 `"symbol"` 或 `"date"`**。
+
+```sql
+-- 插入时用实际列名
+ATTACH 'D:/data' AS al (TYPE ALIGNED);
+INSERT INTO al.mytable (ticker, trade_date, close, volume)
+    VALUES ('000001', DATE '2026-01-15', 10.5, 1000);
+
+-- 查询时同样用实际列名
+SELECT ticker, trade_date, close FROM al.mytable WHERE trade_date = DATE '2026-01-15';
+```
+
+#### 分区源列
+
+date 列（col1）是**分区源列**——其值决定行属于哪个分区目录（`month=2026-01`、
+`date=2026-01-15` 等）。分区模板（`partition_template`）定义了分区目录的命名格式，
+但分区值始终从 date 列的值求值得出。
+
+### 7.5 WITH 子句参数（CREATE TABLE）
 
 CREATE TABLE 的 `WITH (...)` 子句支持以下选项：
 
