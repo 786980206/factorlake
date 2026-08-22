@@ -124,10 +124,26 @@ ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); SELECT count(*), count(clo
 ----
 3,3,1,1,0,0
 
-# extend error: group already exists
+# extend error: group already exists (use non-index group that was created above)
 statement error
-ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (x DOUBLE) WITH (groups = 'index:x')
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (x DOUBLE) WITH (groups = 'fieldset/ma:x')
+----
+already exists
 
-# extend error: no non-index group specified (table already exists)
+# extend error: no non-index group specified (table already exists, only index group)
 statement error
 ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (x DOUBLE) WITH (groups = 'index:x')
+----
+specify a non-index group
+
+# extend error: invalid group name (single level, not lv1/lv2)
+statement error
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (x DOUBLE) WITH (groups = 'badgroup:x')
+----
+two-level path
+
+# extend error: unknown column in group
+statement error
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (good DOUBLE, bad DOUBLE) WITH (groups = 'panel/cnstk:good,nonexistent')
+----
+references unknown column

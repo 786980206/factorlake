@@ -186,7 +186,19 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction tr
 	auto &base = info.Base();
 	auto &columns = base.columns;
 
-	// Parse options from WITH (key=value, ...)
+	// Parse options from WITH (key=value, ...).
+	// DuckDB's parser stores each option as a ParsedExpression; for string
+	// constants, expr->ToString() returns the value wrapped in single quotes.
+	// We strip a single layer of surrounding single quotes (the common case).
+	// A more robust approach (ExpressionExecutor::EvaluateScalar) is possible
+	// but requires a ClientContext; this is sufficient for DDL string options.
+	auto strip_quotes = [](const string &s) -> string {
+		if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
+			return s.substr(1, s.size() - 2);
+		}
+		return s;
+	};
+
 	string groups_option;
 	string partition_template_option;
 	string partition_key;
@@ -195,26 +207,13 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction tr
 		auto &key = opt.first;
 		auto &expr = opt.second;
 		if (expr) {
-			// Evaluate constant expressions to get the string value
-			auto value = expr->ToString();
+			auto value = strip_quotes(expr->ToString());
 			if (StringUtil::CIEquals(key, "groups")) {
-				// Strip quotes if present
 				groups_option = value;
-				if (groups_option.size() >= 2 && groups_option.front() == '\'' && groups_option.back() == '\'') {
-					groups_option = groups_option.substr(1, groups_option.size() - 2);
-				}
 			} else if (StringUtil::CIEquals(key, "partition_template")) {
 				partition_template_option = value;
-				if (partition_template_option.size() >= 2 &&
-				    partition_template_option.front() == '\'' && partition_template_option.back() == '\'') {
-					partition_template_option = partition_template_option.substr(1, partition_template_option.size() - 2);
-				}
 			} else if (StringUtil::CIEquals(key, "partition")) {
 				partition_key = value;
-				if (partition_key.size() >= 2 &&
-				    partition_key.front() == '\'' && partition_key.back() == '\'') {
-					partition_key = partition_key.substr(1, partition_key.size() - 2);
-				}
 			}
 		}
 	}
@@ -280,9 +279,9 @@ void AlignedSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 }
 void AlignedSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	ALIGNED_DDL_UNSUPPORTED("ALTER")
+}
 
 #undef ALIGNED_DDL_UNSUPPORTED
-}
 
 //===----------------------------------------------------------------------===//
 // AlignedCatalog

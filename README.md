@@ -44,9 +44,20 @@ SELECT * FROM aligned_delete('cnstk_ixday', '/data/stage/2026-08-17.parquet', ro
 -- 合并 part（单事务合并所有组，按分区目录，原子切换）：
 SELECT * FROM aligned_compact('cnstk_ixday', 'all', root='/data');
 
--- Attach（DuckLake 式逻辑 attach，推荐）：把数据根挂载为 catalog 数据库，
+-- Attach（DuckLake 式逻辑 Attach，推荐）：把数据根挂载为 catalog 数据库，
 -- 表保持「逻辑表」——SELECT 走 aligned 扫描，标准 DML 直接读写底层 parquet 列组：
 ATTACH '/data' AS al (TYPE ALIGNED);
+
+-- 建表（写 0 行占位 parquet，footer 携带 schema）：
+CREATE TABLE al.cnstk_ixday (symbol VARCHAR, date DATE, close DOUBLE, alpha001 DOUBLE)
+  WITH (groups='index:close;factor/alpha101:alpha001', partition_template='month=%Y-%m');
+
+-- 在已有表上创建空分区：
+CREATE TABLE al.cnstk_ixday (cols...) WITH (partition='month=2026-10');
+
+-- 列组扩展（为已有表添加新列组，写 N 行全 NULL 占位满足分区对齐契约）：
+CREATE TABLE al.cnstk_ixday (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,ma20');
+
 SELECT * FROM al.cnstk_ixday;
 INSERT INTO al.cnstk_ixday (date, symbol, close, alpha001, ma5)
   VALUES (DATE '2026-09-01', '009999', 99.5, 1.5, 2.5);
@@ -112,6 +123,7 @@ index）用**同一种一层分区段**（`year=`/`month=`/`date=`）；Group �
 | 写入 | ✅ | `aligned_upsert()` / `aligned_delete()`（v8 mutator）：按 (symbol, date) 主键插入 / 更新 / 追加新分区 / 删除行；只重写受影响 part；`_tmp` 暂存 + 原子提交（last_txid+1） |
 | 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，按分区目录合并 part，原子切换 |
 | catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组**（按 (symbol,date) upsert、只重写受影响 part） |
+| 建表 (DDL) | ✅ | `CREATE TABLE al.<table> (...) WITH (groups=..., partition_template=...)` — 标准建表（0 行占位 parquet）+ 空分区创建 + 列组扩展（已有表添加新列组，写 N 行全 NULL 占位满足分区对齐契约） |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
 
 不支持（明确不做）：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。

@@ -127,6 +127,7 @@ footer 推导。
 **空表不是有效表**：`BuildTablePlan` 通过 glob 发现 Group，空表（无任何 part）
 返回空 plan。Writer 的 `aligned_upsert` 第一次写入时，从 `mapping` 参数推导
 Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认 `month=%Y-%m`。
+**例外**：`CREATE TABLE` DDL（§9.1）写 0 行占位 parquet，glob 可发现 → 有效表。
 
 ### 5.2 不存在的字段
 
@@ -212,6 +213,61 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
   3. 崩溃 → 丢弃 `_tmp/transaction-<txid>/`（读端从不读 `_tmp/`）。
 - `aligned_delete`：删空最高索引 part → 直接移除；删空单 part 分区 → 整分区移除；
   删空内部 part → fail-fast（"run aligned_compact first"）。
+
+---
+
+## 9.1. CREATE TABLE DDL（建表 + 分区创建 + 列组扩展）
+
+通过标准 `CREATE TABLE ... WITH (...)` 语法在 AlignedTable catalog 上操作。
+
+**语法**：
+
+```sql
+-- 新建表（写 0 行占位 parquet，footer 携带 schema）
+CREATE TABLE al.<table> (symbol VARCHAR, date DATE, ...)
+  WITH (groups='index:close;factor/alpha:alpha001', partition_template='month=%Y-%m');
+
+-- 已有表创建空分区
+CREATE TABLE al.<table> (cols...) WITH (partition='month=2026-10');
+
+-- 已有表添加列组（写 N 行全 NULL 占位）
+CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,ma20');
+```
+
+**新建表规则**：
+- 前两列必须 (symbol VARCHAR, date DATE/TIMESTAMP)（v8 主键契约）。
+- `groups` 指定列→Group 映射（`;` 分隔组，`:` 分隔组名/列名，`,` 分隔列名）；
+  未列出的列默认放入 `index`。非 `index` 组名必须是 `lv1/lv2` 两级路径。
+- `partition_template` 默认 `month=%Y-%m`，可选 `date=%Y-%m-%d` / `year=%Y`。
+- 每个 Group 在默认分区（epoch：`month=1970-01` / `date=1970-01-01` / `year=1970`）
+  下写一个 **0 行占位 parquet** `0000-0000000000.parquet`，footer 携带 schema →
+  Reader 可通过 glob 发现表结构。
+
+**分区创建规则**：
+- 表必须已存在。分区键格式必须匹配现有模板（`date=YYYY-MM-DD` 15 字符 /
+  `month=YYYY-MM` 13 字符 / `year=YYYY` 9 字符）。
+- 为每个已发现 Group 在新分区目录下写 0 行占位 parquet。
+- 若 index 已有该分区 → fail-fast "partition already exists"。
+
+**列组扩展规则**：
+- 表必须已存在。`CREATE TABLE` 的列定义是新 Group 的列（不需要 symbol/date）。
+- `groups` 必须指定至少一个非 `index` Group。
+- 新 Group 名若已存在 → fail-fast。
+- 新 Group 名必须是 `lv1/lv2` 两级路径（与 §2.1c 一致）。
+- 每个 index 已有的分区，新 Group 写一个 **N 行全 NULL 占位 parquet**
+  （N = index 分区行数，文件名 `0000-{rows:010d}.parquet`），满足分区对齐契约
+  （共享分区总行数一致）。
+- 已有的其他 Group 的 part 文件不被触碰（Schema Evolution：新列在老 part 上
+  读为 NULL）。
+
+**验证错误**（全部 fail-fast）：
+- `at least 2 columns required` / `first two columns must be exactly one DATE/TIMESTAMP and one VARCHAR`
+- `table already exists ... specify a non-index group`（表已存在但未指定新 Group）
+- `group already exists`（扩展时组名重复）
+- `must be 'index' or a two-level path 'lv1/lv2'`（组名格式错误）
+- `references unknown column`（groups 引用了 CREATE TABLE 中不存在的列）
+- `invalid partition_template` / `partition key does not match template`
+- `partition already exists`（分区已存在）
 
 ---
 
