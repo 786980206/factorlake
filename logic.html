@@ -201,10 +201,16 @@ body{
   flex:1 1 0;min-width:0;
   font-family:Consolas,monospace;font-size:1.1vh;
   padding:4px 4px;border-radius:4px;
-  background:var(--l4bg);border:1px solid var(--l4bd);color:var(--l4);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   display:flex;align-items:center;justify-content:center;
+  border:1px solid transparent;
 }
+.rg-body .col-chip:nth-child(6n+1){background:rgba(9,105,218,.08);border-color:rgba(9,105,218,.3);color:var(--cyan)}
+.rg-body .col-chip:nth-child(6n+2){background:rgba(188,76,0,.08);border-color:rgba(188,76,0,.3);color:var(--org)}
+.rg-body .col-chip:nth-child(6n+3){background:rgba(26,127,55,.08);border-color:rgba(26,127,55,.3);color:var(--grn)}
+.rg-body .col-chip:nth-child(6n+4){background:rgba(130,80,223,.08);border-color:rgba(130,80,223,.3);color:var(--prp)}
+.rg-body .col-chip:nth-child(6n+5){background:rgba(154,103,0,.08);border-color:rgba(154,103,0,.3);color:var(--yel)}
+.rg-body .col-chip:nth-child(6n+6){background:rgba(10,123,131,.08);border-color:rgba(10,123,131,.3);color:var(--teal)}
 
 /* ===== Empty partition ===== */
 .partition-empty{
