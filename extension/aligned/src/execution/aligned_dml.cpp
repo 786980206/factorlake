@@ -23,14 +23,85 @@
 #include "parquet_writer.hpp"
 #include "zstd_file_system.hpp"
 
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <thread>
 
+namespace duckdb {
+
+//! A single-worker thread pool for DML operations. Each DML Finalize runs
+//! the mutator on this worker thread (nested-query deadlock avoidance:
+//! the caller's context may hold pipeline locks). The thread is persistent
+//! — it avoids the ~10-50µs thread creation overhead per DML statement,
+//! which matters for high-frequency small-batch INSERTs.
+class DmlWorkerPool {
+public:
+	static DmlWorkerPool &Instance() {
+		static DmlWorkerPool instance;
+		return instance;
+	}
+
+	void Submit(const std::function<void()> &task) {
+		std::unique_lock<std::mutex> lock(mutex_);
+		task_ = task;
+		has_task_ = true;
+		done_ = false;
+		cv_.notify_one();
+	}
+
+	void Wait() {
+		std::unique_lock<std::mutex> lock(mutex_);
+		cv_done_.wait(lock, [this] { return done_; });
+	}
+
+private:
+	DmlWorkerPool() : has_task_(false), done_(false), stop_(false) {
+		thread_ = std::thread([this] {
+			while (true) {
+				std::unique_lock<std::mutex> lock(mutex_);
+				cv_.wait(lock, [this] { return has_task_ || stop_; });
+				if (stop_) {
+					return;
+				}
+				auto task = std::move(task_);
+				has_task_ = false;
+				lock.unlock();
+				task();
+				{
+					std::lock_guard<std::mutex> lk(mutex_);
+					done_ = true;
+					cv_done_.notify_one();
+				}
+			}
+		});
+	}
+
+	~DmlWorkerPool() {
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			stop_ = true;
+			cv_.notify_one();
+		}
+		if (thread_.joinable()) {
+			thread_.join();
+		}
+	}
+
+	std::thread thread_;
+	std::function<void()> task_;
+	bool has_task_;
+	bool done_;
+	bool stop_;
+	std::mutex mutex_;
+	std::condition_variable cv_;
+	std::condition_variable cv_done_;
+};
 
 #ifdef DELETE
 #undef DELETE
 #endif
-
-namespace duckdb {
 
 //===----------------------------------------------------------------------===//
 // States
@@ -113,10 +184,10 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 	auto &db = DatabaseInstance::GetDatabase(context);
 	const string &tbl = table;
 	const string &rt = root;
-	// Build the mapping string from the table's column groups + the insert's
-	// column names. Auto-derive mapping (no mapping string) lets the mutator
-	// assign each source column to the group that owns it.
-	std::thread worker([&db, &g, tbl, rt, this]() {
+	// Direct upsert from the in-memory ColumnDataCollection on the persistent
+	// DML worker thread (avoids per-statement thread creation overhead + nested-
+	// query deadlock avoidance).
+	DmlWorkerPool::Instance().Submit([&db, &g, tbl, rt, this]() {
 		try {
 			Connection con(db);
 			auto result = AlignedUpsertFromCollection(*con.context, tbl, rt, "", g.collection, row_names);
@@ -128,7 +199,7 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 			g.error = "unknown error during aligned upsert";
 		}
 	});
-	worker.join();
+	DmlWorkerPool::Instance().Wait();
 
 	if (!g.error.empty()) {
 		throw IOException("aligned INSERT failed: %s", g.error);
@@ -325,7 +396,7 @@ SinkFinalizeType PhysicalAlignedDelete::Finalize(Pipeline &pipeline, Event &even
 
 	string tmp_dir = root + "/" + table + "/_tmp";
 	auto &db = DatabaseInstance::GetDatabase(context);
-	std::thread worker([&db, &g, tbl = table, rt = root, rowids = g.rowids, tmp_dir]() {
+	DmlWorkerPool::Instance().Submit([&db, &g, tbl = table, rt = root, rowids = g.rowids, tmp_dir]() {
 		string staged;
 		try {
 			Connection key_con(db);
@@ -355,7 +426,7 @@ SinkFinalizeType PhysicalAlignedDelete::Finalize(Pipeline &pipeline, Event &even
 			g.error = ex.what();
 		}
 	});
-	worker.join();
+	DmlWorkerPool::Instance().Wait();
 
 	if (!g.staged_path.empty()) {
 		try {
@@ -551,7 +622,7 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 	auto &db = DatabaseInstance::GetDatabase(context);
 	string staged;
 	string err;
-	std::thread worker([&db, &g, &staged, &err, this, tbl = table, rt = root]() {
+	DmlWorkerPool::Instance().Submit([&db, &g, &staged, &err, this, tbl = table, rt = root]() {
 		try {
 			Connection con(db);
 			ClientContext &wctx = *con.context;
@@ -689,7 +760,7 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 			err = ex.what();
 		}
 	});
-	worker.join();
+	DmlWorkerPool::Instance().Wait();
 
 	if (!staged.empty()) {
 		try {
