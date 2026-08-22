@@ -110,7 +110,7 @@ for date in "${Days[@]}"; do
 #   index group: day-level partition, 1 part per day (same kind for all
 #   groups — v5 single-level partition contract), RGS 32768
   indexDir="$tableDir/index/date=$date"; mkdir -p "$indexDir"
-  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid $([ -n "$IX_SEL" ] && echo ", $IX_SEL") FROM r) TO '$indexDir/$(partn 0 $rowsPerDay).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
+  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT printf('%06d', r+1) AS symbol, DATE '$date' AS date, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid $([ -n "$IX_SEL" ] && echo ", $IX_SEL") FROM r) TO '$indexDir/$(partn 0 $rowsPerDay).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
 
   # alpha group: day-level partition, 1 part, ALPHA_COLS sparse cols
   alphaDir="$tableDir/factor/alpha/date=$date"; mkdir -p "$alphaDir"

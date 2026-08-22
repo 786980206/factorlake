@@ -319,11 +319,11 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 
 	// Group schema = the group's LAST part (rel-path order) — ONE footer read
 	// per group (row counts never come from footers under v6). For the index
-	// this also yields the primary key (v7 contract): the index schema's FIRST
-	// TWO columns ARE the key (date_col, symbol_col) — exactly one of them is a
-	// DATE or TIMESTAMP field (the partition source column, filter pushdown
-	// relies on it), the other is the symbol column (row ordering within a
-	// partition). Empty tables (no parts) skip the schema read and the
+	// this also yields the primary key (v8 contract): the index schema's FIRST
+	// TWO columns ARE the key (symbol, date) — column 0 is the symbol (string),
+	// column 1 is the DATE/TIMESTAMP partition source column. The table is
+	// partitioned by date; within a partition rows are sorted by (symbol, date)
+	// ascending. Empty tables (no parts) skip the schema read and the
 	// primary-key contract.
 	if (!index_group.parts.empty()) {
 		auto &last_part = index_group.parts.back();
@@ -332,30 +332,21 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		index_group.schema_types = last_footer.types;
 		if (last_footer.columns.size() < 2) {
 			throw IOException("Aligned table '%s': the index schema must have at least two columns "
-			                  "(primary key: date, symbol); got %zu",
+			                  "(primary key: symbol, date); got %zu",
 			                  table_name, last_footer.columns.size());
 		}
-		// v7 primary-key contract: among the first two columns exactly one must
-		// be DATE/TIMESTAMP (the partition source); the other is the symbol
-		// column. Two date columns or no date column is a contract violation.
-		string date_col;
-		string symbol_col;
-		idx_t date_fields = 0;
-		for (idx_t c = 0; c < 2; c++) {
-			if (last_footer.types[c].id() == LogicalTypeId::DATE ||
-			    last_footer.types[c].id() == LogicalTypeId::TIMESTAMP) {
-				date_fields++;
-				date_col = last_footer.columns[c];
-			} else {
-				symbol_col = last_footer.columns[c];
-			}
+		// v8 primary-key contract: column 0 = symbol, column 1 = DATE/TIMESTAMP
+		// (the partition source). The first column must NOT be DATE/TIMESTAMP;
+		// the second column MUST be DATE/TIMESTAMP.
+		auto t1 = last_footer.types[1].id();
+		if (t1 != LogicalTypeId::DATE && t1 != LogicalTypeId::TIMESTAMP) {
+			throw IOException("Aligned table '%s': the index schema's second column must be DATE or "
+			                  "TIMESTAMP (the partition source column); got '%s' of type %s",
+			                  table_name, last_footer.columns[1].c_str(),
+			                  EnumUtil::ToChars(t1));
 		}
-		if (date_fields != 1 || symbol_col.empty()) {
-			throw IOException("Aligned table '%s': the index schema's first two columns must be the primary key "
-			                  "'(date, symbol)' — exactly one DATE/TIMESTAMP field (the partition source column) "
-			                  "and one symbol column; got '%s' and '%s'",
-			                  table_name, last_footer.columns[0].c_str(), last_footer.columns[1].c_str());
-		}
+		string symbol_col = last_footer.columns[0];
+		string date_col = last_footer.columns[1];
 		index_group.partition_source = date_col;
 		index_group.symbol_column = symbol_col;
 		// Partitioning is always derived from the directory layout.

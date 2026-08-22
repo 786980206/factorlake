@@ -215,9 +215,10 @@ $ErrorActionPreference = $prevEAP
 if ($LASTEXITCODE -ne 0 -and $out -match 'must agree') { Write-Host 'PASS: §v6 cross-group row-count mismatch rejected' } else { Write-Host "FAIL: §v6 cross-group row-count mismatch ($out)"; $script:failures++ }
 Remove-Item $badRows -Recurse -Force
 
-# §v6: the index schema's first two columns must include a DATE or TIMESTAMP
-# field (the partition source column). Rebuild the index's LAST part (the group
-# schema source) with the date column moved out of the first two columns.
+# §v8: the index schema's SECOND column must be DATE or TIMESTAMP (the
+# partition source column). Rebuild the index's LAST part (the group schema
+# source) with the date column NOT in the second position (e.g. col0=symbol,
+# col1=close which is DOUBLE, date moved to col2).
 $badDate = Join-Path $dataRoot 'baddate'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $badDate -Recurse -Force
 $prevEAP = $ErrorActionPreference
@@ -226,17 +227,18 @@ $sql = "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUB
 & $db -c $sql 2>&1 | Out-Null
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_table('baddate');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match 'first two columns') { Write-Host 'PASS: §v6 index date-field contract enforced' } else { Write-Host "FAIL: §v6 index date-field contract ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match 'second column must be DATE') { Write-Host 'PASS: §v8 index date-field contract enforced' } else { Write-Host "FAIL: §v8 index date-field contract ($out)"; $script:failures++ }
 Remove-Item $badDate -Recurse -Force
 
-# §v6: TIMESTAMP partition-source pruning. A dedicated table whose index date
+# §v8: TIMESTAMP partition-source pruning. A dedicated table whose index date
 # column is TIMESTAMP; filtering on it must prune to the matching partition.
+# v8 contract: col0=symbol, col1=ts (TIMESTAMP).
 $tsTable = Join-Path $dataRoot 'ts_ixday'
 New-Item -ItemType Directory -Force -Path (Join-Path $tsTable 'index\date=2026-08-01') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $tsTable 'index\date=2026-08-02') | Out-Null
-$sql = "COPY (SELECT CAST(DATE '2026-08-01' AS TIMESTAMP) AS ts, printf('%06d', r + 1) AS symbol, CAST(r AS BIGINT) AS rowid FROM range(0, 100) t(r)) TO '$($tsTable.Replace('\','/'))/index/date=2026-08-01/0000-0000000100.parquet' (FORMAT PARQUET);"
+$sql = "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST(DATE '2026-08-01' AS TIMESTAMP) AS ts, CAST(r AS BIGINT) AS rowid FROM range(0, 100) t(r)) TO '$($tsTable.Replace('\','/'))/index/date=2026-08-01/0000-0000000100.parquet' (FORMAT PARQUET);"
 & $db -c $sql 2>&1 | Out-Null
-$sql = "COPY (SELECT CAST(DATE '2026-08-02' AS TIMESTAMP) AS ts, printf('%06d', r + 1) AS symbol, CAST(r AS BIGINT) AS rowid FROM range(100, 200) t(r)) TO '$($tsTable.Replace('\','/'))/index/date=2026-08-02/0000-0000000100.parquet' (FORMAT PARQUET);"
+$sql = "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST(DATE '2026-08-02' AS TIMESTAMP) AS ts, CAST(r AS BIGINT) AS rowid FROM range(100, 200) t(r)) TO '$($tsTable.Replace('\','/'))/index/date=2026-08-02/0000-0000000100.parquet' (FORMAT PARQUET);"
 & $db -c $sql 2>&1 | Out-Null
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*), sum(rowid) FROM aligned_table('ts_ixday') WHERE ts >= TIMESTAMP '2026-08-02';"
 $vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','

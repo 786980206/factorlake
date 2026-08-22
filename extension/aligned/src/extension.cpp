@@ -49,7 +49,7 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	                             LogicalType::VARCHAR);
 
 	// aligned_upsert(table_name, source_path, mapping, root=...)
-	// v7: upsert rows by primary key (date, symbol) from a source parquet file.
+	// v8: upsert rows by primary key (symbol, date) from a source parquet file.
 	// An existing key is UPDATED (only the mapped columns are overwritten), a
 	// new key is INSERTED at its sorted position. Returns
 	// (rows_inserted, rows_updated, parts_rewritten, txid).
@@ -60,7 +60,7 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	loader.RegisterFunction(aligned_upsert_fn);
 
 	// aligned_delete(table_name, keys_source, root=...)
-	// v7: delete rows by primary key (date, symbol). Non-existent keys are
+	// v8: delete rows by primary key (symbol, date). Non-existent keys are
 	// skipped (idempotent). Returns (rows_deleted, parts_rewritten, txid).
 	TableFunction aligned_delete_fn("aligned_delete", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                AlignedDeleteFunction, AlignedDeleteBind, MutateInitGlobal, nullptr);

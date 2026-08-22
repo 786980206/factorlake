@@ -65,7 +65,7 @@ foreach ($d in $Days) {
     New-Item -ItemType Directory -Force -Path $indexDir | Out-Null
     $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($start, $end))
-  SELECT DATE '$date' AS date, printf('%06d', r + 1) AS symbol,
+  SELECT printf('%06d', r + 1) AS symbol, DATE '$date' AS date,
          CAST((r + 1) * 0.5 AS DOUBLE) AS close,
          CAST((r + 1) * 100 AS BIGINT) AS volume,
          CAST(r AS BIGINT) AS rowid

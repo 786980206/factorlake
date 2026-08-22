@@ -6,7 +6,7 @@
 **核心契约**：所有 Group 用**同一种一层分区段**（`year=`/`month=`/`date=` 三选一）；
 分区键 = 完整目录段串；Group 分区键集合 ⊆ index 分区键集合（允许缺分区）；
 共享分区**总行数**必须一致；part 文件名自描述 `{idx:04d}-{rows:10d}.parquet`；
-index schema 前两列 = 主键 `(date, symbol)`。
+index schema 前两列 = 主键 `(symbol, date)`。
 
 ---
 
@@ -179,9 +179,10 @@ Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认 `mo
 - 列集合按 part 自描述（footer）。旧 part 没有的列 → 读为 NULL（不重写历史）。
 - 同一列类型跨 part 必须一致。
 - Canonical Key = index schema，一经创建不可变更。
-- **主键契约**：index schema 前两列 = 主键 `(date, symbol)`——
-  恰一列 `DATE`/`TIMESTAMP`（分区源列）+ 一列 symbol。
-  两日期列或无日期列均 fail-fast。
+- **主键契约（v8）**：index schema 前两列 = 主键 `(symbol, date)`——
+  第 1 列（col0）= symbol（字符串），第 2 列（col1）= `DATE`/`TIMESTAMP`
+  （分区源列）。col1 非 DATE/TIMESTAMP 即 fail-fast。表按 date 分区；
+  分区内按 `(symbol, date)` 升序排列（同一 symbol 可多行/多日期）。
 
 ---
 
@@ -195,7 +196,7 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
 ```
 
 - `mapping` 对已存在的表可省略（按列名自动推断所属 Group）；空表首写必须显式给出。
-- 主键 = `(date, symbol)`；已存在 → 更新（只重写受影响 part），不存在 → 插入。
+- 主键 = `(symbol, date)`；已存在 → 更新（只重写受影响 part），不存在 → 插入。
 - 映射列类型 = 组内已存类型（组 schema），不是源文件类型。
 - **提交协议**：
   1. 写入 `<table>/_tmp/transaction-<txid>/`，`_tmp/` 对 Reader 不可见。
@@ -246,7 +247,7 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
 | index 分区内索引不连续 | 报错（fail-fast） |
 | 同分区同索引两个 Group 的 part 行数不等 | 报错（fail-fast） |
 | footer 行数 != 文件名 `rows` | 报错（fail-fast） |
-| index schema 前两列不是主键 (date, symbol) | 报错（fail-fast） |
+| index schema 第二列不是 DATE/TIMESTAMP | 报错（fail-fast） |
 | 非 index Group 不是 `lv1/lv2` | 报错 |
 | 多层分区段 / 组间分区段不一致 | 报错 |
 | 同列类型不一致 | 报错 |

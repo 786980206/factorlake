@@ -32,13 +32,13 @@ Row Group 剪枝；跨 Group 的所有行天然对齐，无需 JOIN。
 -- 或者显式指定根目录：
 SELECT * FROM aligned_scan('/data', 'cnstk_ixday');
 
--- 写入（upsert：按 (date, symbol) 主键插入/更新/追加新分区，原子提交）：
+-- 写入（upsert：按 (symbol, date) 主键插入/更新/追加新分区，原子提交）：
 -- mapping 可省略（已存在的表自动按列名推断列所属 group；空表首写必须显式给 mapping）：
 SELECT * FROM aligned_upsert('cnstk_ixday', '/data/stage/2026-08-17.parquet',
-                             'index:date,symbol,close;factor/alpha101:alpha001,alpha002;fieldset/ma:ma20',
+                             'index:symbol,date,close;factor/alpha101:alpha001,alpha002;fieldset/ma:ma20',
                              root='/data');
 
--- 删除（按 keys source 里的 (date, symbol) 定位要删的行）：
+-- 删除（按 keys source 里的 (symbol, date) 定位要删的行）：
 SELECT * FROM aligned_delete('cnstk_ixday', '/data/stage/2026-08-17.parquet', root='/data');
 
 -- 合并 part（单事务合并所有组，按分区目录，原子切换）：
@@ -52,7 +52,7 @@ INSERT INTO al.cnstk_ixday (date, symbol, close, alpha001, ma5)
   VALUES (DATE '2026-09-01', '009999', 99.5, 1.5, 2.5);
 UPDATE al.cnstk_ixday SET close = 123.4 WHERE symbol = '009999';
 DELETE FROM al.cnstk_ixday WHERE symbol = '009999';
--- INSERT/UPDATE 按 (date, symbol) 主键 upsert，只重写受影响 part；原子提交。
+-- INSERT/UPDATE 按 (symbol, date) 主键 upsert，只重写受影响 part；原子提交。
 -- DETACH al; 即可卸载（数据始终在 parquet 列组里）。
 
 -- 不 attach、直接流式写列组（超大数据首选）：
@@ -96,8 +96,8 @@ index）用**同一种一层分区段**（`year=`/`month=`/`date=`）；Group �
 （缺分区 → 行保留、列全 NULL）；共享分区总行数一致。**part 文件名自描述
 `{idx:04d}-{rows:10d}.parquet`**：行区间由文件名累加推导（零 footer IO），index
 分区内索引 0000 起连续，非 index 组允许缺号；**index schema 前两列 = 主键
-(date, symbol)**：恰一列 DATE/TIMESTAMP（分区源列）+ 一列 symbol（v7 契约）。
-违反即 fail-fast。
+(symbol, date)**：col0 = symbol（字符串），col1 = DATE/TIMESTAMP（分区源列），
+分区内按 (symbol, date) 升序（v8 契约）。违反即 fail-fast。
 `_table.json` 的 `aligned` 字段（v3 三模式）已被删除：读端忽略，不存在探测降级链。
 
 ## 已实现功能
@@ -109,9 +109,9 @@ index）用**同一种一层分区段**（`year=`/`month=`/`date=`）；Group �
 | 过滤下推 | ✅ | Hive 分区剪枝 + Parquet Row Group stats 剪枝 + 行级 filter（`WHERE date=...` 剪到 1/4 数据时约 2-3× 收益） |
 | 并行扫描 | ✅ | Aligned Row Group 为任务单元，8 线程实测 ≈4.2× 加速 |
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
-| 写入 | ✅ | `aligned_upsert()` / `aligned_delete()`（v7 mutator）：按 (date, symbol) 主键插入 / 更新 / 追加新分区 / 删除行；只重写受影响 part；`_tmp` 暂存 + 原子提交（last_txid+1） |
+| 写入 | ✅ | `aligned_upsert()` / `aligned_delete()`（v8 mutator）：按 (symbol, date) 主键插入 / 更新 / 追加新分区 / 删除行；只重写受影响 part；`_tmp` 暂存 + 原子提交（last_txid+1） |
 | 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，按分区目录合并 part，原子切换 |
-| catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组**（按 (date,symbol) upsert、只重写受影响 part） |
+| catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组**（按 (symbol,date) upsert、只重写受影响 part） |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
 
 不支持（明确不做）：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。

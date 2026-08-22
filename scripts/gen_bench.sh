@@ -59,7 +59,7 @@ for date in "${DAYS[@]}"; do
   # ---- index group: day-level partition, 1 part per day (fully aligned) ----
   index_dir="$TABLE_DIR/index/date=$date"
   mkdir -p "$index_dir"
-  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT DATE '$date' AS date, printf('%06d', r+1) AS symbol, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid FROM r) TO '$index_dir/$(partn 0 $ROWS_PER_DAY).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
+  run_duck "COPY (WITH r AS (SELECT range AS r FROM range($start,$end)) SELECT printf('%06d', r+1) AS symbol, DATE '$date' AS date, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid FROM r) TO '$index_dir/$(partn 0 $ROWS_PER_DAY).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
 
   # ---- alpha101: 1 part per day, 100 sparse columns --------------------------
   alpha_dir="$TABLE_DIR/factor/alpha101/date=$date"

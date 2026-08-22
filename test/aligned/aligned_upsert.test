@@ -4,14 +4,14 @@
 
 # --- setup: staging parquet files ---
 statement ok
-COPY (WITH r AS (SELECT range AS r FROM range(0, 3000)) SELECT DATE '2026-09-10' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r % 11 = 0 THEN CAST((r + 3) * 0.03 AS DOUBLE) ELSE NULL END AS alpha003, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CAST((r % 60) * 0.025 AS DOUBLE) AS ma20 FROM r) TO '{TEST_DIR}/s1.parquet' (FORMAT PARQUET)
+COPY (WITH r AS (SELECT range AS r FROM range(0, 3000)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-09-10' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r % 11 = 0 THEN CAST((r + 3) * 0.03 AS DOUBLE) ELSE NULL END AS alpha003, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CAST((r % 60) * 0.025 AS DOUBLE) AS ma20 FROM r) TO '{TEST_DIR}/s1.parquet' (FORMAT PARQUET)
 
 statement ok
-COPY (WITH r AS (SELECT range AS r FROM range(3000, 6000)) SELECT DATE '2026-09-11' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r % 11 = 0 THEN CAST((r + 3) * 0.03 AS DOUBLE) ELSE NULL END AS alpha003, CASE WHEN r % 3 = 0 THEN CAST((r + 1) * 0.001 AS DOUBLE) ELSE NULL END AS alpha999, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CAST((r % 60) * 0.025 AS DOUBLE) AS ma20 FROM r) TO '{TEST_DIR}/s2.parquet' (FORMAT PARQUET)
+COPY (WITH r AS (SELECT range AS r FROM range(3000, 6000)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-09-11' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r % 11 = 0 THEN CAST((r + 3) * 0.03 AS DOUBLE) ELSE NULL END AS alpha003, CASE WHEN r % 3 = 0 THEN CAST((r + 1) * 0.001 AS DOUBLE) ELSE NULL END AS alpha999, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CAST((r % 60) * 0.025 AS DOUBLE) AS ma20 FROM r) TO '{TEST_DIR}/s2.parquet' (FORMAT PARQUET)
 
 # --- batch 1: first write (empty table) ---
 query IIII
-SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s1.parquet', 'index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20')
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s1.parquet', 'index:symbol,date,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20')
 ----
 3000,0,3,1
 
@@ -22,7 +22,7 @@ SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*), count(alpha
 
 # --- batch 2: append (new part 0001) + alpha999 evolution column ---
 query IIII
-SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s2.parquet', 'index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003,alpha999;fieldset/ma:rowid_ma,ma5,ma20')
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s2.parquet', 'index:symbol,date,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003,alpha999;fieldset/ma:rowid_ma,ma5,ma20')
 ----
 3000,0,3,1
 
@@ -43,10 +43,10 @@ false
 
 # --- batch 3: in-place updates + new partition ---
 statement ok
-COPY (WITH t(date, symbol, close, volume, rowid, rowid_alpha, alpha001, alpha002, alpha003, rowid_ma, ma5, ma10, ma20) AS (VALUES (DATE '2026-09-10', '002500', 5555.5, 555, 499, 499, 77.7, 78.8, 79.9, 499, 9.9, 10.1, 10.2), (DATE '2026-09-11', '005000', 8888.5, 888, 4999, 4999, 88.8, 89.9, 90.1, 4999, 11.1, 12.1, 13.1), (DATE '2026-10-01', '000001', 111.1, 111, -1, -1, 1.1, 2.2, 3.3, -1, 3.3, 4.4, 5.5)) SELECT * FROM t) TO '{TEST_DIR}/s3.parquet' (FORMAT PARQUET)
+COPY (WITH t(symbol, date, close, volume, rowid, rowid_alpha, alpha001, alpha002, alpha003, rowid_ma, ma5, ma10, ma20) AS (VALUES ('002500', DATE '2026-09-10', 5555.5, 555, 499, 499, 77.7, 78.8, 79.9, 499, 9.9, 10.1, 10.2), ('005000', DATE '2026-09-11', 8888.5, 888, 4999, 4999, 88.8, 89.9, 90.1, 4999, 11.1, 12.1, 13.1), ('000001', DATE '2026-10-01', 111.1, 111, -1, -1, 1.1, 2.2, 3.3, -1, 3.3, 4.4, 5.5)) SELECT * FROM t) TO '{TEST_DIR}/s3.parquet' (FORMAT PARQUET)
 
 query IIII
-SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s3.parquet', 'index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20')
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('upserttest', '{TEST_DIR}/s3.parquet', 'index:symbol,date,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20')
 ----
 1,2,9,1
 
@@ -74,7 +74,7 @@ SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT date, count(*) FROM a
 
 # --- delete: 002999, 006000, 002500 (existing), 999999 (missing) ---
 statement ok
-COPY (WITH t(date, symbol) AS (VALUES (DATE '2026-09-10', '002999'), (DATE '2026-09-11', '006000'), (DATE '2026-09-10', '002500'), (DATE '2026-10-01', '999999')) SELECT * FROM t) TO '{TEST_DIR}/s4.parquet' (FORMAT PARQUET)
+COPY (WITH t(symbol, date) AS (VALUES ('002999', DATE '2026-09-10'), ('006000', DATE '2026-09-11'), ('002500', DATE '2026-09-10'), ('999999', DATE '2026-10-01')) SELECT * FROM t) TO '{TEST_DIR}/s4.parquet' (FORMAT PARQUET)
 
 query III
 SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_deleted, parts_rewritten, txid FROM aligned_delete('upserttest', '{TEST_DIR}/s4.parquet')
@@ -93,7 +93,7 @@ SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT count(*) FROM aligned
 
 # --- delete the only row of 2026-10 partition (single-part removal) ---
 statement ok
-COPY (WITH t(date, symbol) AS (VALUES (DATE '2026-10-01', '000001')) SELECT * FROM t) TO '{TEST_DIR}/s5.parquet' (FORMAT PARQUET)
+COPY (WITH t(symbol, date) AS (VALUES ('000001', DATE '2026-10-01')) SELECT * FROM t) TO '{TEST_DIR}/s5.parquet' (FORMAT PARQUET)
 
 query III
 SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_deleted, parts_rewritten, txid FROM aligned_delete('upserttest', '{TEST_DIR}/s5.parquet')
@@ -127,7 +127,7 @@ the mapping must include an 'index' group
 
 # --- error: missing mapped column ---
 statement error
-SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT * FROM aligned_upsert('upserttest', '{TEST_DIR}/s1.parquet', 'index:date,symbol,no_such_col')
+SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT * FROM aligned_upsert('upserttest', '{TEST_DIR}/s1.parquet', 'index:symbol,date,no_such_col')
 ----
 not found in source
 
@@ -142,7 +142,7 @@ primary key columns
 
 # --- auto-derive mapping (no explicit mapping) ---
 statement ok
-COPY (SELECT DATE '2026-09-10' AS date, '009999' AS symbol, 77.7::DOUBLE AS close, 8.8::DOUBLE AS alpha001, 9.9::DOUBLE AS ma5) TO '{TEST_DIR}/s8.parquet' (FORMAT PARQUET)
+COPY (SELECT '009999' AS symbol, DATE '2026-09-10' AS date, 77.7::DOUBLE AS close, 8.8::DOUBLE AS alpha001, 9.9::DOUBLE AS ma5) TO '{TEST_DIR}/s8.parquet' (FORMAT PARQUET)
 
 query III
 SET aligned_data_root='{TEST_DIR}/upserttest_data'; SELECT rows_inserted, rows_updated, parts_rewritten FROM aligned_upsert('upserttest', '{TEST_DIR}/s8.parquet')
@@ -165,18 +165,18 @@ mapping is required for the first write
 mkdir {TEST_DIR}/upsert_m12/t
 
 statement ok
-COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 1.0::DOUBLE AS v UNION ALL SELECT DATE '2026-01-01', 'b', 2.0) TO '{TEST_DIR}/s9.parquet' (FORMAT PARQUET)
+COPY (SELECT 'a' AS symbol, DATE '2026-01-01' AS date, 1.0::DOUBLE AS v UNION ALL SELECT 'b', DATE '2026-01-01', 2.0) TO '{TEST_DIR}/s9.parquet' (FORMAT PARQUET)
 
 statement ok
-COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 10::BIGINT AS w UNION ALL SELECT DATE '2026-01-01', 'b', 20) TO '{TEST_DIR}/s10.parquet' (FORMAT PARQUET)
+COPY (SELECT 'a' AS symbol, DATE '2026-01-01' AS date, 10::BIGINT AS w UNION ALL SELECT 'b', DATE '2026-01-01', 20) TO '{TEST_DIR}/s10.parquet' (FORMAT PARQUET)
 
 query II
-SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '{TEST_DIR}/s9.parquet', 'index:date,symbol;f/m1:v')
+SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '{TEST_DIR}/s9.parquet', 'index:symbol,date;f/m1:v')
 ----
 2,0
 
 query II
-SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '{TEST_DIR}/s10.parquet', 'index:date,symbol;g/m2:w')
+SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '{TEST_DIR}/s10.parquet', 'index:symbol,date;g/m2:w')
 ----
 0,2
 

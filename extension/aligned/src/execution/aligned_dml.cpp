@@ -264,7 +264,7 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 	vector<LogicalType> scan_types;
 	vector<string> scan_names;
 	auto bind_data = AlignedBindForCatalog(context, root, table_name, scan_types, scan_names);
-	// Locate the key columns in the schema.
+	// Locate the key columns in the schema by name.
 	idx_t date_pos = DConstants::INVALID_INDEX;
 	idx_t symbol_pos = DConstants::INVALID_INDEX;
 	for (idx_t i = 0; i < scan_names.size(); i++) {
@@ -275,12 +275,13 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 		}
 	}
 	if (date_pos == DConstants::INVALID_INDEX || symbol_pos == DConstants::INVALID_INDEX) {
-		throw IOException("aligned DELETE: primary key columns (date, symbol) not found in '%s'", table_name);
+		throw IOException("aligned DELETE: primary key columns (symbol, date) not found in '%s'", table_name);
 	}
 
-	// Scan date/symbol only; logical row numbers come from a sequential
-	// counter (a single local state consumes the shared cursor in order).
-	vector<column_t> col_ids = {date_pos, symbol_pos};
+	// Scan symbol/date only (v8: symbol first, then date); logical row numbers
+	// come from a sequential counter (a single local state consumes the shared
+	// cursor in order).
+	vector<column_t> col_ids = {symbol_pos, date_pos};
 	TableFunctionInitInput init_input(bind_data.get(), col_ids, {}, nullptr);
 	{
 		string nm;
@@ -296,7 +297,8 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 	DataChunk scan_chunk;
 	scan_chunk.Initialize(context, scan_types);
 
-	auto keys_types = vector<LogicalType> {scan_types[date_pos], scan_types[symbol_pos]};
+	// v8: keys are (symbol, date) — symbol first to match the index schema.
+	auto keys_types = vector<LogicalType> {scan_types[symbol_pos], scan_types[date_pos]};
 	ColumnDataCollection keys(context, keys_types);
 	ColumnDataAppendState append;
 	keys.InitializeAppend(append);
@@ -310,11 +312,11 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 		if (scan_chunk.size() == 0) {
 			break;
 		}
-		UnifiedVectorFormat dv, sv;
-		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), dv);
-		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), sv);
-		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv); // DATE = int32 days since epoch
+		UnifiedVectorFormat sv, dv;
+		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), sv); // symbol
+		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), dv); // date
 		auto sptr = UnifiedVectorFormat::GetData<string_t>(sv);
+		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);     // DATE = int32 days since epoch
 		idx_t out_n = 0;
 		for (idx_t i = 0; i < scan_chunk.size(); i++) {
 			int64_t rid = abs_row + static_cast<int64_t>(i);
@@ -327,10 +329,10 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 				next++;
 			}
 			if (want) {
-				auto di = dv.sel->get_index(i);
 				auto si = sv.sel->get_index(i);
-				out_chunk.SetValue(0, out_n, Value::DATE(date_t(dptr[di])));
-				out_chunk.SetValue(1, out_n, Value(sptr[si].GetString()));
+				auto di = dv.sel->get_index(i);
+				out_chunk.SetValue(0, out_n, Value(sptr[si].GetString())); // symbol
+				out_chunk.SetValue(1, out_n, Value::DATE(date_t(dptr[di]))); // date
 				out_n++;
 			}
 		}
@@ -343,14 +345,14 @@ static string StageKeysForRowids(ClientContext &context, const string &root, con
 		scan_chunk.Reset();
 	}
 
-	// Stage to parquet.
+	// Stage to parquet (v8: column order symbol, date).
 	auto fs = FileSystem::CreateLocal();
 	fs->CreateDirectoriesRecursive(tmp_dir);
 	string staged = tmp_dir + "/dml-delete-keys-" +
 	                StringUtil::Format("%lld", (long long)Timestamp::GetEpochMs(Timestamp::GetCurrentTimestamp())) +
 	                "-" + StringUtil::Format("%d", (int)(idx_t)&keys % 100000) + ".parquet";
 	ParquetWriter writer(context, FileSystem::GetFileSystem(context), staged, keys_types,
-	                     vector<string> {"date", "symbol"}, duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(),
+	                     vector<string> {"symbol", "date"}, duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(),
 	                     ShreddingType(), vector<pair<string, string>>(), nullptr, optional_idx(), 1073741824ULL, 1,
 	                     0.01, ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
 	unique_ptr<ParquetWriteTransformData> transform;
@@ -526,9 +528,10 @@ static void ResolveKeysForRowids(ClientContext &context, const string &root, con
 		}
 	}
 	if (date_pos == DConstants::INVALID_INDEX || symbol_pos == DConstants::INVALID_INDEX) {
-		throw IOException("aligned UPDATE: primary key columns (date, symbol) not found in '%s'", table_name);
+		throw IOException("aligned UPDATE: primary key columns (symbol, date) not found in '%s'", table_name);
 	}
-	vector<column_t> col_ids = {date_pos, symbol_pos};
+	// v8: scan symbol first, then date.
+	vector<column_t> col_ids = {symbol_pos, date_pos};
 	TableFunctionInitInput init_input(bind_data.get(), col_ids, {}, nullptr);
 	auto gstate = AlignedInitGlobal(context, init_input);
 	ThreadContext thread_context(context);
@@ -547,11 +550,11 @@ static void ResolveKeysForRowids(ClientContext &context, const string &root, con
 		if (scan_chunk.size() == 0) {
 			break;
 		}
-		UnifiedVectorFormat dv, sv;
-		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), dv);
-		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), sv);
-		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);
+		UnifiedVectorFormat sv, dv;
+		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), sv); // symbol
+		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), dv); // date
 		auto sptr = UnifiedVectorFormat::GetData<string_t>(sv);
+		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);
 		idx_t out_n = 0;
 		for (idx_t i = 0; i < scan_chunk.size(); i++) {
 			int64_t rid = abs_row + static_cast<int64_t>(i);
@@ -564,11 +567,12 @@ static void ResolveKeysForRowids(ClientContext &context, const string &root, con
 				next++;
 			}
 			if (want) {
-				auto di = dv.sel->get_index(i);
 				auto si = sv.sel->get_index(i);
+				auto di = dv.sel->get_index(i);
 				row_chunk.SetValue(0, out_n, Value::BIGINT(rid));
-				row_chunk.SetValue(1, out_n, Value::DATE(date_t(dptr[di])));
-				row_chunk.SetValue(2, out_n, Value(sptr[si].GetString()));
+				// v8: row_chunk layout = (rowid, symbol, date)
+				row_chunk.SetValue(1, out_n, Value(sptr[si].GetString()));
+				row_chunk.SetValue(2, out_n, Value::DATE(date_t(dptr[di])));
 				out_n++;
 			}
 		}
@@ -619,20 +623,20 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 				}
 			}
 
-			// Resolve keys: (rowid, date, symbol).
-			auto keys_types = vector<LogicalType> {LogicalType::BIGINT, LogicalType::DATE, LogicalType::VARCHAR};
+			// Resolve keys: (rowid, symbol, date) — v8: symbol before date.
+			auto keys_types = vector<LogicalType> {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DATE};
 			ColumnDataCollection keys(wctx, keys_types);
 			ColumnDataAppendState append;
 			keys.InitializeAppend(append);
 			ResolveKeysForRowids(wctx, rt, tbl, rowids, keys, append);
 
-			// staged schema: date, symbol, then set columns in set_names order
+			// staged schema: symbol, date, then set columns in set_names order (v8)
 			vector<LogicalType> staged_types;
 			vector<string> staged_names;
-			staged_types.push_back(LogicalType::DATE);
-			staged_names.push_back("date");
 			staged_types.push_back(LogicalType::VARCHAR);
 			staged_names.push_back("symbol");
+			staged_types.push_back(LogicalType::DATE);
+			staged_names.push_back("date");
 			for (auto &expr : this->expressions) {
 				staged_types.push_back(expr->return_type);
 			}
@@ -657,8 +661,9 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 					if (it == set_by_row.end()) {
 						continue;
 					}
-					out_chunk.SetValue(0, out_n, kc.GetValue(1, r));
-					out_chunk.SetValue(1, out_n, kc.GetValue(2, r));
+					// kc layout: (rowid, symbol, date) — v8
+					out_chunk.SetValue(0, out_n, kc.GetValue(1, r)); // symbol
+					out_chunk.SetValue(1, out_n, kc.GetValue(2, r)); // date
 					for (idx_t k = 0; k < it->second.size(); k++) {
 						out_chunk.SetValue(2 + k, out_n, it->second[k]);
 					}
@@ -693,10 +698,10 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 			writer.Flush(staged_coll, transform);
 			writer.Finalize();
 
-			// Upsert mapping: index:date,symbol(+ any index-group set columns);
-			// each non-index set group gets its own mapping segment.
-			string index_cols = "date,symbol";
-			string mapping = "index:date,symbol";
+			// Upsert mapping (v8): index:symbol,date(+ any index-group set
+			// columns); each non-index set group gets its own mapping segment.
+			string index_cols = "symbol,date";
+			string mapping = "index:symbol,date";
 			for (idx_t i = 0; i < this->set_names.size(); i++) {
 				if (this->set_groups[i].empty()) {
 					continue;
@@ -707,8 +712,8 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 					mapping += ";" + this->set_groups[i] + ":" + this->set_names[i];
 				}
 			}
-			if (index_cols != "date,symbol") {
-				mapping = "index:" + index_cols + mapping.substr(strlen("index:date,symbol"));
+			if (index_cols != "symbol,date") {
+				mapping = "index:" + index_cols + mapping.substr(strlen("index:symbol,date"));
 			}
 
 			Connection con2(db);

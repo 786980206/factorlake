@@ -52,9 +52,9 @@ foreach ($batch in 1000, 10000, 100000) {
     # base data via one big upsert (setup, not timed)
     $setupA = @"
 SET aligned_data_root='$root/aligned';
-COPY (SELECT DATE '$day' AS date, FORMAT('{:07d}', i) AS symbol, i::DOUBLE AS v FROM range($baseRows) t(i))
+COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, i::DOUBLE AS v FROM range($baseRows) t(i))
   TO '$root/base_a.parquet' (FORMAT PARQUET);
-SELECT * FROM aligned_upsert('t','$root/base_a.parquet','index:date,symbol,v');
+SELECT * FROM aligned_upsert('t','$root/base_a.parquet','index:symbol,date,v');
 "@
     $sf = Join-Path $oc ("ws_" + [guid]::NewGuid().ToString('N') + ".sql")
     Set-Content -Path $sf -Value $setupA -Encoding Ascii
@@ -63,7 +63,7 @@ SELECT * FROM aligned_upsert('t','$root/base_a.parquet','index:date,symbol,v');
     # batch staging parquet (new keys, next day partition)
     $batchStart = $baseRows
     $setupB = @"
-COPY (SELECT DATE '2026-06-01' AS date, FORMAT('{:07d}', ${batchStart} + i) AS symbol, (${batchStart}+i)::DOUBLE AS v
+COPY (SELECT FORMAT('{:07d}', ${batchStart} + i) AS symbol, DATE '2026-06-01' AS date, (${batchStart}+i)::DOUBLE AS v
       FROM range(${batch}) t(i)) TO '$root/batch_a.parquet' (FORMAT PARQUET);
 "@
     $bf = Join-Path $oc ("wb_" + [guid]::NewGuid().ToString('N') + ".sql")
@@ -73,7 +73,7 @@ COPY (SELECT DATE '2026-06-01' AS date, FORMAT('{:07d}', ${batchStart} + i) AS s
 
     $alignedSql = @"
 SET aligned_data_root='$root/aligned';
-SELECT * FROM aligned_upsert('t','$root/batch_a.parquet','index:date,symbol,v');
+SELECT * FROM aligned_upsert('t','$root/batch_a.parquet','index:symbol,date,v');
 "@
     $tAligned = Timed-Run $alignedSql "append-aligned-$batch"
     $results.Add("append,$batch,aligned,$('{0:F3}' -f $tAligned)")
@@ -82,9 +82,9 @@ SELECT * FROM aligned_upsert('t','$root/batch_a.parquet','index:date,symbol,v');
     Remove-Item "$root/native" -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path "$root/native" | Out-Null
     $nativeSql = @"
-COPY (SELECT DATE '$day' AS date, FORMAT('{:07d}', i) AS symbol, i::DOUBLE AS v FROM range($baseRows) t(i))
+COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, i::DOUBLE AS v FROM range($baseRows) t(i))
   TO '$root/native/t.parquet' (FORMAT PARQUET);
-COPY (SELECT DATE '2026-06-01' AS date, FORMAT('{:07d}', ${batchStart} + i) AS symbol, (${batchStart}+i)::DOUBLE AS v
+COPY (SELECT FORMAT('{:07d}', ${batchStart} + i) AS symbol, DATE '2026-06-01' AS date, (${batchStart}+i)::DOUBLE AS v
       FROM range(${batch}) t(i)) TO '$root/native/batch.parquet' (FORMAT PARQUET);
 COPY (
   SELECT * FROM read_parquet('$root/native/t.parquet')
@@ -104,7 +104,7 @@ COPY (
     Run-SqlFile $sf   # rebuild base (same setupA)
     $updKeys = [long]($baseRows / 2)
     $setupU = @"
-COPY (SELECT DATE '$day' AS date, FORMAT('{:07d}', i) AS symbol, 999.0::DOUBLE AS v
+COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, 999.0::DOUBLE AS v
       FROM range(${updKeys}) t(i)) TO '$root/upd.parquet' (FORMAT PARQUET);
 "@
     $uf = Join-Path $oc ("wu_" + [guid]::NewGuid().ToString('N') + ".sql")
@@ -114,7 +114,7 @@ COPY (SELECT DATE '$day' AS date, FORMAT('{:07d}', i) AS symbol, 999.0::DOUBLE A
 
     $upsertSql = @"
 SET aligned_data_root='$root/aligned';
-SELECT * FROM aligned_upsert('t','$root/upd.parquet','index:date,symbol,v');
+SELECT * FROM aligned_upsert('t','$root/upd.parquet','index:symbol,date,v');
 "@
     $tAligned2 = Timed-Run $upsertSql "update-aligned-$batch"
     $results.Add("update,$updKeys,aligned,$('{0:F3}' -f $tAligned2)")
@@ -124,16 +124,16 @@ SELECT * FROM aligned_upsert('t','$root/upd.parquet','index:date,symbol,v');
     New-Item -ItemType Directory -Force -Path "$root/native" | Out-Null
     # native update = full rewrite via base LEFT JOIN updates (coalesce values)
     $nativeSql2 = @"
-COPY (SELECT DATE '$day' AS date, FORMAT('{:07d}', i) AS symbol, i::DOUBLE AS v FROM range($baseRows) t(i))
+COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, i::DOUBLE AS v FROM range($baseRows) t(i))
   TO '$root/native/t.parquet' (FORMAT PARQUET);
-COPY (SELECT DATE '$day' AS date, FORMAT('{:07d}', i) AS symbol, 999.0::DOUBLE AS v
+COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, 999.0::DOUBLE AS v
       FROM range(${updKeys}) t(i)) TO '$root/native/upd.parquet' (FORMAT PARQUET);
 CREATE TEMP TABLE merged AS
-  SELECT b.date, b.symbol, COALESCE(u.v, b.v) AS v
+  SELECT b.symbol, b.date, COALESCE(u.v, b.v) AS v
   FROM read_parquet('$root/native/t.parquet') b
   LEFT JOIN read_parquet('$root/native/upd.parquet') u
     ON b.date = u.date AND b.symbol = u.symbol;
-COPY (SELECT date, symbol, v FROM merged) TO '$root/native/t_new.parquet' (FORMAT PARQUET);
+COPY (SELECT symbol, date, v FROM merged) TO '$root/native/t_new.parquet' (FORMAT PARQUET);
 "@
     $tNative2 = Timed-Run $nativeSql2 "update-native-$updKeys"
     $results.Add("update,$updKeys,native,$('{0:F3}' -f $tNative2)")

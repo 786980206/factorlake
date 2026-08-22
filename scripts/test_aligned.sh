@@ -184,22 +184,22 @@ if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM al
 else echo 'FAIL: v6 cross-group row-count mismatch'; failures=$((failures+1)); fi
 rm -rf "$BADROWS"
 
-# v6: the index schema's first two columns must include a DATE/TIMESTAMP field
-# (rebuild the index 2026-07 part with 'symbol' first -> date no longer among
-# the first two columns).
+# v8: the index schema's SECOND column must be DATE/TIMESTAMP (rebuild the
+# index 2026-08 part with col0=symbol, col1=close (DOUBLE), date moved to col2).
 BADDATE="$DATA_ROOT/baddate"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADDATE"
 run_duckdb "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, DATE '2026-08-01' AS date FROM range(4000, 6000) t(r)) TO '$BADDATE/index/month=2026-08/0001-0000002000.parquet' (FORMAT PARQUET);" >/dev/null
-if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('baddate');" "must include a DATE"; then
-  echo 'PASS: v6 index date-field contract enforced'
-else echo 'FAIL: v6 index date-field contract'; failures=$((failures+1)); fi
+if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_table('baddate');" "second column must be DATE"; then
+  echo 'PASS: v8 index date-field contract enforced'
+else echo 'FAIL: v8 index date-field contract'; failures=$((failures+1)); fi
 rm -rf "$BADDATE"
 
-# v6: TIMESTAMP partition-source pruning (index date column is TIMESTAMP).
+# v8: TIMESTAMP partition-source pruning (index col1 is TIMESTAMP).
+# v8 contract: col0=symbol, col1=ts (TIMESTAMP).
 TSTABLE="$DATA_ROOT/ts_ixday"
 mkdir -p "$TSTABLE/index/date=2026-08-01" "$TSTABLE/index/date=2026-08-02"
-run_duckdb "COPY (SELECT CAST(DATE '2026-08-01' AS TIMESTAMP) AS ts, printf('%06d', r + 1) AS symbol, CAST(r AS BIGINT) AS rowid FROM range(0, 100) t(r)) TO '$TSTABLE/index/date=2026-08-01/0000-0000000100.parquet' (FORMAT PARQUET);" >/dev/null
-run_duckdb "COPY (SELECT CAST(DATE '2026-08-02' AS TIMESTAMP) AS ts, printf('%06d', r + 1) AS symbol, CAST(r AS BIGINT) AS rowid FROM range(100, 200) t(r)) TO '$TSTABLE/index/date=2026-08-02/0000-0000000100.parquet' (FORMAT PARQUET);" >/dev/null
+run_duckdb "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST(DATE '2026-08-01' AS TIMESTAMP) AS ts, CAST(r AS BIGINT) AS rowid FROM range(0, 100) t(r)) TO '$TSTABLE/index/date=2026-08-01/0000-0000000100.parquet' (FORMAT PARQUET);" >/dev/null
+run_duckdb "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST(DATE '2026-08-02' AS TIMESTAMP) AS ts, CAST(r AS BIGINT) AS rowid FROM range(100, 200) t(r)) TO '$TSTABLE/index/date=2026-08-02/0000-0000000100.parquet' (FORMAT PARQUET);" >/dev/null
 out=$(run_duckdb "SET aligned_data_root='$DATA_ROOT'; SELECT count(*), sum(rowid) FROM aligned_table('ts_ixday') WHERE ts >= TIMESTAMP '2026-08-02';")
 if printf '%s' "$out" | grep -qE '^100,14950$'; then echo 'PASS: TIMESTAMP-pruned rows'; else echo "FAIL: TIMESTAMP-pruned rows ($out)"; failures=$((failures+1)); fi
 rm -rf "$TSTABLE"

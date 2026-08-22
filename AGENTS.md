@@ -119,8 +119,9 @@ Parquet footer 推导：
   三种单层段；空表首写默认 `month=%Y-%m`）。
 - **Canonical Key = index Group 的 schema 列**（从 Parquet footer 读取）。
 - **主键契约**：index schema（rel_path 排序最后 1 个 part footer）前两列 = 主键
-  `(date, symbol)`——**恰一列 DATE/TIMESTAMP**（分区源列）+ **一列 symbol**，
-  两日期列或无日期列均 fail-fast；分区目录只由该日期列求值。
+  `(symbol, date)`——col0 = **symbol**（字符串），col1 = **DATE/TIMESTAMP**
+  （分区源列）。col1 非 DATE/TIMESTAMP 即 fail-fast；分区目录只由该日期列求值；
+  分区内按 `(symbol, date)` 升序排列。
 - **不持久化的信息**：表名（←目录名）、schema（←Parquet footer）、
   行数/行区间（←part 文件名 `{idx:04d}-{rows:10d}`）、Row Group 大小（←编译常量
   131072）、事务号（不持久化）、Column Group 列表（←glob）、分区模板（←目录结构）。
@@ -183,17 +184,17 @@ Extension 只负责：`Logical Table → Column Group resolution → Partition r
 
 ---
 
-## 9. Writer（v7：aligned_upsert / aligned_delete mutator）
+## 9. Writer（v8：aligned_upsert / aligned_delete mutator）
 
 ```
 aligned_upsert(table, source, mapping, root=...)  → (rows_inserted, rows_updated, parts_rewritten, txid)
 aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewritten, txid)
 ```
 
-- **v7 mutator**（`src/mutator/aligned_mutator.cpp` + `src/rewriter/part_rewriter.cpp`）
-  取代第一版 `aligned_write`（已删除）：按主键 `(date, symbol)` 插入/更新/删除，
-  只重写受影响 part；主键契约 = index schema 前两列（§5：恰一 DATE/TIMESTAMP + 一
-  symbol）。
+- **v8 mutator**（`src/mutator/aligned_mutator.cpp` + `src/rewriter/part_rewriter.cpp`）
+  取代第一版 `aligned_write`（已删除）：按主键 `(symbol, date)` 插入/更新/删除，
+  只重写受影响 part；主键契约 = index schema 前两列（§5：col0 = symbol + col1 =
+  DATE/TIMESTAMP），分区内按 `(symbol, date)` 升序。
 - **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式 partition；
   崩溃则丢弃 transaction（`_tmp/` 对 Reader 永不可见），扫描时跨 Group 行数
   fail-fast 兜底。无 sidecar、无 marker 文件、无 manifest。
@@ -254,10 +255,10 @@ src/
 ├── extension.cpp
 ├── catalog/       logical_table.cpp  schema.cpp  manifest.cpp
 ├── resolver/      group_resolver.cpp  partition_resolver.cpp  row_space.cpp
-│                  key_resolver.cpp（v7：主键 → (分区, part, 局部行) 解析）
+│                  key_resolver.cpp（v8：主键 (symbol,date) → (分区, part, 局部行) 解析）
 ├── scan/          aligned_scan.cpp  aligned_scan_state.cpp  group_scan.cpp  scheduler.cpp
-├── mutator/       aligned_mutator.cpp（v7：upsert/delete 调度 + 原子提交）
-├── rewriter/      part_rewriter.cpp（v7：part 合并重写）
+├── mutator/       aligned_mutator.cpp（v8：upsert/delete 调度 + 原子提交）
+├── rewriter/      part_rewriter.cpp（v8：part 合并重写）
 ├── compaction/    compactor.cpp
 └── optimizer/     projection.cpp  filter.cpp
 ```
@@ -991,3 +992,29 @@ tive'）→ 断言 pattern 必须用
     AGENTS Phase 8 条目重写为 catalog 集成 + 标准 DML；SQLLogicTest 条目改 84/84（5 文件）。
   - **验收**：SQLLogicTest 84/84 PASS；test_dml 7/7、test_aligned 18/18、test_upsert 31/31、
     test_compaction 8/8、test_parallel 8/8 全 PASS（catalog 集成功能无回归）
+- [x] **v8 契约：主键列序改为 (symbol, date)（2026-08）**：
+  - **契约**（docs/STORAGE_CONTRACT.md v8）：主键从 v7 的 `(date, symbol)` 改为
+    `(symbol, date)`——col0 = **symbol**（字符串，固定位置），col1 = **DATE/TIMESTAMP**
+    （分区源列，固定位置）。col1 非 DATE/TIMESTAMP 即 fail-fast（不再搜索前两列找
+    日期列）；分区内按 `(symbol, date)` 升序排列；同一 symbol 可跨多个 date 出现在
+    同一分区（复合主键，非唯一 symbol）。
+  - **代码**：
+    - `manifest.cpp`：删除"搜索前两列找 DATE/TIMESTAMP"循环，改为 `symbol_col =
+      columns[0]`、`date_col = columns[1]`，验证 `types[1]` 为 DATE/TIMESTAMP
+    - `key_resolver.hpp`：`PartitionCache` 增加 `vector<date_t> dates`（结构体布局
+      变更 → 全量重编）
+    - `key_resolver.cpp`：`LoadPartition` 同时读 symbol + date 两列，校验
+      `(symbol, date)` 严格升序；`Resolve` 改为复合二分搜索（先比 symbol，再比 date）；
+      TIMESTAMP 用 `Timestamp::GetDate` 转换
+    - `aligned_mutator.cpp`：`SortedRow` 增加 `date_t date` 字段；`SortAndDedupe` 按
+      `(partition_key, symbol, date)` 排序去重；upsert/delete 路径 `resolver.Resolve(
+      rows[i].date, rows[i].symbol)`
+    - `aligned_dml.cpp`：DELETE/UPDATE staging 列序改 `{symbol, date}`；UPDATE upsert
+      mapping 改 `index:symbol,date`；staged schema/names 改 `{symbol, date, ...}`
+  - **数据/脚本**：gen_testdata/gen_bench/gen_multi_bench/bench_aligned 的 index 列序
+    全部从 `date, symbol` 改为 `symbol, date`；test_aligned/test_upsert/test_compaction
+    的 staging SQL 列序 + mapping 字符串全部改 `symbol, date`；SQLLogicTest 5 个
+    `.test` 文件的 staging SQL + mapping 全部改 `symbol, date`
+  - **文档**：STORAGE_CONTRACT v8、README、AGENTS §5/§9/§14 同步 v8
+  - **验收**：SQLLogicTest 84/84 PASS；test_aligned、test_upsert、test_compaction、
+    test_parallel、test_dml 全 PASS

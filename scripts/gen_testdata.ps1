@@ -38,8 +38,10 @@
 #   * Index group indexes are consecutive from 0000; non-index groups may skip
 #     indexes (deletion). Shared partitions must agree on the TOTAL row count
 #     and every SHARED index's row count (fail-fast).
-#   * The index schema's first two columns must contain a DATE/TIMESTAMP field
-#     (the partition source column; here 'date').
+#   * The index schema's first two columns are the primary key (symbol, date):
+#     col0 = symbol (string), col1 = date (the partition source column, DATE/
+#     TIMESTAMP). col1 must be DATE/TIMESTAMP or fail-fast. Within a partition
+#     rows are ordered by (symbol, date) ascending.
 #   * Missing partitions read as NULL (row space stays index-defined).
 
 $ErrorActionPreference = 'Stop'
@@ -88,8 +90,8 @@ foreach ($p in $Partitions) {
         $e = $s + $per
         $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range($s, $e))
-  SELECT DATE '$date' AS date,
-         printf('%06d', r + 1) AS symbol,
+  SELECT printf('%06d', r + 1) AS symbol,
+         DATE '$date' AS date,
          CAST((r + 1) * 0.5 AS DOUBLE) AS close,
          CAST((r + 1) * 100 AS BIGINT) AS volume,
          CAST(r AS BIGINT) AS rowid
@@ -156,7 +158,7 @@ $tmpDir = Join-Path $tableDir '_tmp\transaction-999\index\month=2026-07'
 New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 $sql = "COPY (
   WITH r AS (SELECT range AS r FROM range(0, 100))
-  SELECT DATE '2026-07-01' AS date, printf('%06d', r + 1) AS symbol, CAST(r AS DOUBLE) AS close
+  SELECT printf('%06d', r + 1) AS symbol, DATE '2026-07-01' AS date, CAST(r AS DOUBLE) AS close
   FROM r
 ) TO '$($tmpDir.Replace('\','/'))/part-000000.parquet' (FORMAT PARQUET);"
 Run-DuckDB $sql

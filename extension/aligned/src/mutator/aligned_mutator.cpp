@@ -238,11 +238,12 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 			throw BinderException("%s: the table '%s' is empty (no index parts) — nothing to delete", fn,
 			                      result->table_name);
 		}
-		// First write: the index mapping's first two columns ARE the key.
+		// First write: the index mapping's first two columns ARE the key
+		// (v8 contract: column 0 = symbol, column 1 = date).
 		auto &gm = result->group_mapping[0];
 		if (gm.col_names.size() < 2) {
 			throw BinderException("%s: the index group's mapping must have at least two columns (the primary key "
-			                      "date, symbol) for the first write",
+			                      "symbol, date) for the first write",
 			                      fn);
 		}
 		// The types are only known from the source (no parts yet).
@@ -251,28 +252,24 @@ static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunction
 		for (auto &col : reader->columns) {
 			source_schema[col.name] = col.type;
 		}
-		string date_col, symbol_col;
-		idx_t date_fields = 0;
-		for (idx_t c = 0; c < 2; c++) {
-			auto it = source_schema.find(gm.col_names[c]);
-			if (it == source_schema.end()) {
-				throw BinderException("%s: column '%s' (index group) not found in source '%s'", fn, gm.col_names[c],
-				                      result->source_path);
-			}
-			if (it->second.id() == LogicalTypeId::DATE || it->second.id() == LogicalTypeId::TIMESTAMP) {
-				date_fields++;
-				date_col = gm.col_names[c];
-			} else {
-				symbol_col = gm.col_names[c];
-			}
+		// v8: column 0 = symbol, column 1 = date (DATE/TIMESTAMP).
+		auto sym_it = source_schema.find(gm.col_names[0]);
+		if (sym_it == source_schema.end()) {
+			throw BinderException("%s: column '%s' (index group) not found in source '%s'", fn, gm.col_names[0],
+			                      result->source_path);
 		}
-		if (date_fields != 1 || symbol_col.empty()) {
-			throw BinderException("%s: the index group's first two mapping columns must be the primary key "
-			                      "'(date, symbol)' — exactly one DATE/TIMESTAMP field and one symbol column",
-			                      fn);
+		auto date_it = source_schema.find(gm.col_names[1]);
+		if (date_it == source_schema.end()) {
+			throw BinderException("%s: column '%s' (index group) not found in source '%s'", fn, gm.col_names[1],
+			                      result->source_path);
 		}
-		result->date_col = date_col;
-		result->symbol_col = symbol_col;
+		if (date_it->second.id() != LogicalTypeId::DATE && date_it->second.id() != LogicalTypeId::TIMESTAMP) {
+			throw BinderException("%s: the index group's second mapping column must be DATE or TIMESTAMP "
+			                      "(the partition source); got '%s' of type %s",
+			                      fn, gm.col_names[1], EnumUtil::ToChars(date_it->second.id()));
+		}
+		result->date_col = gm.col_names[1];
+		result->symbol_col = gm.col_names[0];
 	} else {
 		auto &index_group = result->plan.groups[0];
 		result->date_col = index_group.partition_source;
@@ -416,16 +413,18 @@ unique_ptr<GlobalTableFunctionState> MutateInitGlobal(ClientContext &context, Ta
 // Execution helpers
 //===----------------------------------------------------------------------===//
 
-//! A source key row (date partition + symbol) in sorted order.
+//! A source key row (date partition, symbol, date) in sorted order.
 struct SortedRow {
 	string partition_key; // full "name=value" segment ("" for unpartitioned)
 	Value symbol;
-	idx_t src_row; // row in the source collection
+	date_t date;          // v8: composite key (symbol, date) — date stored for Resolve
+	idx_t src_row;         // row in the source collection
 };
 
-//! Sorts the key rows by (partition, symbol) ascending (Value order for the
-//! symbol — the same order the resolver binary-searches) and keeps the LAST
-//! duplicate per (partition, symbol) (dedupe: the last source row wins).
+//! Sorts the key rows by (partition, symbol, date) ascending (Value order for
+//! the symbol — the same order the resolver binary-searches; date_t numeric
+//! order) and keeps the LAST duplicate per (partition, symbol, date) (dedupe:
+//! the last source row wins).
 static void SortAndDedupe(vector<SortedRow> &rows) {
 	std::sort(rows.begin(), rows.end(), [](const SortedRow &a, const SortedRow &b) {
 		if (a.partition_key != b.partition_key) {
@@ -434,12 +433,12 @@ static void SortAndDedupe(vector<SortedRow> &rows) {
 		if (a.symbol != b.symbol) {
 			return a.symbol < b.symbol;
 		}
-		return a.src_row < b.src_row;
+		return a.date < b.date;
 	});
 	vector<SortedRow> dedup;
 	for (idx_t i = 0; i < rows.size(); i++) {
 		if (i + 1 < rows.size() && rows[i].partition_key == rows[i + 1].partition_key &&
-		    rows[i].symbol == rows[i + 1].symbol) {
+		    rows[i].symbol == rows[i + 1].symbol && rows[i].date == rows[i + 1].date) {
 			continue;
 		}
 		dedup.push_back(std::move(rows[i]));
@@ -855,7 +854,7 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 		throw IOException("Aligned table: internal error — primary key columns not among the mapped columns");
 	}
 
-	// 3. Build + sort + dedupe the key list ((partition, symbol) order).
+	// 3. Build + sort + dedupe the key list ((partition, symbol, date) order).
 	vector<SortedRow> rows;
 	rows.reserve(src->Count());
 	for (idx_t r = 0; r < src->Count(); r++) {
@@ -870,6 +869,7 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 			throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
 		}
 		row.symbol = reader.GetValue(symbol_pos, r);
+		row.date = d;
 		row.src_row = r;
 		rows.push_back(std::move(row));
 	}
@@ -879,8 +879,7 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 	KeyResolver resolver(context, bind.plan);
 	vector<KeyLocation> locs(rows.size());
 	for (idx_t i = 0; i < rows.size(); i++) {
-		Value dv = reader.GetValue(date_pos, rows[i].src_row);
-		locs[i] = resolver.Resolve(dv.GetValue<date_t>(), rows[i].symbol);
+		locs[i] = resolver.Resolve(rows[i].date, rows[i].symbol);
 		if (locs[i].found) {
 			gstate.rows_updated++;
 		} else {
@@ -1045,6 +1044,7 @@ void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, Dat
 			throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
 		}
 		row.symbol = reader.GetValue(1, r);
+		row.date = d;
 		row.src_row = r;
 		rows.push_back(std::move(row));
 	}
@@ -1054,8 +1054,7 @@ void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, Dat
 	KeyResolver resolver(context, bind.plan);
 	vector<KeyLocation> locs(rows.size());
 	for (idx_t i = 0; i < rows.size(); i++) {
-		Value dv = reader.GetValue(0, rows[i].src_row);
-		locs[i] = resolver.Resolve(dv.GetValue<date_t>(), rows[i].symbol);
+		locs[i] = resolver.Resolve(rows[i].date, rows[i].symbol);
 	}
 
 	// 4. Dispatch delete rows per group (every group with the partition loses

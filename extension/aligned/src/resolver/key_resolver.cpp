@@ -36,27 +36,39 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 	}
 	entry.loaded = true;
 
-	Value prev;
+	// v8 contract: within a partition, rows are sorted by (symbol, date)
+	// strictly ascending. We read both columns to validate and cache them.
+	Value prev_sym;
+	date_t prev_date {};
 	bool has_prev = false;
 	for (idx_t k = 0; k < partition.part_count; k++) {
 		auto &part = index_group->parts[partition.first_part + k];
 		auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(part.path), ParquetOptions(context));
-		// The symbol column must exist in every index part (it is a primary-key
-		// column; schema evolution cannot drop it).
+		// The key columns (symbol, date) must exist in every index part.
 		idx_t symbol_pos = DConstants::INVALID_INDEX;
+		idx_t date_pos = DConstants::INVALID_INDEX;
 		for (idx_t c = 0; c < reader->columns.size(); c++) {
 			if (StringUtil::CIEquals(reader->columns[c].name, index_group->symbol_column)) {
 				symbol_pos = c;
-				break;
+			}
+			if (StringUtil::CIEquals(reader->columns[c].name, index_group->partition_source)) {
+				date_pos = c;
 			}
 		}
 		if (symbol_pos == DConstants::INVALID_INDEX) {
 			throw IOException("Aligned table '%s' group 'index' partition '%s': part '%s' has no symbol column "
-			                  "'%s' (v7 primary-key contract)",
+			                  "'%s' (v8 primary-key contract)",
 			                  plan.table_name, partition.key,
 			                  part.part_name, index_group->symbol_column);
 		}
+		if (date_pos == DConstants::INVALID_INDEX) {
+			throw IOException("Aligned table '%s' group 'index' partition '%s': part '%s' has no date column "
+			                  "'%s' (v8 primary-key contract)",
+			                  plan.table_name, partition.key,
+			                  part.part_name, index_group->partition_source);
+		}
 		reader->column_ids.push_back(MultiFileLocalColumnId(symbol_pos));
+		reader->column_ids.push_back(MultiFileLocalColumnId(date_pos));
 
 		vector<PartitionStatistics> rg_stats;
 		reader->GetPartitionStats(rg_stats);
@@ -67,27 +79,48 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 		ParquetReaderScanState scan_state;
 		reader->InitializeScan(context, scan_state, all_rgs);
 		DataChunk chunk;
-		chunk.Initialize(context, {reader->columns[symbol_pos].type});
+		chunk.Initialize(context, {reader->columns[symbol_pos].type, reader->columns[date_pos].type});
+		bool is_timestamp = reader->columns[date_pos].type.id() == LogicalTypeId::TIMESTAMP;
 		while (true) {
 			auto res = reader->Scan(context, scan_state, chunk);
 			auto async_type = res.GetResultType();
 			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
 				break;
 			}
+			UnifiedVectorFormat sv, dv;
+			chunk.data[0].ToUnifiedFormat(chunk.size(), sv);
+			chunk.data[1].ToUnifiedFormat(chunk.size(), dv);
+			auto sptr = UnifiedVectorFormat::GetData<string_t>(sv);
 			for (idx_t r = 0; r < chunk.size(); r++) {
-				Value v = chunk.GetValue(0, r);
-				// v7 sort contract: within a partition, symbols are strictly
-				// ascending (this is what makes binary search and the
-				// insertion-position semantics correct).
-				if (has_prev && !(prev < v)) {
-					throw IOException("Aligned table '%s' group 'index' partition '%s': rows are not strictly "
-					                  "sorted by symbol '%s' (v7 sort contract; duplicates or descending order)",
-					                  plan.table_name, partition.key,
-					                  index_group->symbol_column);
+				auto si = sv.sel->get_index(r);
+				auto di = dv.sel->get_index(r);
+				Value sym_val = chunk.GetValue(0, r);
+				// Extract the date value: DATE = int32 days since epoch;
+				// TIMESTAMP = int64 nanoseconds → use Timestamp::GetDate.
+				date_t date_val;
+				if (is_timestamp) {
+					auto tptr = UnifiedVectorFormat::GetData<int64_t>(dv);
+					date_val = Timestamp::GetDate(timestamp_t(tptr[di]));
+				} else {
+					auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);
+					date_val = date_t(dptr[di]);
 				}
-				prev = v;
+				// v8 sort contract: (symbol, date) strictly ascending.
+				if (has_prev) {
+					bool same_sym = (prev_sym == sym_val);
+					bool ascending = same_sym ? (date_val > prev_date)
+					                          : (prev_sym < sym_val);
+					if (!ascending) {
+						throw IOException("Aligned table '%s' group 'index' partition '%s': rows are not strictly "
+						                  "sorted by (symbol, date) (v8 sort contract; duplicates or descending order)",
+						                  plan.table_name, partition.key);
+					}
+				}
+				prev_sym = sym_val;
+				prev_date = date_val;
 				has_prev = true;
-				entry.symbols.push_back(std::move(v));
+				entry.symbols.push_back(std::move(sym_val));
+				entry.dates.push_back(date_val);
 			}
 		}
 	}
@@ -111,15 +144,20 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 			continue;
 		}
 		LoadPartition(partition);
-		auto &syms = cache[partition.key].symbols;
+		auto &cache_entry = cache[partition.key];
+		auto &syms = cache_entry.symbols;
+		auto &dates = cache_entry.dates;
 
-		// Binary search: the first symbol >= the key's symbol (partition rows
-		// are strictly ascending, so this is also the unique insertion point).
+		// Binary search for the composite key (symbol, date). The cached
+		// arrays are sorted by (symbol, date) strictly ascending. We find
+		// the first position where (symbol, date) >= (key_sym, key_date).
 		idx_t lo = 0;
 		idx_t hi = syms.size();
 		while (lo < hi) {
 			idx_t mid = lo + (hi - lo) / 2;
-			if (syms[mid] < symbol_value) {
+			bool lt = syms[mid] < symbol_value ||
+			          (syms[mid] == symbol_value && dates[mid] < date_value);
+			if (lt) {
 				lo = mid + 1;
 			} else {
 				hi = mid;
@@ -148,10 +186,10 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 		if (in_range) {
 			loc.part_local_row = p - off;
 		} else {
-			// p == partition row count: the key sorts after every symbol of the
-			// partition. The caller appends a NEW part holding only the new
-			// rows — the existing parts are not rewritten. The new part index
-			// must be free across ALL groups (not just the index group),
+			// p == partition row count: the key sorts after every (symbol, date)
+			// of the partition. The caller appends a NEW part holding only the
+			// new rows — the existing parts are not rewritten. The new part
+			// index must be free across ALL groups (not just the index group),
 			// otherwise it would collide with another group's existing part at
 			// the same index and violate the v6 "shared index row counts must
 			// agree" contract. Use the partition-wide maximum index + 1.
@@ -174,7 +212,8 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 			loc.part_local_row = 0;
 			loc.append_new_part = true;
 		}
-		loc.found = p < syms.size() && !(symbol_value < syms[p]);
+		loc.found = p < syms.size() &&
+		            syms[p] == symbol_value && dates[p] == date_value;
 		return loc;
 	}
 

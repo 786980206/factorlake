@@ -34,7 +34,7 @@ function Gen-Baseline([string]$file, [string]$selectList) {
     & $duckdb -c $sql 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "baseline gen failed: $file" }
 }
-$indexList = "DATE '2026-09-01' + (r // 250000)::INT AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid"
+$indexList = "printf('%06d', r + 1) AS symbol, DATE '2026-09-01' + (r // 250000)::INT AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid"
 Gen-Baseline $joinIndex $indexList
 Gen-Baseline $joinAlpha "CAST(r AS BIGINT) AS rowid_alpha, $(($alphaCols -join ', '))"
 Gen-Baseline $joinMa "CAST(r AS BIGINT) AS rowid_ma, $(($maCols -join ', '))"

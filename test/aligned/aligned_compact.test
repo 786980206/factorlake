@@ -8,10 +8,10 @@ mkdir {TEST_DIR}/compacttest_data/compacttest/factor/alpha101/month=2026-07
 
 # --- seed 2 parts per group (same partition dir, 2 parts) ---
 statement ok
-COPY (WITH r AS (SELECT range AS r FROM range(0, 2000)) SELECT DATE '2026-07-01' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/index/month=2026-07/0000-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
+COPY (WITH r AS (SELECT range AS r FROM range(0, 2000)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-07-01' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/index/month=2026-07/0000-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
 
 statement ok
-COPY (WITH r AS (SELECT range AS r FROM range(2000, 4000)) SELECT DATE '2026-07-01' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/index/month=2026-07/0001-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
+COPY (WITH r AS (SELECT range AS r FROM range(2000, 4000)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-07-01' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/index/month=2026-07/0001-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)
 
 statement ok
 COPY (WITH r AS (SELECT range AS r FROM range(0, 2000)) SELECT CAST(r AS BIGINT) AS rowid_alpha, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 11 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002 FROM r) TO '{TEST_DIR}/compacttest_data/compacttest/factor/alpha101/month=2026-07/0000-0000002000.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)

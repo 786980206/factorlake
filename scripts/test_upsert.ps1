@@ -53,7 +53,7 @@ function Make-Staging([string]$path, [int]$from, [int]$to, [string]$date, [switc
     @"
 COPY (
   WITH r AS (SELECT range AS r FROM range($from, $to))
-  SELECT DATE '$date' AS date, printf('%06d', r + 1) AS symbol,
+  SELECT printf('%06d', r + 1) AS symbol, DATE '$date' AS date,
          CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume,
          CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha,
          CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001,
@@ -77,7 +77,7 @@ if (Test-Path $tableDir) { Remove-Item $tableDir -Recurse -Force }
 # ---- batch 1: first write (empty table) on 2026-09-10 ----------------------
 $s1 = Join-Path $dataRoot 'upsert_s1.parquet'
 Make-Staging $s1 0 3000 '2026-09-10'
-$mapping = "index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20"
+$mapping = "index:symbol,date,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003;fieldset/ma:rowid_ma,ma5,ma20"
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('$table', '$($s1.Replace('\','/'))', '$mapping');"
 Expect-Equal 'write 1 summary (ins, upd, parts, txid)' $out.Trim() '3000,0,3,1'
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT count(*), count(alpha001), sum(rowid), sum(CASE WHEN rowid != rowid_alpha OR rowid != rowid_ma THEN 1 ELSE 0 END) FROM aligned_table('$table');"
@@ -90,7 +90,7 @@ Expect-Equal 'batch1 misalign' $vals[3] '0'
 # ---- batch 2: append to the same partition (new part 0001) + alpha999 -------
 $s2 = Join-Path $dataRoot 'upsert_s2.parquet'
 Make-Staging $s2 3000 6000 '2026-09-11' -withAlpha999
-$mapping2 = "index:date,symbol,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003,alpha999;fieldset/ma:rowid_ma,ma5,ma20"
+$mapping2 = "index:symbol,date,close,volume,rowid;factor/alpha101:rowid_alpha,alpha001,alpha002,alpha003,alpha999;fieldset/ma:rowid_ma,ma5,ma20"
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('$table', '$($s2.Replace('\','/'))', '$mapping2');"
 Expect-Equal 'write 2 summary (ins, upd, parts, txid)' $out.Trim() '3000,0,3,1'
 if ((Test-Path (Join-Path $tableDir 'index\month=2026-09\0001-0000003000.parquet')) -and
@@ -187,7 +187,7 @@ $s1f = $s1.Replace('\', '/')
 if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('upsert_empty2', '$s1f', 'no_such_group:date');" "the mapping must include an 'index' group") {
     Write-Host 'PASS: empty-table write without index group rejected'
 } else { Write-Host 'FAIL: empty-table write without index group not rejected'; $script:failures++ }
-if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('$table', '$s1f', 'index:date,symbol,no_such_col');" "not found in source") {
+if (Run-DuckDB-ExpectError "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_upsert('$table', '$s1f', 'index:symbol,date,no_such_col');" "not found in source") {
     Write-Host 'PASS: missing mapped column rejected'
 } else { Write-Host 'FAIL: missing mapped column not rejected'; $script:failures++ }
 $s7 = Join-Path $dataRoot 'upsert_s7.parquet'
@@ -226,11 +226,11 @@ Remove-Item $m12dir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$m12dir/t" | Out-Null
 $s9f = 'D:/proj/factorlake/testdata/upsert_s9.parquet'
 $s10f = 'D:/proj/factorlake/testdata/upsert_s10.parquet'
-& $duckdb -c "COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 1.0::DOUBLE AS v UNION ALL SELECT DATE '2026-01-01', 'b', 2.0) TO '$s9f' (FORMAT PARQUET);" 2>&1 | Out-Null
-& $duckdb -c "COPY (SELECT DATE '2026-01-01' AS date, 'a' AS symbol, 10::BIGINT AS w UNION ALL SELECT DATE '2026-01-01', 'b', 20) TO '$s10f' (FORMAT PARQUET);" 2>&1 | Out-Null
-$out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '$s9f', 'index:date,symbol;f/m1:v');"
+& $duckdb -c "COPY (SELECT 'a' AS symbol, DATE '2026-01-01' AS date, 1.0::DOUBLE AS v UNION ALL SELECT 'b', DATE '2026-01-01', 2.0) TO '$s9f' (FORMAT PARQUET);" 2>&1 | Out-Null
+& $duckdb -c "COPY (SELECT 'a' AS symbol, DATE '2026-01-01' AS date, 10::BIGINT AS w UNION ALL SELECT 'b', DATE '2026-01-01', 20) TO '$s10f' (FORMAT PARQUET);" 2>&1 | Out-Null
+$out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '$s9f', 'index:symbol,date;f/m1:v');"
 Expect-Equal 'M1 phase inserts' $out.Trim() '2,0'
-$out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '$s10f', 'index:date,symbol;g/m2:w');"
+$out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT rows_inserted, rows_updated FROM aligned_upsert('t', '$s10f', 'index:symbol,date;g/m2:w');"
 Expect-Equal 'M2 phase updates existing keys' $out.Trim() '0,2'
 $out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT v, w FROM aligned_table('t') WHERE symbol='b';"
 Expect-Equal 'M1+M2 values merged' $out.Trim() '2.0,20'

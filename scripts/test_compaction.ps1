@@ -30,7 +30,7 @@ function Write-JsonFile([string]$path, $obj) {
 }
 # Writes two aligned parquet parts (2000 rows each, rows 0..3999) for one
 # partition dir of the index and alpha groups. The index file carries the
-# primary key (date, symbol); the alpha file carries rowid_alpha + factors.
+# primary key (symbol, date); the alpha file carries rowid_alpha + factors.
 function Make-Part([string]$group, [string]$partIdx, [int]$from, [int]$to) {
     $dir = Join-Path $tableDir "$group\month=2026-07"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -38,7 +38,7 @@ function Make-Part([string]$group, [string]$partIdx, [int]$from, [int]$to) {
     if ($group -eq 'index') {
         & $duckdb -c "COPY (
   WITH r AS (SELECT range AS r FROM range($from, $to))
-  SELECT DATE '2026-07-01' AS date, printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUBLE) AS close,
+  SELECT printf('%06d', r + 1) AS symbol, DATE '2026-07-01' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close,
          CAST(r AS BIGINT) AS rowid
   FROM r
 ) TO '$($path.Replace('\','/'))' (FORMAT PARQUET, ROW_GROUP_SIZE 2048);" 2>&1 | Out-Null
