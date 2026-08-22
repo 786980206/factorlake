@@ -199,7 +199,37 @@ body{
   margin:4px 0;
 }
 
-/* ===== Legend ===== */
+/* ===== Column axis (horizontal, below groups) ===== */
+.col-axis{
+  display:flex;gap:0;margin-top:.8vh;align-items:stretch;
+}
+.col-axis .col-spacer{
+  width:3vw;flex-shrink:0;
+}
+.col-axis .col-block{
+  flex:1;display:flex;flex-direction:column;align-items:center;
+  padding:.6vh .4vw;border-radius:0 0 8px 8px;
+  font-family:Consolas,monospace;font-size:1.2vh;line-height:1.5;
+}
+.col-axis .col-block .col-title{
+  font-weight:600;font-size:1.3vh;margin-bottom:.3vh;
+}
+.col-axis .col-block .col-fields{
+  color:var(--mut);text-align:center;
+}
+.col-axis .col-more{
+  flex:0 0 3vw;
+}
+.col-axis .col-arrow{
+  width:3vw;flex-shrink:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;color:var(--teal);
+  font-size:1.4vh;font-family:Consolas,monospace;
+}
+.col-axis .col-arrow .aln{
+  flex:1;width:2px;background:repeating-linear-gradient(180deg,
+    var(--teal) 0,var(--teal) 6px,transparent 6px,transparent 12px);
+  margin:4px 0;
+}
 .legend{
   display:flex;gap:1.2vw;flex-wrap:wrap;justify-content:center;
   margin-top:1.5vh;padding-top:1.2vh;border-top:1px solid var(--line);
@@ -410,6 +440,24 @@ body{
         </div><!-- /groups -->
 
         </div><!-- /flex row-axis + groups -->
+
+        <!-- ===== Column axis (horizontal, below groups) ===== -->
+        <div class="col-axis">
+          <div class="col-spacer"></div>
+          <div class="col-block" style="background:rgba(188,76,0,.05);border-top:2px solid var(--org)">
+            <div class="col-title" style="color:var(--org)">index</div>
+            <div class="col-fields">date, symbol,<br>close, volume, amount</div>
+          </div>
+          <div class="col-block" style="background:rgba(130,80,223,.04);border-top:2px solid var(--prp)">
+            <div class="col-title" style="color:var(--prp)">alpha101</div>
+            <div class="col-fields">alpha001, alpha002,<br>…, alpha101</div>
+          </div>
+          <div class="col-block" style="background:rgba(26,127,55,.04);border-top:2px solid var(--grn)">
+            <div class="col-title" style="color:var(--grn)">ma</div>
+            <div class="col-fields">ma5, ma10, ma20,<br>ma60, ma120, ma250</div>
+          </div>
+          <div class="col-more" style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:2vh">⋯</div>
+        </div>
 
         <div style="text-align:center;color:var(--teal);font-size:1.4vh;font-family:Consolas,monospace;margin-top:.8vh">
           同色 RG 跨组等高 = 行号对齐 · 查询绝不 JOIN
