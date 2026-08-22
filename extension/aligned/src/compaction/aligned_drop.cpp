@@ -33,6 +33,10 @@ struct AlignedDropGlobalState : public GlobalTableFunctionState {
 //! Recursively count files and subdirectories under a path.
 static void CountRecursive(FileSystem &fs, const string &path, idx_t &dirs_count, idx_t &files_count) {
 	fs.ListFiles(path, [&](OpenFileInfo &info) {
+		// Skip the write lock file (transient, created by TableWriteLock)
+		if (StringUtil::CIEquals(info.path, ".aligned_write.lock")) {
+			return;
+		}
 		string child = path + "/" + info.path;
 		if (fs.DirectoryExists(child)) {
 			dirs_count++;

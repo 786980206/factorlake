@@ -317,3 +317,26 @@ SELECT * FROM aligned_drop('mytable', 'index', root => '...');
 - 新增文件：`compaction/aligned_drop.{cpp,hpp}`（~140 行）。
 - 新增测试：`test/aligned/aligned_drop.test`（11 个断言）。
 - 更新 `docs/API.md`：新增 §4.6 aligned_drop + 参数详解 + 返回值表。
+
+## v0.13-aligned-create — 表函数式建表
+
+新增 `aligned_create` 表函数，作为 `CREATE TABLE` DDL 的表函数替代方案：
+
+```sql
+SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE, alpha001 DOUBLE',
+                             groups => 'index:close;factor/alpha:alpha001');
+```
+
+- **设计理由**：CREATE TABLE 不是标准建表逻辑（WITH 子句解析 groups/partition_template
+  非 SQL 标准），用表函数更自然，与其他 aligned_* 函数风格一致。
+- **参数**：`table_name`（位置）、`columns`（位置，列定义字符串）、`groups`
+  （命名，可选）、`root`（命名，可选）、`partition_template`（命名，可选）。
+- **列定义解析**：用 `Parser::ParseColumnList` 解析列定义字符串。注意：解析器
+  返回 `LogicalTypeId::UNBOUND` 类型，需用 `TransformStringToLogicalType` 解析
+  为具体类型后才能用于 schema 校验和 ParquetWriter（已记入 AGENTS.md §12）。
+- **返回值**：`(dirs_created, files_created, txid)` — 创建的目录数、parquet 文件
+  数、事务 ID。递归计数时跳过 `.aligned_write.lock`（RAII 析构前仍存在）。
+- 内部复用 `AlignedCreateTable`（新建表模式）。
+- 新增文件：`catalog/aligned_create_fn.{cpp,hpp}`（~130 行）。
+- 新增测试：`test/aligned/aligned_create_fn.test`（9 个断言）。
+- 修复 `aligned_drop.cpp` 中 `CountRecursive` 未跳过 `.aligned_write.lock` 的 bug。

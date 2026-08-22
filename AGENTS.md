@@ -141,6 +141,7 @@ AlignedTableScan
 ## 7. Writer（aligned_upsert / aligned_delete / CREATE TABLE）
 
 ```
+aligned_create(table, columns, groups=..., root=..., partition_template=...)  → (dirs_created, files_created, txid)
 aligned_upsert(table, source, mapping, root=...)  → (rows_inserted, rows_updated, parts_rewritten, txid)
 aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewritten, txid)
 aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
@@ -218,7 +219,7 @@ Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
 ```
 extension/aligned/src/
 ├── extension.cpp
-├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp
+├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp
 ├── resolver/      partition_resolver.cpp  key_resolver.cpp
 ├── scan/          aligned_scan.cpp
 ├── mutator/       aligned_mutator.cpp
@@ -249,7 +250,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本：test_aligned 42/42、test_upsert 50/50、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 135/135 + 5 PS 套件全 PASS
+- 当前总：SQLLogicTest 144/144 + 5 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`
@@ -285,6 +286,12 @@ extension/aligned/src/
 - **catalog 表扫描的列请求 ≠ 表函数**：executor 按 `projection_ids` 分配输出；
   `column_ids` 可能含重复列和虚拟 rowid(-1)。
 - **`Connection(DatabaseInstance::GetDatabase(context))`**：需要 include database.hpp。
+- **`Parser::ParseColumnList` 返回 UNBOUND 类型**：解析列定义字符串后
+  `ColumnDefinition::Type().id()` 是 `LogicalTypeId::UNBOUND`（非 VARCHAR/DATE），
+  必须用 `TransformStringToLogicalType(type.ToString(), context)` 解析为具体类型
+  后才能用于 schema 校验或 ParquetWriter。
+- **`TableWriteLock` 在目录中创建 `.aligned_write.lock`**：递归计数目录文件时
+  须跳过此文件（RAII 析构前它仍存在）。
 
 ### 构建陷阱
 

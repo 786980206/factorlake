@@ -144,7 +144,43 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 ## 4. 表函数 API
 
-除了标准 SQL DML，还提供 6 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+除了标准 SQL DML，还提供 7 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+
+### 4.0 `aligned_create` — 建表
+
+```sql
+SELECT * FROM aligned_create(table_name, columns [, groups => '...'] [, root => '...']
+                             [, partition_template => '...']);
+```
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|------|------|------|------|------|
+| `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名（将成为数据根目录下的子目录）。 |
+| `columns` | 位置参数 2 | VARCHAR | 是 | 列定义字符串，如 `'symbol VARCHAR, date DATE, close DOUBLE'`。由 DuckDB SQL 解析器解析。 |
+| `groups` | 命名参数 | VARCHAR | 否 | 列→组映射。格式同 `aligned_upsert` 的 `mapping`。省略时所有非 key 列默认放 index。 |
+| `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root`。 |
+| `partition_template` | 命名参数 | VARCHAR | 否 | 分区模板，默认 `month=%Y-%m`。可选 `year=%Y` / `date=%Y-%m-%d`。 |
+
+**返回**：单行 `(dirs_created BIGINT, files_created BIGINT, txid BIGINT)`。
+
+**规则**：
+- 前两列必须 `(symbol VARCHAR, date DATE/TIMESTAMP)`（v8 主键契约）。
+- `groups` 格式：`"index:close;factor/alpha:alpha001"`。非 index 组名必须是 `lv1/lv2` 两级路径。
+- 创建 0 行占位 parquet（footer 携带 schema），Reader 可自动发现。
+
+```sql
+-- 建表（含列组映射）
+SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE, alpha001 DOUBLE',
+                             groups => 'index:close;factor/alpha:alpha001');
+
+-- 建表（所有列默认放 index）
+SELECT * FROM aligned_create('simple_tbl', 'symbol VARCHAR, date DATE, close DOUBLE');
+
+-- 指定分区模板
+SELECT * FROM aligned_create('ptbl', 'symbol VARCHAR, date DATE, close DOUBLE',
+                             groups => 'index:close',
+                             partition_template => 'date=%Y-%m-%d');
+```
 
 ### 4.1 `aligned_table` — 扫描逻辑表
 
@@ -510,6 +546,9 @@ idx_t NextTransactionId();
 | | `parts_after` | 合并后 part 文件总数 |
 | `aligned_drop` | `dirs_removed` | 删除的目录数（含分区子目录） |
 | | `files_removed` | 删除的 parquet 文件数 |
+| | `txid` | 事务 ID |
+| `aligned_create` | `dirs_created` | 创建的目录数（含表目录、组目录、分区目录） |
+| | `files_created` | 创建的 parquet 文件数（占位文件） |
 | | `txid` | 事务 ID |
 | `INSERT` (标准 SQL) | `Count` | 插入的行数 |
 | `UPDATE` (标准 SQL) | `Count` | 更新的行数 |

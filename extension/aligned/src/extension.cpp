@@ -1,6 +1,7 @@
 #include "aligned_extension.hpp"
 
 #include "catalog/aligned_catalog.hpp"
+#include "catalog/aligned_create_fn.hpp"
 #include "compaction/aligned_compactor.hpp"
 #include "compaction/aligned_drop.hpp"
 #include "duckdb/main/config.hpp"
@@ -84,6 +85,19 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	                              AlignedDropFunction, AlignedDropBind, AlignedDropInitGlobal, nullptr);
 	aligned_drop_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_drop_fn);
+
+	// aligned_create(table_name, columns, groups, root=..., partition_template=...)
+	// Create a new AlignedTable on disk. `columns` is a column-definition
+	// string (e.g. "symbol VARCHAR, date DATE, close DOUBLE"). `groups` is
+	// an optional column→group mapping. Returns (dirs_created, files_created,
+	// txid).
+	TableFunction aligned_create_fn("aligned_create",
+	                                {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                AlignedCreateFunction, AlignedCreateBind, AlignedCreateInitGlobal, nullptr);
+	aligned_create_fn.named_parameters["groups"] = LogicalType::VARCHAR;
+	aligned_create_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	aligned_create_fn.named_parameters["partition_template"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(aligned_create_fn);
 
 	// Phase 8: DuckLake-style storage extension. ATTACH '<root>' AS name
 	// (TYPE ALIGNED) creates a logical catalog over the parquet column groups:
