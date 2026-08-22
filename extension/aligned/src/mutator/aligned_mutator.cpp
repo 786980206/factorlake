@@ -61,358 +61,23 @@ static void ParseMapping(const string &mapping, const string &fn, case_insensiti
 	}
 }
 
-//===----------------------------------------------------------------------===//
-// Bind
-//===----------------------------------------------------------------------===//
+// NOTE: ResolveRoot + MutateBind (the SQL table-function bind path for the
+// former aligned_upsert / aligned_delete) were removed when those table
+// functions were deleted. The standard DML path (ATTACH + INSERT/UPDATE/DELETE)
+// calls AlignedUpsertFromCollection / AlignedDeleteFromCollection, whose bind
+// helpers BuildUpsertBindFromCollection / BuildDeleteBindFromCollection below
+// replicate the same binding logic but source schema from an in-memory
+// ColumnDataCollection instead of opening a parquet file.
 
-static void ResolveRoot(ClientContext &context, TableFunctionBindInput &input, const string &fn, string &root) {
-	auto entry = input.named_parameters.find("root");
-	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
-		root = StringValue::Get(entry->second);
-	} else {
-		Value setting_value;
-		if (!context.TryGetCurrentSetting("aligned_data_root", setting_value)) {
-			throw BinderException("%s: no data root configured. Pass root='...' or SET aligned_data_root", fn);
-		}
-		root = StringValue::Get(setting_value);
-	}
-}
+// NOTE: AlignedUpsertBind, AlignedDeleteBind, and MutateInitGlobal were removed
+// when the aligned_upsert / aligned_delete SQL table functions were deleted.
+// The standard DML path (ATTACH + INSERT/UPDATE/DELETE) calls
+// AlignedUpsertFromCollection / AlignedDeleteFromCollection directly, which in
+// turn call the file-local AlignedUpsertFunction / AlignedDeleteFunction below.
 
-static unique_ptr<FunctionData> MutateBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names,
-                                           bool is_delete) {
-	auto result = make_uniq<MutateBindData>();
-	result->is_delete = is_delete;
-	const char *fn = is_delete ? "aligned_delete" : "aligned_upsert";
-	size_t expected = is_delete ? 2 : 3;
-	if (!is_delete && input.inputs.size() == 2) {
-		expected = 2; // mapping is optional: auto-derive from the table schema
-	}
-	if (input.inputs.size() != expected) {
-		throw BinderException("%s: expected (%s)", fn,
-		                      is_delete ? "table_name, keys_source"
-		                                : "table_name, source_path [, mapping]");
-	}
-	result->table_name = StringValue::Get(input.inputs[0]);
-	result->source_path = StringValue::Get(input.inputs[1]);
-	string mapping_str = (is_delete || input.inputs.size() < 3) ? string() : StringValue::Get(input.inputs[2]);
-
-	string root;
-	ResolveRoot(context, input, fn, root);
-	auto &fs = FileSystem::GetFileSystem(context);
-	string table_dir = root + "/" + result->table_name;
-
-	// BuildTablePlan may return an empty plan (empty table: no parts at all).
-	// In that case the mutator creates the group structure from the mapping.
-	bool empty_table = !fs.DirectoryExists(table_dir) ||
-	                   fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY).empty();
-	if (empty_table) {
-		if (is_delete) {
-			throw BinderException("%s: the table '%s' is empty (no parts) — nothing to delete", fn,
-			                      result->table_name);
-		}
-	} else {
-		BuildTablePlan(context, root, result->table_name, result->plan);
-	}
-
-	result->empty_table = empty_table;
-	result->plan.table_path = table_dir;
-	result->plan.table_name = result->table_name;
-
-
-	// Resolve the group mapping (upsert only). When `mapping` is omitted the
-	// columns are auto-assigned to the group that already owns them (by name),
-	// so the user only needs to pass it for the first write of an empty table
-	// or to override the default placement.
-	case_insensitive_map_t<vector<string>> mapping;
-	if (!is_delete && !mapping_str.empty()) {
-		ParseMapping(mapping_str, fn, mapping);
-	}
-
-	// For an empty table (first write), create the group structure from the
-	// mapping. The mapping defines which Column Groups exist and their columns.
-	if (empty_table) {
-		if (mapping.empty()) {
-			throw BinderException("%s: mapping is required for the first write of an empty table "
-			                      "(it defines the Column Group structure); e.g. "
-			                      "'index:date,symbol,close;factor/alpha101:alpha001'",
-			                      fn);
-		}
-		// Create the index group first (must be groups[0]), then others.
-		auto index_it = mapping.find("index");
-		if (index_it == mapping.end()) {
-			throw BinderException("%s: the mapping must include an 'index' group (the primary key group)", fn);
-		}
-		{
-			GroupPlan gp;
-			gp.manifest.group = "index";
-			gp.group_path = table_dir + "/index";
-			result->plan.groups.push_back(std::move(gp));
-		}
-		for (auto &kv : mapping) {
-			if (StringUtil::CIEquals(kv.first, "index")) {
-				continue; // already added
-			}
-			GroupPlan gp;
-			gp.manifest.group = kv.first;
-			gp.group_path = table_dir + "/" + kv.first;
-			// Set lv1/lv2 from the group path
-			auto slash = kv.first.find('/');
-			if (slash != string::npos && kv.first.find('/', slash + 1) == string::npos) {
-				gp.lv1 = kv.first.substr(0, slash);
-				gp.lv2 = kv.first.substr(slash + 1);
-			}
-			result->plan.groups.push_back(std::move(gp));
-		}
-	}
-
-	result->group_mapping.resize(result->plan.groups.size());
-
-	// For a non-empty table, the mapping may name groups that don't exist yet
-	// (schema evolution: a new column group added in a later write). Materialize
-	// those groups so the mutator can write their first parts.
-	if (!empty_table && !mapping.empty()) {
-		for (auto &kv : mapping) {
-			bool found = false;
-			for (auto &g : result->plan.groups) {
-				if (StringUtil::CIEquals(g.manifest.group, kv.first)) {
-					found = true;
-					break;
-				}
-			}
-			if (!found) {
-				GroupPlan gp;
-				gp.manifest.group = kv.first;
-				gp.group_path = table_dir + "/" + kv.first;
-				auto slash = kv.first.find('/');
-				if (slash != string::npos && kv.first.find('/', slash + 1) == string::npos) {
-					gp.lv1 = kv.first.substr(0, slash);
-					gp.lv2 = kv.first.substr(slash + 1);
-				}
-				result->plan.groups.push_back(std::move(gp));
-				result->group_mapping.resize(result->plan.groups.size());
-			}
-		}
-	}
-
-	if (!is_delete) {
-		if (mapping_str.empty()) {
-			// Auto-derive: each source column → the group whose schema owns it.
-			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(result->source_path), ParquetOptions(context));
-			for (auto &col : reader->columns) {
-				for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
-					auto &group = result->plan.groups[gi];
-					bool owned = std::any_of(group.column_order.begin(), group.column_order.end(),
-					                         [&](const string &n) { return StringUtil::CIEquals(n, col.name); });
-					if (owned) {
-						result->group_mapping[gi].col_names.push_back(col.name);
-						break;
-					}
-				}
-			}
-		} else {
-			for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
-				auto &gm = result->group_mapping[gi];
-				auto &group = result->plan.groups[gi];
-				auto it = mapping.find(group.manifest.group);
-				if (it == mapping.end()) {
-					continue; // unmapped group (upsert: NULL rows)
-				}
-				gm.col_names = it->second;
-			}
-		}
-	}
-	// Every mapping entry must name a real group (typos fail fast instead of
-	// silently writing nothing for that group).
-	for (auto &kv : mapping) {
-		bool found = false;
-		for (auto &group : result->plan.groups) {
-			if (StringUtil::CIEquals(kv.first, group.manifest.group)) {
-				found = true;
-				break;
-			}
-		}
-		if (!found) {
-			throw BinderException("%s: unknown group '%s' in mapping", fn, kv.first);
-		}
-	}
-
-	// Primary key columns.
-	if (empty_table) {
-		if (is_delete) {
-			throw BinderException("%s: the table '%s' is empty (no index parts) — nothing to delete", fn,
-			                      result->table_name);
-		}
-		// First write: the index mapping's first two columns ARE the key
-		// (v8 contract: column 0 = symbol, column 1 = date).
-		auto &gm = result->group_mapping[0];
-		if (gm.col_names.size() < 2) {
-			throw BinderException("%s: the index group's mapping must have at least two columns (the primary key "
-			                      "symbol, date) for the first write",
-			                      fn);
-		}
-		// The types are only known from the source (no parts yet).
-		auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(result->source_path), ParquetOptions(context));
-		case_insensitive_map_t<LogicalType> source_schema;
-		for (auto &col : reader->columns) {
-			source_schema[col.name] = col.type;
-		}
-		// v8: column 0 = symbol, column 1 = date (DATE/TIMESTAMP).
-		auto sym_it = source_schema.find(gm.col_names[0]);
-		if (sym_it == source_schema.end()) {
-			throw BinderException("%s: column '%s' (index group) not found in source '%s'", fn, gm.col_names[0],
-			                      result->source_path);
-		}
-		auto date_it = source_schema.find(gm.col_names[1]);
-		if (date_it == source_schema.end()) {
-			throw BinderException("%s: column '%s' (index group) not found in source '%s'", fn, gm.col_names[1],
-			                      result->source_path);
-		}
-		if (date_it->second.id() != LogicalTypeId::DATE && date_it->second.id() != LogicalTypeId::TIMESTAMP) {
-			throw BinderException("%s: the index group's second mapping column must be DATE or TIMESTAMP "
-			                      "(the partition source); got '%s' of type %s",
-			                      fn, gm.col_names[1], EnumUtil::ToChars(date_it->second.id()));
-		}
-		result->date_col = gm.col_names[1];
-		result->symbol_col = gm.col_names[0];
-	} else {
-		auto &index_group = result->plan.groups[0];
-		result->date_col = index_group.partition_source;
-		result->symbol_col = index_group.symbol_column;
-		if (is_delete) {
-			// keys source must carry the key columns (matched by name)
-			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(result->source_path), ParquetOptions(context));
-			bool has_date = false, has_symbol = false;
-			for (auto &col : reader->columns) {
-				if (StringUtil::CIEquals(col.name, result->date_col)) {
-					has_date = true;
-				}
-				if (StringUtil::CIEquals(col.name, result->symbol_col)) {
-					has_symbol = true;
-				}
-			}
-			if (!has_date || !has_symbol) {
-				throw BinderException("%s: keys source '%s' must contain the primary key columns ('%s', '%s')", fn,
-				                      result->source_path, result->date_col, result->symbol_col);
-			}
-			result->source_rows = reader->NumRows();
-		} else {
-			// index mapping must include the key columns
-			auto &gm = result->group_mapping[0];
-			bool has_date = false, has_symbol = false;
-			for (auto &col : gm.col_names) {
-				if (StringUtil::CIEquals(col, result->date_col)) {
-					has_date = true;
-				}
-				if (StringUtil::CIEquals(col, result->symbol_col)) {
-					has_symbol = true;
-				}
-			}
-			if (!has_date || !has_symbol) {
-				throw BinderException("%s: the index group's mapping must include the primary key columns ('%s', "
-				                      "'%s')",
-				                      fn, result->date_col, result->symbol_col);
-			}
-		}
-	}
-
-	if (!is_delete) {
-		// Validate the source parquet: all mapped columns exist; the partition
-		// source column must be DATE or TIMESTAMP (v6 contract).
-		auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(result->source_path), ParquetOptions(context));
-		case_insensitive_map_t<LogicalType> source_schema;
-		for (auto &col : reader->columns) {
-			source_schema[col.name] = col.type;
-		}
-		for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
-			auto &gm = result->group_mapping[gi];
-			auto &group = result->plan.groups[gi];
-			// Mapped columns must be written with the types the group ALREADY
-			// stores (schema evolution / new partitions must not change a
-			// column's type across parts — the reader plan uses the last part's
-			// types). Fall back to the source types only on the first write,
-			// when the group has no schema yet.
-			case_insensitive_map_t<LogicalType> group_types;
-			for (idx_t ci = 0; ci < group.column_order.size(); ci++) {
-				group_types[group.column_order[ci]] = group.schema_types[ci];
-			}
-			for (auto &col : gm.col_names) {
-				auto it = source_schema.find(col);
-				if (it == source_schema.end()) {
-					throw BinderException("%s: column '%s' (group '%s') not found in source '%s'", fn, col,
-					                      result->plan.groups[gi].manifest.group, result->source_path);
-				}
-				auto git = group_types.find(col);
-				gm.col_types.push_back(git != group_types.end() ? git->second : it->second);
-			}
-			// Only the index group maps the partition source column.
-			if (gi == 0) {
-				auto it = source_schema.find(result->date_col);
-				if (it == source_schema.end()) {
-					throw BinderException("%s: partition column '%s' not found in source '%s'", fn, result->date_col,
-					                      result->source_path);
-				}
-				if (it->second.id() != LogicalTypeId::DATE && it->second.id() != LogicalTypeId::TIMESTAMP) {
-					throw BinderException("%s: partition column '%s' must be DATE or TIMESTAMP (got %s)", fn,
-					                      result->date_col, it->second.ToString());
-				}
-			}
-		}
-		result->source_rows = reader->NumRows();
-	}
-
-	// Needed source columns: all mapped columns (+ the key columns for delete).
-	{
-		case_insensitive_map_t<idx_t> needed_pos;
-		for (idx_t gi = 0; gi < result->plan.groups.size(); gi++) {
-			auto &gm = result->group_mapping[gi];
-			for (idx_t c = 0; c < gm.col_names.size(); c++) {
-				auto it = needed_pos.find(gm.col_names[c]);
-				if (it == needed_pos.end()) {
-				needed_pos[gm.col_names[c]] = result->needed_names.size();
-				result->needed_names.push_back(gm.col_names[c]);
-				}
-				gm.src_pos.push_back(needed_pos[gm.col_names[c]]);
-			}
-		}
-		if (is_delete) {
-			// the keys source's two columns
-			auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(result->source_path), ParquetOptions(context));
-			for (auto &col : reader->columns) {
-				if (StringUtil::CIEquals(col.name, result->date_col) ||
-				    StringUtil::CIEquals(col.name, result->symbol_col)) {
-					needed_pos[col.name] = result->needed_names.size();
-					result->needed_names.push_back(col.name);
-				}
-			}
-		}
-	}
-
-	if (is_delete) {
-		result->types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
-		result->names = {"rows_deleted", "parts_rewritten", "txid"};
-	} else {
-		result->types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
-		result->names = {"rows_inserted", "rows_updated", "parts_rewritten", "txid"};
-	}
-	return_types = result->types;
-	names = result->names;
-	return std::move(result);
-}
-
-unique_ptr<FunctionData> AlignedUpsertBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
-	return MutateBind(context, input, return_types, names, false);
-}
-
-unique_ptr<FunctionData> AlignedDeleteBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
-	return MutateBind(context, input, return_types, names, true);
-}
-
-unique_ptr<GlobalTableFunctionState> MutateInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
-	return make_uniq<MutateGlobalState>();
-}
+// Forward declarations for the file-local function bodies (defined later).
+static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
+static void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
 
 //! Builds a MutateBindData for upsert, using an in-memory ColumnDataCollection
 //! as the source instead of a parquet file. This replicates the logic of
@@ -1226,10 +891,10 @@ static string IndexTemplate(const MutateBindData &bind) {
 }
 
 //===----------------------------------------------------------------------===//
-// aligned_upsert
+// AlignedUpsertFunction (file-local — called by AlignedUpsertFromCollection)
 //===----------------------------------------------------------------------===//
 
-void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind = data.bind_data->Cast<MutateBindData>();
 	auto &gstate = data.global_state->Cast<MutateGlobalState>();
 	if (gstate.done) {
@@ -1593,10 +1258,10 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 }
 
 //===----------------------------------------------------------------------===//
-// aligned_delete
+// AlignedDeleteFunction (file-local — called by AlignedDeleteFromCollection)
 //===----------------------------------------------------------------------===//
 
-void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+static void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind = data.bind_data->Cast<MutateBindData>();
 	auto &gstate = data.global_state->Cast<MutateGlobalState>();
 	if (gstate.done) {

@@ -1,7 +1,7 @@
-# bench_write.ps1 - Write-path benchmark: aligned upsert vs DuckDB-native parquet rewrite
+# bench_write.ps1 - Write-path benchmark: aligned DML vs DuckDB-native parquet rewrite
 #
 # Measures the cost of applying a batch of changes to an EXISTING table:
-#   aligned : aligned_upsert (only affected parts rewritten, atomic commit)
+#   aligned : ATTACH + standard INSERT/UPDATE (only affected parts rewritten, atomic commit)
 #   native  : DuckDB standard approach - read base parquet + apply batch in SQL
 #             + COPY TO a fresh parquet file (full dataset rewrite), then swap.
 #
@@ -18,62 +18,48 @@ $oc = $env:TEMP
 New-Item -ItemType Directory -Force -Path $oc | Out-Null
 
 $root = 'D:/proj/factorlake/testdata/bench_write'
-$baseRows = 600000   # existing rows in the table
-$day = '2026-05-01'  # all base rows in ONE partition month=2026-05 (worst case for aligned update: single part)
+$day = '2026-05-01'
+$baseRows = 1000000
 
-# ---- fresh workspace ---------------------------------------------------------
-Remove-Item $root.Replace('/', '\') -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
-
-function Run-SqlFile([string]$path) {
-    cmd /c "`"$duckdb`" -unsigned < `"$path`"" 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sql failed: $path" }
+function Run-SqlFile($path) {
+    $out = cmd /c "`"$duckdb`" -unsigned -csv -noheader < `"$path`"" 2>&1
+    return $out
 }
-function Timed-Run([string]$sql, [string]$tag) {
-    $f = Join-Path $oc ("w_" + [guid]::NewGuid().ToString('N') + ".sql")
+
+function Timed-Run($sql, $label) {
+    $f = Join-Path $env:TEMP ("bt_" + [guid]::NewGuid().ToString('N') + ".sql")
     Set-Content -Path $f -Value $sql -Encoding Ascii
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    cmd /c "`"$duckdb`" -unsigned < `"$f`"" 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "timed run failed: $tag" }
+    Run-SqlFile $f | Out-Null
     $sw.Stop()
     Remove-Item $f -Force -ErrorAction SilentlyContinue
     return $sw.Elapsed.TotalSeconds
 }
 
-$results = [System.Collections.Generic.List[string]]::new()
-$results.Add("scenario,batch,engine,seconds")
+$results = [System.Collections.ArrayList]@("scenario,batch,engine,seconds")
 
 foreach ($batch in 1000, 10000, 100000) {
 
     # ================= scenario A: APPEND batch new keys =====================
-    # --- aligned: reset table to base state, then one aligned_upsert ---
-    Remove-Item "$root/aligned/t" -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
-    # base data via one big upsert (setup, not timed)
+    # --- aligned: reset table, then INSERT batch ---
+    Remove-Item "$root/aligned" -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path "$root/aligned" | Out-Null
+    # base data via aligned_create + INSERT (setup, not timed)
     $setupA = @"
 SET aligned_data_root='$root/aligned';
-COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, i::DOUBLE AS v FROM range($baseRows) t(i))
-  TO '$root/base_a.parquet' (FORMAT PARQUET);
-SELECT * FROM aligned_upsert('t','$root/base_a.parquet','index:symbol,date,v');
+SELECT * FROM aligned_create('t', 'symbol VARCHAR, date DATE, v DOUBLE', groups => 'index:v');
+ATTACH '$root/aligned' AS al (TYPE ALIGNED);
+INSERT INTO al.t SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, i::DOUBLE AS v FROM range($baseRows) t(i);
 "@
     $sf = Join-Path $oc ("ws_" + [guid]::NewGuid().ToString('N') + ".sql")
     Set-Content -Path $sf -Value $setupA -Encoding Ascii
     Run-SqlFile $sf
 
-    # batch staging parquet (new keys, next day partition)
     $batchStart = $baseRows
-    $setupB = @"
-COPY (SELECT FORMAT('{:07d}', ${batchStart} + i) AS symbol, DATE '2026-06-01' AS date, (${batchStart}+i)::DOUBLE AS v
-      FROM range(${batch}) t(i)) TO '$root/batch_a.parquet' (FORMAT PARQUET);
-"@
-    $bf = Join-Path $oc ("wb_" + [guid]::NewGuid().ToString('N') + ".sql")
-    Set-Content -Path $bf -Value $setupB -Encoding Ascii
-    Run-SqlFile $bf
-    Remove-Item $bf -Force -ErrorAction SilentlyContinue
-
     $alignedSql = @"
 SET aligned_data_root='$root/aligned';
-SELECT * FROM aligned_upsert('t','$root/batch_a.parquet','index:symbol,date,v');
+ATTACH '$root/aligned' AS al (TYPE ALIGNED);
+INSERT INTO al.t SELECT FORMAT('{:07d}', ${batchStart} + i) AS symbol, DATE '2026-06-01' AS date, (${batchStart}+i)::DOUBLE AS v FROM range(${batch}) t(i);
 "@
     $tAligned = Timed-Run $alignedSql "append-aligned-$batch"
     $results.Add("append,$batch,aligned,$('{0:F3}' -f $tAligned)")
@@ -98,23 +84,15 @@ COPY (
     Write-Host ("append  batch={0,-6} aligned={1,7:F3}s  native={2,7:F3}s" -f $batch, $tAligned, $tNative)
 
     # ================= scenario U: UPDATE half the base rows =================
-    # --- aligned: same-key upsert with new values ---
-    Remove-Item "$root/aligned/t" -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path "$root/aligned/t" | Out-Null
+    # --- aligned: same-key UPDATE with new values ---
+    Remove-Item "$root/aligned" -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path "$root/aligned" | Out-Null
     Run-SqlFile $sf   # rebuild base (same setupA)
     $updKeys = [long]($baseRows / 2)
-    $setupU = @"
-COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, 999.0::DOUBLE AS v
-      FROM range(${updKeys}) t(i)) TO '$root/upd.parquet' (FORMAT PARQUET);
-"@
-    $uf = Join-Path $oc ("wu_" + [guid]::NewGuid().ToString('N') + ".sql")
-    Set-Content -Path $uf -Value $setupU -Encoding Ascii
-    Run-SqlFile $uf
-    Remove-Item $uf -Force -ErrorAction SilentlyContinue
-
     $upsertSql = @"
 SET aligned_data_root='$root/aligned';
-SELECT * FROM aligned_upsert('t','$root/upd.parquet','index:symbol,date,v');
+ATTACH '$root/aligned' AS al (TYPE ALIGNED);
+UPDATE al.t SET v = 999.0 WHERE symbol IN (SELECT FORMAT('{:07d}', i) FROM range(${updKeys}) t(i));
 "@
     $tAligned2 = Timed-Run $upsertSql "update-aligned-$batch"
     $results.Add("update,$updKeys,aligned,$('{0:F3}' -f $tAligned2)")
@@ -126,22 +104,22 @@ SELECT * FROM aligned_upsert('t','$root/upd.parquet','index:symbol,date,v');
     $nativeSql2 = @"
 COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, i::DOUBLE AS v FROM range($baseRows) t(i))
   TO '$root/native/t.parquet' (FORMAT PARQUET);
-COPY (SELECT FORMAT('{:07d}', i) AS symbol, DATE '$day' AS date, 999.0::DOUBLE AS v
-      FROM range(${updKeys}) t(i)) TO '$root/native/upd.parquet' (FORMAT PARQUET);
 CREATE TEMP TABLE merged AS
   SELECT b.symbol, b.date, COALESCE(u.v, b.v) AS v
   FROM read_parquet('$root/native/t.parquet') b
-  LEFT JOIN read_parquet('$root/native/upd.parquet') u
-    ON b.date = u.date AND b.symbol = u.symbol;
-COPY (SELECT symbol, date, v FROM merged) TO '$root/native/t_new.parquet' (FORMAT PARQUET);
+  LEFT JOIN (SELECT FORMAT('{:07d}', i) AS symbol, 999.0::DOUBLE AS v FROM range(${updKeys}) t(i)) u
+  ON b.symbol = u.symbol;
+COPY (SELECT * FROM merged) TO '$root/native/t_new.parquet' (FORMAT PARQUET);
 "@
-    $tNative2 = Timed-Run $nativeSql2 "update-native-$updKeys"
+    $tNative2 = Timed-Run $nativeSql2 "update-native-$batch"
     $results.Add("update,$updKeys,native,$('{0:F3}' -f $tNative2)")
 
-    Write-Host ("update  keys={0,-6} aligned={1,7:F3}s  native={2,7:F3}s" -f $updKeys, $tAligned2, $tNative2)
+    Write-Host ("update  batch={0,-6} aligned={1,7:F3}s  native={2,7:F3}s" -f $updKeys, $tAligned2, $tNative2)
+
     Remove-Item $sf -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host ''
-Write-Host "==== RESULTS ===="
-$results | ForEach-Object { Write-Host $_ }
+# Write results CSV
+$csv = Join-Path $root 'bench_results.csv'
+$results | Out-File -FilePath $csv -Encoding UTF8
+Write-Host "`nResults written to $csv"

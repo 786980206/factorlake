@@ -142,11 +142,14 @@ AlignedTableScan
 
 ```
 aligned_create(table, columns, groups=..., root=..., partition_template=...)  → (dirs_created, files_created, txid)
-aligned_upsert(table, source, mapping, root=...)  → (rows_inserted, rows_updated, parts_rewritten, txid)
-aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewritten, txid)
 aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
 aligned_drop(table, group_name, root=...)         → (dirs_removed, files_removed, txid)
 ```
+
+- **标准 DML**：ATTACH 后直接用 `INSERT` / `UPDATE` / `DELETE` 操作
+  `al.<table>`，内部通过 `AlignedUpsertFromCollection` /
+  `AlignedDeleteFromCollection` 直写 parquet 列组。`aligned_upsert` /
+  `aligned_delete` 表函数已删除——标准 DML 完全替代。
 
 - **v8 mutator**：按主键 `(symbol, date)` 插入/更新/删除，只重写受影响 part。
   删除逻辑：删空单 part 分区 → 整分区移除；删空多 part 分区最高索引 part →
@@ -249,8 +252,8 @@ extension/aligned/src/
 
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
-- PS 脚本：test_aligned 42/42、test_upsert 50/50、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 144/144 + 5 PS 套件全 PASS
+- PS 脚本：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
+- 当前总：SQLLogicTest 144/144 + 4 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`

@@ -150,43 +150,6 @@ struct MutateGlobalState : public GlobalTableFunctionState {
 	idx_t txid = 0;
 };
 
-//! aligned_upsert(table_name, source_path, mapping, root=...)
-//! v7: upsert rows into an AlignedTable from a source parquet file.
-//!  - mapping: "group:col1,col2;group2:col3,..." — which source columns each
-//!    column group receives (the index group's mapping must include the
-//!    primary key columns (date, symbol); on an empty table the first two
-//!    index mapping columns ARE the primary key)
-//!  - rows are placed by primary key (date, symbol): a key that exists is
-//!    UPDATED (only the mapped columns are overwritten, everything else keeps
-//!    its value); a new key is INSERTED at its sorted position (partition by
-//!    date, symbol ascending within a partition — v7 sort contract)
-//!  - partial writes: groups not in the mapping receive NULL rows (when their
-//!    part exists) or nothing (when the partition/part is missing — the
-//!    reader NULL-fills); a new partition creates fresh parts only in mapped
-//!    groups
-//!  - all affected parts are rewritten atomically under
-//!    <table>/_tmp/transaction-<txid>/ and committed by moving parts into place
-//! Returns one row: (rows_inserted, rows_updated, parts_rewritten, txid).
-unique_ptr<FunctionData> AlignedUpsertBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names);
-
-//! aligned_delete(table_name, keys_source, root=...)
-//! v7: deletes rows by primary key from an AlignedTable. The keys source is a
-//! parquet file with the (date, symbol) columns (matched by name). Deleting a
-//! non-existent key is a no-op (idempotent). Every group with the affected
-//! partition loses the same rows (row counts must stay aligned). Deleting all
-//! rows of a multi-part partition is rejected; deleting the last part of a
-//! single-part partition removes the partition from every group.
-//! Returns one row: (rows_deleted, parts_rewritten, txid).
-unique_ptr<FunctionData> AlignedDeleteBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names);
-
-unique_ptr<GlobalTableFunctionState> MutateInitGlobal(ClientContext &context, TableFunctionInitInput &input);
-
-void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
-
-void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output);
-
 //! Internal API: upsert directly from an in-memory ColumnDataCollection,
 //! bypassing the temp-parquet file. Used by PhysicalAlignedInsert to avoid
 //! the double-write (buffer → temp parquet → aligned_upsert reads it back).

@@ -4,14 +4,13 @@
 # Self-contained: creates its own upserttest table with gen_testdata-style data.
 # All DML must run in one duckdb process (ATTACH is session-scoped).
 
-# --- setup: staging parquet ---
+# --- setup: create upserttest table with column groups ---
 statement ok
-COPY (WITH r AS (SELECT range AS r FROM range(0, 100)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-09-10' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001 FROM r) TO '{TEST_DIR}/dml_stage.parquet' (FORMAT PARQUET)
+SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT * FROM aligned_create('upserttest', 'symbol VARCHAR, date DATE, close DOUBLE, rowid BIGINT, rowid_alpha BIGINT, rowid_ma BIGINT, ma5 DOUBLE, alpha001 DOUBLE', groups => 'index:close,rowid;factor/alpha101:rowid_alpha,alpha001;fieldset/ma:rowid_ma,ma5')
 
-# --- setup: create upserttest table (empty, first write populates it) ---
-
+# --- setup: insert 100 rows of test data ---
 statement ok
-SET aligned_data_root='{TEST_DIR}/dml_data'; SELECT rows_inserted, rows_updated FROM aligned_upsert('upserttest', '{TEST_DIR}/dml_stage.parquet', 'index:symbol,date,close,rowid;factor/alpha101:rowid_alpha,alpha001;fieldset/ma:rowid_ma,ma5')
+SET aligned_data_root='{TEST_DIR}/dml_data'; ATTACH '{TEST_DIR}/dml_data' AS al (TYPE ALIGNED); INSERT INTO al.upserttest SELECT printf('%06d', r + 1) AS symbol, DATE '2026-09-10' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST(r AS BIGINT) AS rowid, CAST(r AS BIGINT) AS rowid_alpha, CAST(r AS BIGINT) AS rowid_ma, CAST((r % 20) * 0.1 AS DOUBLE) AS ma5, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001 FROM (SELECT range AS r FROM range(0, 100)) t
 
 # --- ATTACH + INSERT + verify (all in one batch) ---
 query RRR

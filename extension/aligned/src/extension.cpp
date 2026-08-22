@@ -7,7 +7,6 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "mutator/aligned_mutator.hpp"
 #include "scan/aligned_scan.hpp"
 
 namespace duckdb {
@@ -49,25 +48,6 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	db.config.AddExtensionOption("aligned_data_root", "Root directory for AlignedTable logical tables",
 	                             LogicalType::VARCHAR);
-
-	// aligned_upsert(table_name, source_path, mapping, root=...)
-	// v8: upsert rows by primary key (symbol, date) from a source parquet file.
-	// An existing key is UPDATED (only the mapped columns are overwritten), a
-	// new key is INSERTED at its sorted position. Returns
-	// (rows_inserted, rows_updated, parts_rewritten, txid).
-	TableFunction aligned_upsert_fn("aligned_upsert", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AlignedUpsertFunction,
-	                                AlignedUpsertBind, MutateInitGlobal, nullptr);
-	aligned_upsert_fn.varargs = LogicalType::VARCHAR; // mapping (3rd arg) is optional (auto-derived)
-	aligned_upsert_fn.named_parameters["root"] = LogicalType::VARCHAR;
-	loader.RegisterFunction(aligned_upsert_fn);
-
-	// aligned_delete(table_name, keys_source, root=...)
-	// v8: delete rows by primary key (symbol, date). Non-existent keys are
-	// skipped (idempotent). Returns (rows_deleted, parts_rewritten, txid).
-	TableFunction aligned_delete_fn("aligned_delete", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                                AlignedDeleteFunction, AlignedDeleteBind, MutateInitGlobal, nullptr);
-	aligned_delete_fn.named_parameters["root"] = LogicalType::VARCHAR;
-	loader.RegisterFunction(aligned_delete_fn);
 
 	// aligned_compact(table_name, group_name, root=...)
 	// Phase 7: merge a group's parts per partition directory (atomic switch)

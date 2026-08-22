@@ -144,7 +144,7 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 ## 4. 表函数 API
 
-除了标准 SQL DML，还提供 7 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+除了标准 SQL DML，还提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
 ### 4.0 `aligned_create` — 建表
 
@@ -157,7 +157,7 @@ SELECT * FROM aligned_create(table_name, columns [, groups => '...'] [, root => 
 |------|------|------|------|------|
 | `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名（将成为数据根目录下的子目录）。 |
 | `columns` | 位置参数 2 | VARCHAR | 是 | 列定义字符串，如 `'symbol VARCHAR, date DATE, close DOUBLE'`。由 DuckDB SQL 解析器解析。 |
-| `groups` | 命名参数 | VARCHAR | 否 | 列→组映射。格式同 `aligned_upsert` 的 `mapping`。省略时所有非 key 列默认放 index。 |
+| `groups` | 命名参数 | VARCHAR | 否 | 列→组映射。格式 `"index:close;factor/alpha:alpha001"`。省略时所有非 key 列默认放 index。 |
 | `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root`。 |
 | `partition_template` | 命名参数 | VARCHAR | 否 | 分区模板，默认 `month=%Y-%m`。可选 `year=%Y` / `date=%Y-%m-%d`。 |
 
@@ -221,60 +221,7 @@ SELECT * FROM aligned_scan(root, table_name);
 SELECT * FROM aligned_scan('D:/data/factorlake', 'cnstk_ixday') WHERE date = DATE '2026-08-17';
 ```
 
-### 4.3 `aligned_upsert` — 插入/更新
-
-```sql
-SELECT * FROM aligned_upsert(table_name, source_path [, mapping, ...] [, root => '...']);
-```
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|------|------|------|------|------|
-| `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名。 |
-| `source_path` | 位置参数 2 | VARCHAR | 是 | 源数据 Parquet 文件路径。文件的列名需与表 schema 匹配。 |
-| `mapping` | 位置参数 3+ | VARCHAR (变长) | 否 | 列→组映射字符串。格式见下。省略时按列名自动推断。 |
-| `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root`。 |
-
-**mapping 格式**：`"group:col1,col2;group2:col3,..."`
-
-```
-index:close,volume;factor/alpha:alpha001,alpha002
-```
-
-- `index` 组必须包含主键列（symbol, date）。
-- 非 index 组名必须是 `lv1/lv2` 两级路径。
-- 未列出的列默认归入 index 组。
-
-**返回**：单行 `(rows_inserted BIGINT, rows_updated BIGINT, parts_rewritten BIGINT, txid BIGINT)`。
-
-```sql
-SELECT * FROM aligned_upsert(
-  'cnstk_ixday',
-  'D:/data/new_rows.parquet',
-  'index:symbol,date,close;factor/alpha:alpha001',
-  root => 'D:/data/factorlake'
-);
--- 结果: 1500, 300, 12, 7
-```
-
-### 4.4 `aligned_delete` — 按主键删除
-
-```sql
-SELECT * FROM aligned_delete(table_name, keys_source [, root => '...']);
-```
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|------|------|------|------|------|
-| `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名。 |
-| `keys_source` | 位置参数 2 | VARCHAR | 是 | 包含待删除主键的 Parquet 文件路径。文件需有 `(symbol VARCHAR, date DATE)` 两列。 |
-| `root` | 命名参数 | VARCHAR | 否 | 数据根目录。 |
-
-**返回**：单行 `(rows_deleted BIGINT, parts_rewritten BIGINT, txid BIGINT)`。
-
-```sql
-SELECT * FROM aligned_delete('cnstk_ixday', 'D:/data/keys_to_delete.parquet');
-```
-
-### 4.5 `aligned_compact` — 合并 part 碎片
+### 4.3 `aligned_compact` — 合并 part 碎片
 
 ```sql
 SELECT * FROM aligned_compact(table_name, group_name [, root => '...']);
@@ -296,7 +243,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha001');
 SELECT * FROM aligned_compact('cnstk_ixday', 'all');
 ```
 
-### 4.6 `aligned_drop` — 删除列组或整表
+### 4.4 `aligned_drop` — 删除列组或整表
 
 ```sql
 SELECT * FROM aligned_drop(table_name, group_name [, root => '...']);
@@ -372,39 +319,7 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 - 可通过 `SET aligned_data_root` 设为默认值，避免每次传参。
 - 在 ATTACH 模式下，`root` 就是 ATTACH 路径，无需单独指定。
 
-### 6.3 `source_path`（源数据文件）
-
-- 类型：VARCHAR
-- 含义：`aligned_upsert` 的源数据 Parquet 文件路径。
-- 要求：文件列名需与目标表的列名匹配（或通过 `mapping` 指定映射）。
-- 主键列（symbol, date）必须存在且非 NULL。
-
-### 6.4 `mapping`（列→组映射）
-
-- 类型：VARCHAR（可传多个，分号分隔或作为变长参数）
-- 格式：`"group1:col1,col2;group2:col3,col4"`
-- 规则：
-  - `index` 组必须包含主键列。
-  - 非 index 组名格式为 `lv1/lv2`（如 `factor/alpha101`）。
-  - 未列出的列默认归入 `index` 组。
-  - 省略时按列名自动推断（已有表的场景）。
-- 示例：
-  ```sql
-  -- 单个映射字符串
-  SELECT * FROM aligned_upsert('mytable', 'data.parquet', 'index:symbol,date,close;factor/alpha:alpha001');
-
-  -- 多个映射参数（自动拼接）
-  SELECT * FROM aligned_upsert('mytable', 'data.parquet', 'index:symbol,date,close', 'factor/alpha:alpha001');
-  ```
-
-### 6.5 `keys_source`（删除主键文件）
-
-- 类型：VARCHAR
-- 含义：`aligned_delete` 的主键文件路径。
-- 要求：Parquet 文件，恰好两列 `(symbol VARCHAR, date DATE)`。
-- 不存在的主键被静默跳过（幂等）。
-
-### 6.6 `group_name`（合并/删除目标组名）
+### 6.3 `group_name`（合并/删除目标组名）
 
 - 类型：VARCHAR
 - 含义：`aligned_compact` 和 `aligned_drop` 的目标列组名。
@@ -412,13 +327,13 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 - `aligned_drop` 特殊值 `'index'`：删除整张表（所有列组 + 表目录）。
 - 组名格式：`index` / `factor/alpha101` / `fieldset/ma` 等。
 
-### 6.7 WITH 子句参数（CREATE TABLE）
+### 6.4 WITH 子句参数（CREATE TABLE）
 
 CREATE TABLE 的 `WITH (...)` 子句支持以下选项：
 
 | 选项 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `groups` | VARCHAR | 空（所有列归 index） | 列→组映射。格式同 `mapping` 参数。 |
+| `groups` | VARCHAR | 空（所有列归 index） | 列→组映射。格式 `"index:close;factor/alpha:alpha001"`。 |
 | `partition_template` | VARCHAR | `month=%Y-%m` | 分区模板。可选 `year=%Y` / `month=%Y-%m` / `date=%Y-%m-%d`。 |
 | `partition` | VARCHAR | 空 | 创建空分区时指定分区键。如 `month=2026-10`。仅用于已有表。 |
 
@@ -534,13 +449,6 @@ idx_t NextTransactionId();
 
 | 函数 | 返回列 | 含义 |
 |------|--------|------|
-| `aligned_upsert` | `rows_inserted` | 新插入的主键行数 |
-| | `rows_updated` | 更新的已有主键行数 |
-| | `parts_rewritten` | 重写的 part 文件数 |
-| | `txid` | 事务 ID（暂存目录名） |
-| `aligned_delete` | `rows_deleted` | 删除的主键行数 |
-| | `parts_rewritten` | 重写/移除的 part 文件数 |
-| | `txid` | 事务 ID |
 | `aligned_compact` | `dirs_compacted` | 合并的分区目录数 |
 | | `parts_before` | 合并前 part 文件总数 |
 | | `parts_after` | 合并后 part 文件总数 |

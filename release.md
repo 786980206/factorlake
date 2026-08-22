@@ -340,3 +340,27 @@ SELECT * FROM aligned_create('mytable', 'symbol VARCHAR, date DATE, close DOUBLE
 - 新增文件：`catalog/aligned_create_fn.{cpp,hpp}`（~130 行）。
 - 新增测试：`test/aligned/aligned_create_fn.test`（9 个断言）。
 - 修复 `aligned_drop.cpp` 中 `CountRecursive` 未跳过 `.aligned_write.lock` 的 bug。
+
+## v0.14-remove-upsert-delete — 删除 aligned_upsert / aligned_delete 表函数
+
+标准 DML（ATTACH + INSERT/UPDATE/DELETE）已完全替代 `aligned_upsert` 和
+`aligned_delete` 表函数，故将其删除：
+
+- **删除 SQL 表函数注册**：`extension.cpp` 中 `aligned_upsert` / `aligned_delete`
+  的 `TableFunction` 注册块已移除。
+- **删除表函数入口**：`AlignedUpsertFunction` / `AlignedDeleteFunction` /
+  `AlignedUpsertBind` / `AlignedDeleteBind` / `MutateInitGlobal` 从头文件和
+  `.cpp` 中移除（或改为 file-local static，若被 `*FromCollection` 内部调用）。
+- **保留内部 C++ API**：`AlignedUpsertFromCollection` / `AlignedDeleteFromCollection`
+  仍保留——标准 DML 的物理算子（`PhysicalAlignedInsert` /
+  `PhysicalAlignedDelete`）通过它们直写 parquet 列组。
+- **删除测试**：`test_upsert.ps1`（50 断言）、`test/aligned/aligned_upsert.test`
+  （SQLLogicTest）已删除——它们测的是表函数本身。
+- **修改测试**：`test/aligned/aligned_dml.test` 的 setup 从 `aligned_upsert`
+  改为 `aligned_create` + `INSERT ... SELECT`。
+- **修改 benchmark**：`bench_write.ps1` 从 `aligned_upsert` 改为 `ATTACH` +
+  标准 `INSERT`/`UPDATE`。
+- **更新文档**：`docs/API.md` 删除 §4.3/§4.4（aligned_upsert/aligned_delete）、
+  §6.3/§6.4/§6.5（source_path/mapping/keys_source 参数）、附录返回值表对应行，
+  表函数数量从 7 改为 5；`AGENTS.md` §7 删除两个函数签名并标注"已删除"。
+- 当前总：SQLLogicTest 144/144 + 4 PS 套件全 PASS。
