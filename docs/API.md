@@ -7,17 +7,103 @@
 
 ## 目录
 
-1. [快速开始](#1-快速开始)
-2. [ATTACH 挂载](#2-attach-挂载)
-3. [增删改查（标准 SQL）](#3-增删改查标准-sql)
-4. [表函数 API](#4-表函数-api)
-5. [配置项](#5-配置项)
-6. [参数详解](#6-参数详解)
-7. [C++ 内部 API（供扩展开发者）](#7-c-内部-api供扩展开发者)
+1. [扩展安装与加载](#1-扩展安装与加载)
+2. [快速开始](#2-快速开始)
+3. [ATTACH 挂载](#3-attach-挂载)
+4. [增删改查（标准 SQL）](#4-增删改查标准-sql)
+5. [表函数 API](#5-表函数-api)
+6. [配置项](#6-配置项)
+7. [参数详解](#7-参数详解)
+8. [C++ 内部 API（供扩展开发者）](#8-c-内部-api供扩展开发者)
 
 ---
 
-## 1. 快速开始
+## 1. 扩展安装与加载
+
+AlignedTable 扩展是一个 unsigned 的 DuckDB 扩展二进制文件（`.duckdb_extension`），
+基于 DuckDB **v1.5.4** 构建。加载时强校验 DuckDB 版本，必须与构建版本一致。
+
+### 1.1 获取扩展二进制
+
+- **GitHub Release 下载**：从项目的 GitHub Release 页面下载对应平台的
+  `aligned.duckdb_extension` 文件。
+- **本地构建**：见 `docs/EXTENSION_RELEASE.md`，使用
+  `-DEXTENSION_STATIC_BUILD=1` 构建产出自包含的二进制（约 24MB）。
+
+### 1.2 在 DuckDB CLI 中加载
+
+扩展未签名，需通过 `-unsigned` 标志或 `allow_unsigned_extensions` 设置启用。
+
+**方式 A：直接 LOAD 本地文件（无需 INSTALL）**
+
+```bash
+# 方式 A1：通过 -unsigned 标志（CLI 专用）
+duckdb -unsigned -c "LOAD '/path/to/aligned.duckdb_extension';"
+duckdb -unsigned -c "LOAD '/path/to/aligned.duckdb_extension'; SELECT * FROM aligned_scan('mytable');"
+```
+
+```sql
+-- 方式 A2：在 SQL 会话中直接 LOAD 完整路径
+LOAD '/path/to/aligned.duckdb_extension';
+SET aligned_data_root = '/data';
+SELECT * FROM aligned_scan('mytable');
+```
+
+**方式 B：INSTALL 到本地缓存 + LOAD 短名**
+
+```bash
+# 安装（下载或复制到 ~/.duckdb/extensions/v1.5.4/<platform>/）
+duckdb -unsigned -c "INSTALL '/path/to/aligned.duckdb_extension';"
+# 之后可用短名加载（无需再传路径）
+duckdb -unsigned -c "LOAD aligned; SELECT * FROM aligned_scan('mytable');"
+```
+
+```sql
+-- 在 SQL 会话中
+INSTALL '/path/to/aligned.duckdb_extension';
+LOAD aligned;   -- 之后扩展名 = 文件 base name（即 "aligned"）
+SET aligned_data_root = '/data';
+SELECT * FROM aligned_scan('mytable');
+```
+
+> **注意**：
+> - `INSTALL` 会将扩展复制到 DuckDB 本地缓存目录
+>   （`~/.duckdb/extensions/<version>/<platform>/`）。
+> - 更新扩展时用 `FORCE INSTALL '/path/to/aligned.duckdb_extension';` 覆盖旧版本。
+> - CLI 版本必须为 v1.5.4（与扩展构建版本一致），否则加载时报版本不匹配错误。
+
+### 1.3 在 Python（duckdb 库）中加载
+
+```python
+import duckdb
+
+# 必须在连接时设置 allow_unsigned_extensions（运行中不可更改）
+con = duckdb.connect(config={'allow_unsigned_extensions': True})
+
+# 方式 A：直接 LOAD 完整路径
+con.execute("LOAD '/path/to/aligned.duckdb_extension';")
+
+# 方式 B：INSTALL 到缓存 + LOAD 短名
+con.execute("INSTALL '/path/to/aligned.duckdb_extension';")
+con.execute("LOAD aligned;")
+
+# 使用
+con.execute("SET aligned_data_root = '/data';")
+con.execute("SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE');").fetchall()
+
+# ATTACH + 标准 DML
+con.execute("ATTACH '/data' AS al (TYPE ALIGNED);")
+con.execute("INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5);")
+print(con.execute("SELECT * FROM al.mytable;").fetchall())
+con.execute("DETACH al;")
+```
+
+> **版本要求**：Python duckdb 库版本必须与扩展构建版本一致（v1.5.4）。
+> 使用 `pip install duckdb==1.5.4` 安装匹配版本。
+
+---
+
+## 2. 快速开始
 
 ```sql
 -- 1. 加载扩展（静态构建无需此步）
@@ -47,7 +133,7 @@ DELETE FROM al.mytable WHERE symbol = '000001' AND date = DATE '2026-01-15';
 
 ---
 
-## 2. ATTACH 挂载
+## 3. ATTACH 挂载
 
 ### 语法
 
@@ -93,13 +179,13 @@ SELECT * FROM aligned_scan('cnstk_ixday') WHERE date = DATE '2026-08-17';
 
 ---
 
-## 3. 增删改查（标准 SQL）
+## 4. 增删改查（标准 SQL）
 
 ATTACH 后，对 `al.<table>` 的标准 `INSERT` / `UPDATE` / `DELETE` / `SELECT` 直接生效，
 无需调用表函数。引擎通过 catalog 钩子（`PlanInsert` / `PlanUpdate` / `PlanDelete`）
 将 DML 操作路由到 Parquet 列组的直写。
 
-### 3.1 SELECT（查）
+### 4.1 SELECT（查）
 
 ```sql
 SELECT <columns> FROM al.<table> [WHERE <conditions>];
@@ -109,7 +195,7 @@ SELECT <columns> FROM al.<table> [WHERE <conditions>];
 - 支持 Filter Pushdown（分区裁剪 + Parquet Row Group 裁剪）。
 - 支持并行扫描。
 
-### 3.2 INSERT（增）
+### 4.2 INSERT（增）
 
 ```sql
 INSERT INTO al.<table> [(col1, col2, ...)] VALUES (...), (...), ...;
@@ -120,7 +206,7 @@ INSERT INTO al.<table> SELECT ... FROM ...;
 - **大批量自动分批**：单次 INSERT 超过 1M 行时自动分批提交（每批 1M 行，各自独立事务），避免 OOM。
 - 返回值：标准 `Count`（插入的行数）。
 
-### 3.3 UPDATE（改）
+### 4.3 UPDATE（改）
 
 ```sql
 UPDATE al.<table> SET <col> = <value> [, ...] WHERE <conditions>;
@@ -130,7 +216,7 @@ UPDATE al.<table> SET <col> = <value> [, ...] WHERE <conditions>;
 - `WHERE` 条件通过扫描索引组定位 rowid，再解析为 `(symbol, date)` 主键。
 - 仅重写 SET 列所在的列组，未涉及的列组不读写。
 
-### 3.4 DELETE（删）
+### 4.4 DELETE（删）
 
 ```sql
 DELETE FROM al.<table> WHERE <conditions>;
@@ -144,11 +230,11 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 ---
 
-## 4. 表函数 API
+## 5. 表函数 API
 
 除了标准 SQL DML，还提供 4 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
-### 4.0 `aligned_create` — 建表 / 扩展列组
+### 5.0 `aligned_create` — 建表 / 扩展列组
 
 ```sql
 SELECT * FROM aligned_create(table_name, group_name, columns [, root => '...']
@@ -181,7 +267,7 @@ SELECT * FROM aligned_create('ptbl', 'index', 'symbol VARCHAR, date DATE, close 
                              partition_template => 'date=%Y-%m-%d');
 ```
 
-### 4.1 `aligned_scan` — 扫描逻辑表
+### 5.1 `aligned_scan` — 扫描逻辑表
 
 ```sql
 SELECT * FROM aligned_scan(table_name [, root => '...']);
@@ -203,7 +289,7 @@ SELECT symbol, date, close FROM aligned_scan('cnstk_ixday')
 SELECT * FROM aligned_scan('cnstk_ixday', root => 'D:/data/factorlake');
 ```
 
-### 4.2 `aligned_compact` — 合并 part 碎片
+### 5.2 `aligned_compact` — 合并 part 碎片
 
 ```sql
 SELECT * FROM aligned_compact(table_name, group_name [, root => '...']);
@@ -231,7 +317,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha001');
 SELECT * FROM aligned_compact('cnstk_ixday', 'all');
 ```
 
-### 4.3 `aligned_drop` — 删除列组或整表
+### 5.3 `aligned_drop` — 删除列组或整表
 
 ```sql
 SELECT * FROM aligned_drop(table_name, group_name [, root => '...']);
@@ -261,9 +347,9 @@ SELECT * FROM aligned_drop('cnstk_ixday', 'index');
 
 ---
 
-## 5. 配置项
+## 6. 配置项
 
-### 5.1 `aligned_data_root`
+### 6.1 `aligned_data_root`
 
 | 属性 | 值 |
 |------|-----|
@@ -278,7 +364,7 @@ SET aligned_data_root = 'D:/data/factorlake';
 -- 之后所有 aligned_scan/create/compact/drop 调用无需传 root
 ```
 
-### 5.2 `parquet_metadata_cache`
+### 6.2 `parquet_metadata_cache`
 
 | 属性 | 值 |
 |------|-----|
@@ -291,15 +377,15 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 
 ---
 
-## 6. 参数详解
+## 7. 参数详解
 
-### 6.1 `table_name`（表名）
+### 7.1 `table_name`（表名）
 
 - 类型：VARCHAR
 - 含义：逻辑表名，对应数据根目录下的一个一级子目录。
 - 示例：`'cnstk_ixday'` → `<root>/cnstk_ixday/`
 
-### 6.2 `root`（数据根目录）
+### 7.2 `root`（数据根目录）
 
 - 类型：VARCHAR
 - 含义：所有逻辑表的顶层父目录。
@@ -307,7 +393,7 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 - 可通过 `SET aligned_data_root` 设为默认值，避免每次传参。
 - 在 ATTACH 模式下，`root` 就是 ATTACH 路径，无需单独指定。
 
-### 6.3 `group_name`（列组路径）
+### 7.3 `group_name`（列组路径）
 
 - 类型：VARCHAR
 - 含义：列组路径，用于 `aligned_create`、`aligned_compact`、`aligned_drop`。
@@ -320,7 +406,7 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
   - `aligned_compact`：`group='factor/alpha'` → 合并该组；`group='all'` → 合并所有组。
   - `aligned_drop`：`group='factor/alpha'` → 删除该列组目录；`group='index'` → 删除整张表。
 
-### 6.4 WITH 子句参数（CREATE TABLE）
+### 7.4 WITH 子句参数（CREATE TABLE）
 
 CREATE TABLE 的 `WITH (...)` 子句支持以下选项：
 
@@ -332,11 +418,11 @@ CREATE TABLE 的 `WITH (...)` 子句支持以下选项：
 
 ---
 
-## 7. C++ 内部 API（供扩展开发者）
+## 8. C++ 内部 API（供扩展开发者）
 
 以下 API 供 DuckDB 扩展开发者在 C++ 层直接调用，**不需要** 通过 SQL。
 
-### 7.1 扫描绑定
+### 8.1 扫描绑定
 
 ```cpp
 unique_ptr<FunctionData> AlignedBindForCatalog(
@@ -357,7 +443,7 @@ unique_ptr<FunctionData> AlignedBindForCatalog(
 
 用于在不经过 `TableFunctionBindInput` 的情况下绑定扫描（catalog 内部使用）。
 
-### 7.2 内存 Upsert
+### 8.2 内存 Upsert
 
 ```cpp
 UpsertResult AlignedUpsertFromCollection(
@@ -382,7 +468,7 @@ UpsertResult AlignedUpsertFromCollection(
 
 跳过临时 Parquet 文件的双写，直接从内存 collection 执行 upsert。`PhysicalAlignedInsert` 使用此接口。
 
-### 7.3 内存 Delete
+### 8.3 内存 Delete
 
 ```cpp
 DeleteResult AlignedDeleteFromCollection(
@@ -401,7 +487,7 @@ DeleteResult AlignedDeleteFromCollection(
 
 **返回**：`DeleteResult { idx_t rows_deleted, parts_rewritten }`
 
-### 7.4 建表
+### 8.4 建表
 
 ```cpp
 void AlignedCreateTable(
@@ -419,7 +505,7 @@ void AlignedCreatePartition(
     const string &partition_key);
 ```
 
-### 7.5 写锁（RAII）
+### 8.5 写锁（RAII）
 
 ```cpp
 TableWriteLock lock(fs, table_path);
@@ -428,7 +514,7 @@ TableWriteLock lock(fs, table_path);
 在 `<table_path>/.aligned_write.lock` 创建锁文件；已存在则抛异常。析构时删除锁文件。
 mutator 和 compactor 内部自动使用。崩溃残留需手动删除。
 
-### 7.6 事务 ID
+### 8.6 事务 ID
 
 ```cpp
 idx_t NextTransactionId();
