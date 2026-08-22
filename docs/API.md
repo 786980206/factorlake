@@ -23,23 +23,25 @@
 -- 1. 加载扩展（静态构建无需此步）
 LOAD aligned;
 
--- 2. 设置数据根目录（或通过 ATTACH 指定）
+-- 2. 设置数据根目录
 SET aligned_data_root = 'D:/data/factorlake';
 
--- 3. 建表
-CREATE TABLE al.mytable (symbol VARCHAR, date DATE, close DOUBLE, alpha001 DOUBLE)
-  WITH (groups='index:close;factor/alpha:alpha001', partition_template='month=%Y-%m');
+-- 3. 建表（通过表函数，group='index' 表示新建表）
+SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE');
 
--- 4. 插入数据
-INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5, 0.32);
+-- 4. 挂载为逻辑数据库（ATTACH 后可用标准 SQL 增删改查）
+ATTACH 'D:/data/factorlake' AS al (TYPE ALIGNED);
 
--- 5. 查询
-SELECT symbol, date, close, alpha001 FROM al.mytable WHERE date = DATE '2026-01-15';
+-- 5. 插入数据
+INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5);
 
--- 6. 更新
+-- 6. 查询
+SELECT symbol, date, close FROM al.mytable WHERE date = DATE '2026-01-15';
+
+-- 7. 更新
 UPDATE al.mytable SET close = 11.0 WHERE symbol = '000001' AND date = DATE '2026-01-15';
 
--- 7. 删除
+-- 8. 删除
 DELETE FROM al.mytable WHERE symbol = '000001' AND date = DATE '2026-01-15';
 ```
 
@@ -138,7 +140,7 @@ DELETE FROM al.<table> WHERE <conditions>;
 - 删除规则：
   - 删空单 part 分区 → 整个分区目录移除。
   - 删空多 part 分区的最高索引 part → 直接移除该 part。
-  - 删空多 part 分区的内部 part → **fail-fast**（需先 `aligned_compact` 合并碎片）。
+  - 删空多 part 分区的内部 part → **原地重写为 0 行空文件**（保留文件名索引，保持 index 分区内索引连续）。
 
 ---
 
@@ -214,6 +216,12 @@ SELECT * FROM aligned_compact(table_name, group_name [, root => '...']);
 | `root` | 命名参数 | VARCHAR | 否 | 数据根目录。 |
 
 **返回**：单行 `(dirs_compacted BIGINT, parts_before BIGINT, parts_after BIGINT)`。
+
+**行为**：
+- **规范化重写**：每个分区的所有 part 按 `ALIGNED_DEFAULT_PART_ROWS`（1M 行）重新切分——前面的 part 满行（恰好 1M 行），末 part ≤ 1M 行。0 行占位 part 被合并吸收。
+- 已规范化的分区（单 part ≤ 1M，或多 part 均满行）跳过不重写。
+- **两阶段提交**：所有组的合并 part 先写入 `_tmp/`，全部成功后再统一 move 到目标目录 + 删除旧 part；任一组失败则清理 `_tmp`、表状态不变。
+- 同目录必须同列集（拒绝 schema-evolution 合并）。
 
 ```sql
 -- 合并单个组
@@ -299,13 +307,18 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 - 可通过 `SET aligned_data_root` 设为默认值，避免每次传参。
 - 在 ATTACH 模式下，`root` 就是 ATTACH 路径，无需单独指定。
 
-### 6.3 `group_name`（合并/删除目标组名）
+### 6.3 `group_name`（列组路径）
 
 - 类型：VARCHAR
-- 含义：`aligned_compact` 和 `aligned_drop` 的目标列组名。
-- `aligned_compact` 特殊值 `'all'`：合并表中所有列组（单事务原子切换）。
-- `aligned_drop` 特殊值 `'index'`：删除整张表（所有列组 + 表目录）。
-- 组名格式：`index` / `factor/alpha101` / `fieldset/ma` 等。
+- 含义：列组路径，用于 `aligned_create`、`aligned_compact`、`aligned_drop`。
+- 特殊值：
+  - `'index'`：index 组（Key 列 symbol/date 所在组）。`aligned_create` 中表示新建表；`aligned_drop` 中表示删除整张表。
+  - `'all'`：`aligned_compact` 专用，合并表中所有列组（单事务原子切换）。
+- 非 index 组名格式：必须是 `lv1/lv2` 两级路径，如 `factor/alpha101`、`fieldset/ma`。
+- **各函数用法**：
+  - `aligned_create`：`group='index'` → 建表（所有列写入 index 组）；`group='factor/alpha'` → 向已有表扩展列组。
+  - `aligned_compact`：`group='factor/alpha'` → 合并该组；`group='all'` → 合并所有组。
+  - `aligned_drop`：`group='factor/alpha'` → 删除该列组目录；`group='index'` → 删除整张表。
 
 ### 6.4 WITH 子句参数（CREATE TABLE）
 
