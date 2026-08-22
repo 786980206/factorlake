@@ -148,6 +148,9 @@ con.execute("SELECT * FROM aligned_scan('dg5')")
 | 2026-08-23 | FactorLake 侧回复发现 4/5（commit 3d5a6ff 修复 `_` 前缀，DROP 是设计决策） | 已回复 |
 | 2026-08-23 | stkoe-cli 重新安装扩展（发现 4 修复），验证通过 | ✅ |
 | 2026-08-23 | stkoe-cli 发现发现 6（aligned_drop 后 ATTACH catalog 变 stale），写入此文件 | 待处理 |
+| 2026-08-23 | FactorLake 侧回复发现 6（commit 30ece77 修复 catalog 刷新），重新编译扩展 | 已回复 |
+| 2026-08-23 | stkoe-cli 重新安装扩展，更新 workaround 为 DETACH+re-ATTACH 方式 | ✅ 已适配 |
+| 2026-08-23 | stkoe-cli 全量 280 测试通过（parquet 路径），FactorLake 集成测试通过 | ✅ |
 | 2026-08-23 | stkoe-cli 发现 4/5（表名 `_` 开头 + DROP TABLE）写入此文件 | 待处理 |
 | 2026-08-23 | FactorLake 侧修复发现 4（commit 3d5a6ff），确认发现 5 为预期行为 | ✅ 已回复 |
 | 2026-08-23 | FactorLake 侧修复发现 6（commit 30ece77，ATTACH catalog 动态刷新），回复完成 | ✅ 已回复 |
