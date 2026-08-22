@@ -2,6 +2,7 @@
 
 #include "catalog/aligned_catalog.hpp"
 #include "catalog/aligned_create_fn.hpp"
+#include "catalog/aligned_groups.hpp"
 #include "compaction/aligned_compactor.hpp"
 #include "compaction/aligned_drop.hpp"
 #include "duckdb/main/config.hpp"
@@ -25,6 +26,13 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	// filter_prune=true: prune filter-only columns from the scan output.
 	aligned_scan_fn.filter_prune = true;
 	loader.RegisterFunction(aligned_scan_fn);
+
+	// aligned_groups(table_name, root=...)
+	// List all column groups in an AlignedTable.
+	TableFunction aligned_groups_fn("aligned_groups", {LogicalType::VARCHAR},
+	                                 AlignedGroupsFunction, AlignedGroupsBind, AlignedGroupsInitGlobal, nullptr);
+	aligned_groups_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(aligned_groups_fn);
 
 	// Setting that supplies the default data root for aligned_scan(name)
 	auto &db = loader.GetDatabaseInstance();

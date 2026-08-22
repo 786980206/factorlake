@@ -478,3 +478,28 @@ SELECT * FROM aligned_scan('mytable', root => '/data/root');
 | `aligned_drop` | `(table_name, group_name)` | `root` |
 
 - 当前总：SQLLogicTest 118/118 + 4 PS 套件全 PASS。
+
+## v0.19-aligned-groups — 新增 aligned_groups 表函数
+
+新增 `aligned_groups(table_name, root=...)` 表函数，用于查看表上已有哪些列组。
+
+```sql
+SELECT * FROM aligned_groups('cnstk_ixday');
+-- 结果：
+--   index          symbol;date;close;volume   3
+--   factor/alpha   alpha001;alpha002          3
+--   fieldset/ma    ma5;ma20                   3
+```
+
+- **参数**：`table_name`（位置参数 1）+ `root`（命名参数，可选）。
+- **返回**：每组一行 `(group_name VARCHAR, columns VARCHAR, partition_count BIGINT)`。
+  - `group_name`：列组路径（`index` / `factor/alpha` 等）。
+  - `columns`：该组的列名列表，分号分隔（避免与 SQLLogicTest 逗号分隔符冲突）。
+  - `partition_count`：该组的分区数。
+- **实现**：复用 `BuildTablePlan` 发现所有列组，从 `GroupPlan` 提取
+  `manifest.group`、`column_order`、`partitions.size()`。
+- **新增文件**：`aligned_groups.cpp` + `aligned_groups.hpp`，注册在 `extension.cpp`。
+- **新增测试**：`test/aligned/aligned_groups.test`（9 个断言）——多组表创建、
+  列组列表、显式 root、插入后分区数增长、错误案例。
+- 表函数数量从 4 个增加到 5 个。
+- 当前总：SQLLogicTest 127/127 + 4 PS 套件全 PASS。

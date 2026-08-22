@@ -142,6 +142,7 @@ AlignedTableScan
 
 ```
 aligned_scan(table, root=...)                    → (table columns)
+aligned_groups(table, root=...)                  → (group_name, columns, partition_count)
 aligned_create(table, group, columns, root=..., partition_template=...)  → (dirs_created, files_created, txid)
 aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
 aligned_drop(table, group_name, root=...)         → (dirs_removed, files_removed, txid)
@@ -228,7 +229,7 @@ Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
 ```
 extension/aligned/src/
 ├── extension.cpp
-├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp
+├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp  aligned_groups.cpp
 ├── resolver/      partition_resolver.cpp  key_resolver.cpp
 ├── scan/          aligned_scan.cpp
 ├── mutator/       aligned_mutator.cpp
@@ -259,7 +260,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 118/118 + 4 PS 套件全 PASS
+- 当前总：SQLLogicTest 127/127 + 4 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`

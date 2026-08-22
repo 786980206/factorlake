@@ -232,7 +232,7 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 ## 5. 表函数 API
 
-除了标准 SQL DML，还提供 4 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+除了标准 SQL DML，还提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
 ### 5.0 `aligned_create` — 建表 / 扩展列组
 
@@ -289,7 +289,35 @@ SELECT symbol, date, close FROM aligned_scan('cnstk_ixday')
 SELECT * FROM aligned_scan('cnstk_ixday', root => 'D:/data/factorlake');
 ```
 
-### 5.2 `aligned_compact` — 合并 part 碎片
+### 5.2 `aligned_groups` — 查看列组
+
+```sql
+SELECT * FROM aligned_groups(table_name [, root => '...']);
+```
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|------|------|------|------|------|
+| `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名。 |
+| `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root`。 |
+
+**返回**：每组一行 `(group_name VARCHAR, columns VARCHAR, partition_count BIGINT)`。
+
+| 列 | 说明 |
+|------|------|
+| `group_name` | 列组路径（`'index'`、`'factor/alpha101'`、`'fieldset/ma'` 等）。 |
+| `columns` | 该组的列名列表，分号分隔（如 `alpha001;alpha002`）。 |
+| `partition_count` | 该组的分区数。 |
+
+```sql
+SET aligned_data_root = 'D:/data/factorlake';
+SELECT * FROM aligned_groups('cnstk_ixday');
+-- 结果示例：
+--   index      symbol;date;close;volume   3
+--   factor/alpha   alpha001;alpha002       3
+--   fieldset/ma    ma5;ma20                3
+```
+
+### 5.3 `aligned_compact` — 合并 part 碎片
 
 ```sql
 SELECT * FROM aligned_compact(table_name, group_name [, root => '...']);
@@ -317,7 +345,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha001');
 SELECT * FROM aligned_compact('cnstk_ixday', 'all');
 ```
 
-### 5.3 `aligned_drop` — 删除列组或整表
+### 5.4 `aligned_drop` — 删除列组或整表
 
 ```sql
 SELECT * FROM aligned_drop(table_name, group_name [, root => '...']);
@@ -537,6 +565,9 @@ idx_t NextTransactionId();
 | `aligned_create` | `dirs_created` | 创建的目录数（含表目录、组目录、分区目录） |
 | | `files_created` | 创建的 parquet 文件数（占位文件） |
 | | `txid` | 事务 ID |
+| `aligned_groups` | `group_name` | 列组路径 |
+| | `columns` | 该组的列名列表（分号分隔） |
+| | `partition_count` | 该组的分区数 |
 | `INSERT` (标准 SQL) | `Count` | 插入的行数 |
 | `UPDATE` (标准 SQL) | `Count` | 更新的行数 |
 | `DELETE` (标准 SQL) | `Count` | 删除的行数 |
