@@ -184,3 +184,65 @@ query RI
 SET aligned_data_root='{TEST_DIR}/upsert_m12'; SELECT v, w FROM aligned_table('t') WHERE symbol='b'
 ----
 2.0,20
+
+# --- append-to-last-part: grow the last part instead of creating a new one ---
+# Write 1000 rows, then append 500 more to the SAME partition with the SAME
+# mapping (no schema evolution). The last part should grow from 0000-0000001000
+# to 0000-0000001500 (in-place append), NOT create 0001.
+
+mkdir {TEST_DIR}/upsert_atl/t
+
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(0, 1000)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-03-15' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002 FROM r) TO '{TEST_DIR}/atl_s1.parquet' (FORMAT PARQUET)
+
+query IIII
+SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('atltest', '{TEST_DIR}/atl_s1.parquet', 'index:symbol,date,close,volume;factor/alpha101:alpha001,alpha002')
+----
+1000,0,2,1
+
+# append 500 more rows (symbols 001001..001500) to the same partition
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(1000, 1500)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-03-15' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002 FROM r) TO '{TEST_DIR}/atl_s2.parquet' (FORMAT PARQUET)
+
+# 2 parts rewritten (index + alpha101), no new part created
+query IIII
+SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('atltest', '{TEST_DIR}/atl_s2.parquet', 'index:symbol,date,close,volume;factor/alpha101:alpha001,alpha002')
+----
+500,0,2,1
+
+# verify total rows and data correctness
+query IIR
+SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT count(*), count(alpha001), sum(close) FROM aligned_table('atltest')
+----
+1500,300,562875.0
+
+# verify the boundary symbols (001000 from first batch, 001001 from second)
+query II rowsort
+SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT symbol, close FROM aligned_table('atltest') WHERE symbol IN ('001000','001001') ORDER BY symbol
+----
+001000,500.0
+001001,500.5
+
+# --- append-to-last with schema evolution falls back to new part ---
+# Append with a NEW column alpha003 that the last part lacks → schema evolution
+# fallback → new part 0001 created, 0000 unchanged
+statement ok
+COPY (WITH r AS (SELECT range AS r FROM range(1500, 2000)) SELECT printf('%06d', r + 1) AS symbol, DATE '2026-03-15' AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CASE WHEN r % 5 = 0 THEN CAST((r + 1) * 0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r % 7 = 0 THEN CAST((r + 2) * 0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r % 11 = 0 THEN CAST((r + 3) * 0.03 AS DOUBLE) ELSE NULL END AS alpha003 FROM r) TO '{TEST_DIR}/atl_s3.parquet' (FORMAT PARQUET)
+
+# 2 parts rewritten (index + alpha101 gets new part 0001)
+query III
+SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT rows_inserted, rows_updated, parts_rewritten FROM aligned_upsert('atltest', '{TEST_DIR}/atl_s3.parquet', 'index:symbol,date,close,volume;factor/alpha101:alpha001,alpha002,alpha003')
+----
+500,0,2
+
+# total rows now 2000
+query I
+SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT count(*) FROM aligned_table('atltest')
+----
+2000
+
+# alpha003 non-null only in new rows (r%11==0 in range 1500..1999 = 45)
+query I
+SET aligned_data_root='{TEST_DIR}/upsert_atl'; SELECT count(alpha003) FROM aligned_table('atltest')
+----
+45

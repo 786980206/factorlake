@@ -891,6 +891,102 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 	vector<TargetMap> targets(bind.plan.groups.size());
 	DataChunk row_scratch; // reused by AppendRowToBuffer (re-init per buffer type)
 	const ColumnDataCollection *row_scratch_owner = nullptr;
+	// 4.5 Append-to-last validation: the resolver optimistically set
+	// append_to_last for keys that sort past a partition's end when the index
+	// group's last part was under ALIGNED_DEFAULT_PART_ROWS. But the decision
+	// must be consistent across ALL groups that share the partition (v6: same
+	// index → same row count; same partition → same total R_i). If any group's
+	// last part is at a different index, has a different row count, is at/above
+	// the threshold, or lacks a mapped column (schema evolution), we fall back
+	// to append_new_part for every loc of that partition. This is a per-partition
+	// all-or-nothing decision.
+	std::set<string> fallback_partitions;
+	for (idx_t i = 0; i < locs.size(); i++) {
+		auto &loc = locs[i];
+		if (!loc.append_to_last) {
+			continue;
+		}
+		if (fallback_partitions.count(loc.partition_key)) {
+			continue; // already decided for this partition
+		}
+		// The index group's last part index + row count for this partition.
+		idx_t last_idx = loc.part_index;
+		idx_t last_rows = loc.part_local_row;
+		bool ok = true;
+		for (idx_t gi = 0; gi < bind.plan.groups.size() && ok; gi++) {
+			auto &group = bind.plan.groups[gi];
+			auto *gp = FindPartition(group, loc.partition_key);
+			if (!gp) {
+				// Group lacks this partition — it will NULL-fill at scan time;
+				// no shared partition to violate. But if this group has a
+				// non-empty mapping it WOULD create a new part (append_new_part
+				// path), giving it a different R_i than the index group. Only
+				// safe when the group is unmapped for this batch.
+				if (!bind.group_mapping[gi].col_names.empty()) {
+					ok = false;
+				}
+				continue;
+			}
+			// The group has the partition: its last part must be at the same
+			// index with the same row count, and must be under the threshold.
+			auto &last_part = group.parts[gp->first_part + gp->part_count - 1];
+			if (last_part.partition_index != last_idx || last_part.row_count != last_rows ||
+			    last_part.row_count >= ALIGNED_DEFAULT_PART_ROWS) {
+				ok = false;
+				break;
+			}
+			// Schema evolution: the last part must have every mapped column
+			// (otherwise the appended rows cannot carry the new column values).
+			if (!bind.group_mapping[gi].col_names.empty()) {
+				auto reader =
+				    make_uniq<ParquetReader>(context, OpenFileInfo(last_part.path), ParquetOptions(context));
+				for (auto &mc : bind.group_mapping[gi].col_names) {
+					bool found = false;
+					for (auto &rc : reader->columns) {
+						if (StringUtil::CIEquals(rc.name, mc)) {
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						ok = false;
+						break;
+					}
+				}
+			}
+		}
+		if (!ok) {
+			fallback_partitions.insert(loc.partition_key);
+		}
+	}
+	// Apply fallback: convert append_to_last locs of rejected partitions to
+	// append_new_part (compute the partition-wide max index + 1, same as the
+	// resolver's original logic).
+	for (auto &key : fallback_partitions) {
+		idx_t max_index = 0;
+		for (auto &group : bind.plan.groups) {
+			for (auto &gp : group.partitions) {
+				if (gp.key != key) {
+					continue;
+				}
+				for (idx_t k = 0; k < gp.part_count; k++) {
+					auto &pk = group.parts[gp.first_part + k];
+					if (pk.partition_index > max_index) {
+						max_index = pk.partition_index;
+					}
+				}
+				break;
+			}
+		}
+		for (idx_t i = 0; i < locs.size(); i++) {
+			if (locs[i].partition_key == key && locs[i].append_to_last) {
+				locs[i].append_to_last = false;
+				locs[i].append_new_part = true;
+				locs[i].part_index = max_index + 1;
+				locs[i].part_local_row = 0;
+			}
+		}
+	}
 	for (idx_t i = 0; i < rows.size(); i++) {
 		auto &loc = locs[i];
 		idx_t src_row = rows[i].src_row;
@@ -914,6 +1010,19 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 				part = FindIndexPart(group, loc.partition_key, loc.part_index);
 				local = loc.part_local_row;
 				target_idx = part ? part->partition_index : loc.part_index;
+			} else if (loc.append_to_last) {
+				// Append at the partition end, growing the last existing part:
+				// find this group's part at the same index as the index group's
+				// last part (the pre-check guaranteed it exists with the same
+				// row count for mapped groups, or the group was skipped).
+				part = FindIndexPart(group, loc.partition_key, loc.part_index);
+				if (!part) {
+					// Group lacks this partition or this index (unmapped group
+					// in a partition it doesn't cover — NULL-fill at scan).
+					continue;
+				}
+				local = loc.part_local_row;
+				target_idx = part->partition_index;
 			} else if (loc.append_new_part) {
 				// Append at the partition end: groups that have the partition
 				// create a new part (index = loc.part_index) holding only the

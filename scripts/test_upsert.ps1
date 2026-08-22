@@ -235,6 +235,91 @@ Expect-Equal 'M2 phase updates existing keys' $out.Trim() '0,2'
 $out = Run-DuckDB "SET aligned_data_root='$m12dir'; SELECT v, w FROM aligned_table('t') WHERE symbol='b';"
 Expect-Equal 'M1+M2 values merged' $out.Trim() '2.0,20'
 
+# ---- append-to-last-part: grow the last part instead of creating a new one --
+# Write 1000 rows to a fresh table, then append 500 more to the SAME partition
+# with the SAME mapping (no schema evolution). The last part should grow from
+# 0000-0000001000 to 0000-0000001500 (in-place append), NOT create 0001.
+$atldir = 'D:/proj/factorlake/testdata/upsert_atl'
+$atlTable = 'atltest'
+$atlTableDir = Join-Path $atldir $atlTable
+Remove-Item $atldir -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path "$atldir/t" | Out-Null
+$sA1 = 'D:/proj/factorlake/testdata/atl_s1.parquet'
+$sA2 = 'D:/proj/factorlake/testdata/atl_s2.parquet'
+$atlMap = "index:symbol,date,close,volume;factor/alpha101:alpha001,alpha002"
+& $duckdb -c "COPY (WITH r AS (SELECT range AS r FROM range(0, 1000)) SELECT printf('%06d', r+1) AS symbol, DATE '2026-03-15' AS date, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CASE WHEN r%5=0 THEN CAST((r+1)*0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r%7=0 THEN CAST((r+2)*0.02 AS DOUBLE) ELSE NULL END AS alpha002 FROM r) TO '$sA1' (FORMAT PARQUET);" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'atl staging 1 failed' }
+$out = Run-DuckDB "SET aligned_data_root='$atldir'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('$atlTable', '$sA1', '$atlMap');"
+Expect-Equal 'atl write 1 (ins, upd, parts, txid)' $out.Trim() '1000,0,2,1'
+# Verify the initial part 0000 has 1000 rows
+$part0 = Join-Path $atlTableDir 'index\month=2026-03\0000-0000001000.parquet'
+if (Test-Path $part0) { Write-Host 'PASS: atl initial part 0000-0000001000 exists' }
+else { Write-Host 'FAIL: atl initial part missing'; $script:failures++ }
+# Append 500 more rows to the same partition (same symbols range but offset,
+# sorting AFTER the existing rows). Use symbols 010001..010500 so they sort
+# after 000001..001000.
+& $duckdb -c "COPY (WITH r AS (SELECT range AS r FROM range(1000, 1500)) SELECT printf('%06d', r+1) AS symbol, DATE '2026-03-15' AS date, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CASE WHEN r%5=0 THEN CAST((r+1)*0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r%7=0 THEN CAST((r+2)*0.02 AS DOUBLE) ELSE NULL END AS alpha002 FROM r) TO '$sA2' (FORMAT PARQUET);" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'atl staging 2 failed' }
+$out = Run-DuckDB "SET aligned_data_root='$atldir'; SELECT rows_inserted, rows_updated, parts_rewritten, txid FROM aligned_upsert('$atlTable', '$sA2', '$atlMap');"
+Expect-Equal 'atl append-to-last (ins, upd, parts, txid)' $out.Trim() '500,0,2,1'
+# The last part should now be 0000-0000001500 (grown, not a new 0001 part)
+$part0grown = Join-Path $atlTableDir 'index\month=2026-03\0000-0000001500.parquet'
+$part1 = Join-Path $atlTableDir 'index\month=2026-03\0001-0000000500.parquet'
+if ((Test-Path $part0grown) -and -not (Test-Path $part1)) {
+    Write-Host 'PASS: atl last part grown in-place (0000-0000001500), no new part 0001'
+} elseif (Test-Path $part1) {
+    Write-Host 'FAIL: atl created a new part 0001 instead of growing 0000'; $script:failures++
+} else {
+    Write-Host 'FAIL: atl grown part 0000-0000001500 missing'; $script:failures++
+}
+# Also verify the alpha101 group grew its last part
+$alphaGrown = Join-Path $atlTableDir 'factor\alpha101\month=2026-03\0000-0000001500.parquet'
+if (Test-Path $alphaGrown) { Write-Host 'PASS: atl alpha101 last part also grown' }
+else { Write-Host 'FAIL: atl alpha101 last part not grown'; $script:failures++ }
+# Verify row count and data correctness
+$out = Run-DuckDB "SET aligned_data_root='$atldir'; SELECT count(*), count(alpha001), sum(close) FROM aligned_table('$atlTable');"
+$vals = ($out.Trim() -split ',')
+Expect-Equal 'atl total rows after append' $vals[0] '1500'
+Expect-Equal 'atl sum(close) 1..1500' $vals[2] '562875.0'
+# Verify ordering is correct (symbol 001000 followed by 001001)
+$out = Run-DuckDB "SET aligned_data_root='$atldir'; SELECT symbol FROM aligned_table('$atlTable') WHERE symbol IN ('001000','001001') ORDER BY symbol;"
+$vals = ($out.Trim() -split "[\r\n]+")
+Expect-Equal 'atl boundary symbols count' $vals.Count '2'
+Expect-Equal 'atl first boundary symbol' $vals[0].Trim() '001000'
+Expect-Equal 'atl second boundary symbol' $vals[1].Trim() '001001'
+# Verify the old part no longer exists (superseded)
+$part0old = Join-Path $atlTableDir 'index\month=2026-03\0000-0000001000.parquet'
+if (-not (Test-Path $part0old)) { Write-Host 'PASS: atl old part 0000-0000001000 removed' }
+else { Write-Host 'FAIL: atl old part 0000-0000001000 still exists'; $script:failures++ }
+
+# ---- append-to-last with schema evolution falls back to new part -------------
+# Using the same atl table, append with a NEW column (alpha003) that doesn't
+# exist in the last part. This should trigger the schema-evolution fallback
+# and create a new part 0001 instead of growing 0000.
+$sA3 = 'D:/proj/factorlake/testdata/atl_s3.parquet'
+$atlMap3 = "index:symbol,date,close,volume;factor/alpha101:alpha001,alpha002,alpha003"
+& $duckdb -c "COPY (WITH r AS (SELECT range AS r FROM range(1500, 2000)) SELECT printf('%06d', r+1) AS symbol, DATE '2026-03-15' AS date, CAST((r+1)*0.5 AS DOUBLE) AS close, CAST((r+1)*100 AS BIGINT) AS volume, CASE WHEN r%5=0 THEN CAST((r+1)*0.01 AS DOUBLE) ELSE NULL END AS alpha001, CASE WHEN r%7=0 THEN CAST((r+2)*0.02 AS DOUBLE) ELSE NULL END AS alpha002, CASE WHEN r%11=0 THEN CAST((r+3)*0.03 AS DOUBLE) ELSE NULL END AS alpha003 FROM r) TO '$sA3' (FORMAT PARQUET);" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'atl staging 3 failed' }
+$out = Run-DuckDB "SET aligned_data_root='$atldir'; SELECT rows_inserted, rows_updated, parts_rewritten FROM aligned_upsert('$atlTable', '$sA3', '$atlMap3');"
+Expect-Equal 'atl schema-evolution fallback (ins, upd, parts)' $out.Trim() '500,0,2'
+# A new part 0001 should be created (not growing 0000)
+$part1new = Join-Path $atlTableDir 'index\month=2026-03\0001-0000000500.parquet'
+$part0still1500 = Join-Path $atlTableDir 'index\month=2026-03\0000-0000001500.parquet'
+if ((Test-Path $part1new) -and (Test-Path $part0still1500)) {
+    Write-Host 'PASS: atl schema-evolution created new part 0001, 0000 unchanged'
+} else {
+    Write-Host 'FAIL: atl schema-evolution fallback part layout wrong'; $script:failures++
+}
+# Total rows should now be 2000
+$out = Run-DuckDB "SET aligned_data_root='$atldir'; SELECT count(*) FROM aligned_table('$atlTable');"
+Expect-Equal 'atl total after schema-evo append' $out.Trim() '2000'
+# alpha003 should be NULL in old rows and non-NULL in new rows
+$out = Run-DuckDB "SET aligned_data_root='$atldir'; SELECT count(alpha003) FROM aligned_table('$atlTable');"
+Expect-Equal 'atl alpha003 non-null (r%11==0 in 1500..1999)' $out.Trim() '45'
+
+Remove-Item $sA1, $sA2, $sA3 -Force -ErrorAction SilentlyContinue
+Remove-Item $atldir -Recurse -Force -ErrorAction SilentlyContinue
+
 # ---- cleanup -----------------------------------------------------------------
 Remove-Item $s1, $s2, $s3, $s4, $s5, $s6, $s7, $s8 -Force -ErrorAction SilentlyContinue
 Remove-Item $s9f, $s10f -Force -ErrorAction SilentlyContinue

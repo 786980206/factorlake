@@ -27,6 +27,19 @@ struct KeyLocation {
 	                              // part_index) instead of growing the last part
 	                              // (keeps part sizes bounded and allows schema
 	                              // evolution on appends)
+	bool append_to_last = false;  // not found and the key sorts after every
+	                               // (symbol, date) of the partition, AND the
+	                               // partition's last existing part is below
+	                               // ALIGNED_DEFAULT_PART_ROWS: instead of creating
+	                               // a new part, grow the last existing part
+	                               // in-place (the rewriter merges its old data
+	                               // with the appended rows). part_index =
+	                               // last part's index; part_local_row = its row
+	                               // count. The mutator re-validates this across
+	                               // all groups (schema evolution + threshold
+	                               // guard) before committing; if any group's last
+	                               // part can't accept the append, it falls back to
+	                               // append_new_part.
 };
 
 //! Resolves primary keys (symbol, date) against the index group of a table.

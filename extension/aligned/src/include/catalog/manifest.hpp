@@ -9,6 +9,15 @@ namespace duckdb {
 //! Default Row Group size for Parquet writes (compile-time constant).
 constexpr idx_t ALIGNED_DEFAULT_RG_ROWS = 131072;
 
+//! Default soft target rows per Parquet part file (compile-time constant).
+//! When an upsert appends rows to an existing partition, the mutator prefers
+//! growing the partition's last existing part in-place while its row count is
+//! below this threshold; once a part reaches it, the next append creates a
+//! new part instead (the part is NOT hard-truncated — a single batch may
+//! overshoot by a small amount). The value is ~8 Row Groups (8 * 131072),
+//! yielding ~256MB–1GB files for typical column widths.
+constexpr idx_t ALIGNED_DEFAULT_PART_ROWS = 1048576;
+
 // One entry of the partitioning config (derived from the directory layout):
 // a directory template (e.g. "date=%Y-%m-%d") sourced from the logical "date"
 // column. Only three partition kinds are supported:

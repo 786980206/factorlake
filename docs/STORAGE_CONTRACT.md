@@ -22,6 +22,7 @@ index schema 前两列 = 主键 `(symbol, date)`。
 | Physical Partition | 某个 Group 内一个 Hive 风格目录（如 `month=2026-08/`），**单层、各 Group 同一种段** |
 | Part File | 一个 Parquet 文件，**文件名自描述** `{idx:04d}-{rows:10d}.parquet`，是 Group 内最小读取单元 |
 | Row Group | Parquet 内 Row Group；Writer flush 大小固定 131072 行（编译时常量） |
+| Part File | 一个 Parquet 文件，文件名自描述 `{idx:04d}-{rows:10d}.parquet`；Writer 的 Part 行数软上限 1048576 行（编译时常量 `ALIGNED_DEFAULT_PART_ROWS`） |
 | Aligned Scan | 按行坐标直接组装多 Group 向量的扫描，绝不 JOIN |
 
 ---
@@ -137,6 +138,7 @@ Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认 `mo
 | schema（列名+类型） | Parquet footer（每组最后 1 个 part） |
 | 行数 / 行区间 | part 文件名 `{idx:04d}-{rows:10d}` |
 | Row Group 大小 | 编译时常量 131072 |
+| Part 行数软上限 | 编译时常量 1048576（`ALIGNED_DEFAULT_PART_ROWS`，append-to-last-part 阈值） |
 | 事务号 | 不持久化（无 CAS、无并发控制） |
 | Column Group 列表 | glob `<table>/**/*.parquet` |
 | 分区模板 | 目录结构推导（`year=`/`month=`/`date=` 段） |
@@ -198,6 +200,12 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
 - `mapping` 对已存在的表可省略（按列名自动推断所属 Group）；空表首写必须显式给出。
 - 主键 = `(symbol, date)`；已存在 → 更新（只重写受影响 part），不存在 → 插入。
 - 映射列类型 = 组内已存类型（组 schema），不是源文件类型。
+- **Part 增长策略（Append-to-Last-Part）**：当 upsert 追加到已有分区末尾
+  （key 排在该分区所有现有 `(symbol, date)` 之后）且该分区最后一个 part 行数
+  < `ALIGNED_DEFAULT_PART_ROWS`（1048576）时，**优先重写最后一个 part 并
+  追加新行**（而非新建 part），减少 part 碎片化。该决策需跨组一致：若任一组
+  的末 part 在不同索引、行数不同、已达阈值或缺少某映射列（schema evolution），
+  则**整分区回退**为新建 part。单个 batch 可小幅超限（不做硬截断）。
 - **提交协议**：
   1. 写入 `<table>/_tmp/transaction-<txid>/`，`_tmp/` 对 Reader 不可见。
   2. 提交时 part 以 v6 名 `{idx:04d}-{rows:10d}.parquet` 落位（rename 到正式位置）。

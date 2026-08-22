@@ -203,6 +203,11 @@ aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewri
 - **Compaction**：`aligned_compact(table, 'all')` 单事务合并所有组（按分区目录），
   原子切换，查询不中断。
 - **Schema Evolution**：新列在老 part 上读到 NULL，不重写历史。
+- **Append-to-Last-Part**（`ALIGNED_DEFAULT_PART_ROWS = 1048576`）：upsert 追加到
+  已有分区末尾时，若末 part 行数 < 阈值则**重写末 part 并追加新行**（而非新建
+  part），减少 part 碎片化。跨组一致性：预检所有组末 part（同索引 + 同行数 +
+  低于阈值 + 含全部映射列），任一不满足则**整分区回退新建 part**。单 batch 可
+  小幅超限（不做硬截断）。
 - **Sparse**：靠 Parquet RLE/Dictionary/Compression 天然压缩；未来极端 sparse 列
   再考虑独立 Group（如 `sparse/alpha999`）。
 - **不做**：Tombstone/Delta、并发写互斥（last_txid CAS 未做）、类型升级。
@@ -1018,3 +1023,26 @@ tive'）→ 断言 pattern 必须用
   - **文档**：STORAGE_CONTRACT v8、README、AGENTS §5/§9/§14 同步 v8
   - **验收**：SQLLogicTest 84/84 PASS；test_aligned、test_upsert、test_compaction、
     test_parallel、test_dml 全 PASS
+- [x] **Append-to-Last-Part 优化（减少 part 碎片化，2026-08）**：
+  - **背景**：aligned_upsert 追加到已有分区末尾时，原总是新建一个 part（`append_new_part`），
+    导致小 part 堆积。用户要求：先尝试写入最后一个 Parquet 文件，超过 `part_rows` 再新建。
+  - **设计**：软阈值 + 跨组一致性预检 + schema-evolution 回退：
+    - 新常量 `ALIGNED_DEFAULT_PART_ROWS = 1048576`（~8 Row Groups，`manifest.hpp`）
+    - `KeyLocation` 加 `append_to_last` 字段（`key_resolver.hpp`）
+    - `KeyResolver::Resolve`：当 key 排在分区末尾且末 part 行数 < 阈值 → `append_to_last`
+      （重写末 part 追加新行），否则 `append_new_part`（新建 part）
+    - Mutator 预检（`aligned_mutator.cpp` §4.5）：对每个 `append_to_last` 分区，检查所有
+      有该分区的组的末 part：同索引 + 同行数 + 低于阈值 + 含全部映射列。任一不满足 →
+      **整分区回退** `append_new_part`（计算跨组 max_index+1）。无该分区但有映射列的组也触发回退
+      （R_i 不一致风险）
+    - Dispatch 循环新增 `append_to_last` 分支：`FindIndexPart` 找到末 part → 原地重写
+    - `RewritePart` 无需改动（trailing-inserts 路径已支持追加到 part 末尾）
+    - **不做硬截断**：单 batch 可小幅超限阈值（下一 append 自然新建 part）
+  - **测试**：test_upsert.ps1 新增 append-to-last 场景（1000→1500 行原地增长 0000-0000001500，
+    验证无新 0001 + 数据正确 + 旧 0000-0000001000 已删）+ schema-evolution 回退场景
+    （追加含新列 alpha003 → 回退新建 0001，0000 不变）；SQLLogicTest aligned_upsert.test
+    新增 10 个断言（同样两个场景）
+  - **验收**：SQLLogicTest 94/94 PASS（原 84 + 新 10）；test_upsert 43/43（原 33 + 新 10）；
+    test_aligned、test_compaction、test_parallel、test_dml 全 PASS
+  - **文档**：STORAGE_CONTRACT §1 术语表加 Part File 行数软上限、§5 不持久化信息加
+    `ALIGNED_DEFAULT_PART_ROWS`、§9 加 Append-to-Last-Part 行为；AGENTS §9 加条目
