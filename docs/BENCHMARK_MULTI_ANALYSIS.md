@@ -7,14 +7,8 @@
 > 相关文档：
 > - `AGENTS.md` — 项目权威记忆（环境/构建/当前进度）
 > - `docs/STORAGE_CONTRACT.md` — 存储格式契约
-> - `docs/BENCH_MULTI.md` — **临时快速报告**，每次 `run_multi_bench.sh` /
->   `bench_scenarios.sh` 运行都会覆盖，只作最近一次原始数字快照，不作权威依据。
-> - `bench/out/SUMMARY.csv` + `bench/out/g-*.csv` — 各阶段原始结果（已提交）。
->
-> **v4 更新（2026-08）**：A-NORMAL 引擎已随 v4 契约删除（aligned 字段不存在，
-> 全对齐是唯一模式）。下文涉及 A-NORMAL 的结论均为历史记录，保留供参考：
-> A-ALIGNED 与 A-NORMAL 行为相同（差异是测量噪声）这一结论仍然成立——A-NORMAL
-> 现在等价于 A-ALIGNED。
+> - `bench/out/SUMMARY.csv` + `bench/out/g-*.csv` — 各阶段原始结果（由
+>   `bench_scenarios.sh` 生成，gitignored）。
 
 ---
 
@@ -59,7 +53,6 @@
 | 引擎 | 1M×128 Q2/F1 | 10M×128 Q2/F1 | 相对 A-ALIGNED(10M) |
 |------|------|------|------|
 | **A-ALIGNED** | **0.026s** | **0.109s** | 基准 |
-| A-NORMAL | 0.027s | 0.113s | ≈1× |
 | D-JOIN | 0.075s | 4.32s | **~40×** |
 | P-CONCAT | 0.195s | 2.60s | **~24×** |
 | P-JOIN | 1.02s | 16.5s | **~152×** |
@@ -70,16 +63,7 @@
 （内存重排）成本随行数**超线性**增长。这直接证明"利用 row-aligned 先验消灭
 JOIN/横向 concat"的价值随数据量上升。
 
-### 2.2 A-ALIGNED ≈ A-NORMAL（确认，非慢）
-
-两种模式在同一投影查询上的 warm 几乎相同（0.026 vs 0.027；10M 0.109 vs 0.113）。
-设计上 aligned=true（交叉剪枝 + position 组装）与 aligned=false（union 区间 +
-各 leaf 独立读）在本数据（各 leaf 剪枝区间一致）行为一致，符合预期。
-
-> ⚠️ 曾观察到"A-ALIGNED 比 A-NORMAL 慢 ~13%"——那是 fresh-process 单跑的
-> 进程启动抖动（~0.02s），不是引擎行为；同进程 REPEATS 均值后消失。
-
-### 2.3 D-WIDE 在窄表小数据仍最快，差距随宽度收窄
+### 2.2 D-WIDE 在窄表小数据仍最快，差距随宽度收窄
 
 | 场景 | D-WIDE | A-ALIGNED | 倍率 |
 |------|------|------|------|
@@ -134,10 +118,10 @@ bash scripts/bench_scenarios.sh --only g-1m --skip-regen   # 数据已匹配则�
 # ③ 低层 runner（单引擎组合 + 环境变量覆盖查询/过滤/选择率 + REPEATS）
 REPEATS=5 QS_OVERRIDE=Q2 FS_OVERRIDE=F2 SS_OVERRIDE=S0 \
   bash scripts/run_multi_bench.sh --tier A --rows 1000000 --width 128 \
-       --sparsity 90 --threads 1 --engines D-WIDE,D-JOIN,A-ALIGNED,A-NORMAL \
+       --sparsity 90 --threads 1 --engines D-WIDE,D-JOIN,A-ALIGNED \
        --no-regen
 
-# 输出都在 bench/out/（g-*.csv + SUMMARY.csv）；临时报告在 docs/BENCH_MULTI.md
+# 输出都在 bench/out/（g-*.csv + SUMMARY.csv）
 ```
 
 ### 环境依赖
@@ -153,7 +137,7 @@ REPEATS=5 QS_OVERRIDE=Q2 FS_OVERRIDE=F2 SS_OVERRIDE=S0 \
    时 `cursor - part.start_row` 无符号下溢 → 崩溃。已修（claim 时钳到区间起点）。
 2. **DuckDB 基线日期切分 `(r/N)::INT` 会四舍五入**：把分区分到 N/2 而非 N，导致
    wide/join 与 aligned 的 4 分区错位。改用 floor 除法 `//` 修复（牵连 3 个脚本）。
-3. **A-NORMAL 兄弟表残留**：数据重生成后 `_table.json` row_count 不匹配。已改为每次重建。
+3. **数据重生成后 `_table.json` 不匹配**：已改为每次重建。
 4. **`--skip-regen` 不校验数据规模/sparsity**：会拿 250K 数据跑 1M 声明。现用
    `.gen-meta` 标记（rows,width,sparsity）校验，不符自动重生成。
 5. **测量方法**：fresh-process 启动抖动污染小数据测量 → 同进程 REPEATS 均值。

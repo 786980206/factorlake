@@ -168,21 +168,3 @@ monthly partitions and an update touching 1-2 days, aligned would rewrite 1-2 pa
 (~20k rows each) while native rewrites all 600k+ rows. The part-level granularity is
 the aligned engine's core write advantage; this benchmark's single-partition layout
 hides it.
-
-## Historical note: v2 contract vs v1 (archived v1.0 branch)
-
-Same machine, same bench_ixday 1M rows, same script. v1 (old contract, archived to
-the `v1.0` branch) vs v2 (footer-driven row ranges). Baseline engines (wide/join/polars)
-were identical between the two runs, so the comparison is valid.
-
-**Conclusion: v2 has no regression and is 1-10% faster** (plan build avoids sidecar/
-marker reads; footer metadata absorbed by metadata cache). See the git log for the
-full v1 vs v2 comparison table.
-
-## Historical note: v5 contract (partition-aligned) vs v4 (all-only)
-
-v5 replaced the v4 full-alignment contract with partition-level alignment (groups
-may have different part counts per shared partition, only total rows per partition
-must match). This relaxes the write constraint — a group can append a part without
-forcing all other groups to add a matching part — at no read-performance cost (the
-multi-scenario benchmark confirmed v5 read times match v4 within noise).

@@ -150,5 +150,3 @@ COPY (SELECT date, symbol, v FROM merged) TO '$root/native/t_new.parquet' (FORMA
 Write-Host ''
 Write-Host "==== RESULTS ===="
 $results | ForEach-Object { Write-Host $_ }
-$results | Set-Content -Path 'D:\proj\factorlake\docs\bench_write_results.csv' -Encoding Ascii
-Write-Host "saved: docs\bench_write_results.csv"

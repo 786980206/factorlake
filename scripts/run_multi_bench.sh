@@ -259,25 +259,8 @@ for e in "${ENGINES[@]}"; do
 done
 
 # ---------- report ---------------------------------------------------------------------
-STAMP=$(date +%Y-%m-%d)
-REPORT="$ROOT/docs/BENCH_MULTI.md"
-{ echo "# AlignedTable Multi-Scenario Benchmark"; echo "";
-  echo "Date: $STAMP  Machine: local Linux (AGENTS.md §16.2); tier=$TIER";
-  echo "Dataset: bench_mb rows=$ROWS cols=$WIDTH (idx20+alpha$ALPHA+fs$FIELDSET) sparse=$SPARSITY% NULL";
-  echo "Engines: ${ENGINES[*]}; threads: ${THREADS[*]}";
-  echo "";
-  echo "| engine | query | filter | sel | threads | cold_s | warm_s |";
-  echo "|--------|-------|--------|-----|---------|--------|--------|";
-  for line in "${RESULTS[@]}"; do IFS=',' read -r e q f s th c w <<< "$line";
-    printf '| %s | %s | %s | %s | %s | %.4f | %.4f |\n' "$e" "$q" "$f" "$s" "$th" "$c" "$w"; done;
-  echo "";
-  echo "> Column layout: index 20 (date,symbol,close,volume,rowid + ix001..ix015),";
-  echo "> alpha$ALPHA sparse (${SPARSITY}% NULL), fs$FIELDSET. Q1~3 Q2~35 Q3~500 Q4~5000 Q5=ALL.";
-  echo "> warm = fresh-process 2nd run (page cache warmed); cold = 1st touch in fresh process.";
-} > "$REPORT"
-
-CSV="$ROOT/scripts/bench_multi_output.csv"
+CSV="$ROOT/bench/out/mb-results.csv"
+mkdir -p "$ROOT/bench/out"
 { echo "engine,query,filter,sel,threads,cold_s,warm_s"; for line in "${RESULTS[@]}"; do echo "$line"; done; } > "$CSV"
 echo ""
-echo "Report: $REPORT"
-echo "CSV:    $CSV"
+echo "CSV: $CSV"

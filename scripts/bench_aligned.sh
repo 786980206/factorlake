@@ -181,7 +181,8 @@ else
 fi
 
 # ---- Output ---------------------------------------------------------------------
-CSV="$ROOT/scripts/bench_output.csv"
+CSV="$ROOT/bench/out/bench_output.csv"
+mkdir -p "$ROOT/bench/out"
 {
   echo "engine,workload,threads,cold_s,warm_s"
   for line in "${ALL[@]}"; do echo "$line"; done

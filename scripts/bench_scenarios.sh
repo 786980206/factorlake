@@ -78,7 +78,7 @@ run_stage(){ local label="$1" rows="$2" width="$3" sp="$4" eng="$5" th="$6" qs="
   QS_OVERRIDE="$qs" FS_OVERRIDE="$fs" SS_OVERRIDE="$ss" \
     bash "$ROOT/scripts/run_multi_bench.sh" --tier A --rows "$rows" --width "$width" \
       --sparsity "$sp" --threads "$th" --engines "$eng" --no-regen
-  cp "$ROOT/scripts/bench_multi_output.csv" "$BENCH_OUT/$label.csv"
+  cp "$ROOT/bench/out/mb-results.csv" "$BENCH_OUT/$label.csv"
   echo "  MEM after:  $(avail) available  -> saved $BENCH_OUT/$label.csv"
 }
 
@@ -90,7 +90,7 @@ thread_stage(){ [ -n "$ONLY" ] && [ "$ONLY" != "g-thread" ] && return 0
   QS_OVERRIDE="Q2" FS_OVERRIDE="F1" SS_OVERRIDE="S0" \
     bash "$ROOT/scripts/run_multi_bench.sh" --tier A --rows 1000000 --width 128 \
       --sparsity 90 --threads 1,2,4,8 --engines "A-ALIGNED" --no-regen
-  cp "$ROOT/scripts/bench_multi_output.csv" "$BENCH_OUT/g-thread.csv"
+  cp "$ROOT/bench/out/mb-results.csv" "$BENCH_OUT/g-thread.csv"
   echo "  MEM after:  $(avail)  -> saved $BENCH_OUT/g-thread.csv"
 }
 

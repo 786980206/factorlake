@@ -3,7 +3,7 @@
 # vs polars horizontal concat (position-aligned concat of per-group files).
 # Dataset: bench_ixday (1M rows x 127 cols, 4 daily partitions, sparse factors).
 # Dimensions: projection 5/25/100+ cols, scan 25%/100%, threads 1/4/8.
-# Output: docs/BENCHMARK.md + scripts/bench_output.csv.
+# Output: docs/BENCHMARK.md + bench/out/bench_output.csv.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\bench_aligned.ps1
 # Requires: scripts\gen_bench.ps1 has been run; python + polars available.
 
@@ -204,5 +204,5 @@ $lines = @(
 $lines | Set-Content -Path $report -Encoding UTF8
 $csv = @('engine,workload,threads,cold_s,warm_s')
 $csv += $all
-$csv | Set-Content -Path (Join-Path $root 'scripts\bench_output.csv') -Encoding UTF8
+$csv | Set-Content -Path (Join-Path $root 'bench\out\bench_output.csv') -Encoding UTF8
 Write-Host "Report: $report"

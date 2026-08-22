@@ -134,5 +134,5 @@ DuckDB。当前标记为"依赖升级"的待办，不在本版本实施。
 | S3 | P1-B：批量 footer 读取 / meta 缓存文件（可回退） | 中 | 待做 |
 | S4 | P1-C：聚合 stats 快速路径（**依赖 DuckDB ≥ v1.6 的 AggregatePushdown**） | 中 | 待做（升级后） |
 
-> 原则：所有优化不得破坏 v4 契约（footer 是唯一权威、无 sidecar 是唯一权威
+> 原则：所有优化不得破坏当前存储契约（footer 是唯一权威、无 sidecar 是唯一权威
 > 语义；性能 cache 必须可回退）。每步做完更新 AGENTS.md 进度与经验。
