@@ -101,44 +101,50 @@ body{
   border:1px solid var(--line);border-radius:8px;
   background:rgba(0,0,0,.012);overflow:hidden;cursor:pointer;
   transition:all .25s;
+  display:flex;flex-direction:column;min-height:0;flex-shrink:1;
 }
+.partition:not(.selected){flex:0 0 auto}
+.partition.selected{flex:1 1 0;min-height:0}
 .partition:hover{border-color:var(--mut);background:rgba(0,0,0,.025)}
 .partition.selected{
   border:2px solid var(--cyan);background:var(--sel);
-  box-shadow:0 0 12px rgba(9,105,218,.12);transform:scale(1.015);
+  box-shadow:0 0 12px rgba(9,105,218,.12);
 }
 .partition-header{
   padding:.7vh .8vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);
-  user-select:none;
+  user-select:none;flex-shrink:0;
 }
 .partition-header .tag{color:var(--dim);font-size:1.2vh}
-.partition-body{display:none;flex-direction:column;gap:.6vh;padding:0 .6vw .8vh}
+.partition-body{display:none;flex-direction:column;gap:.6vh;padding:0 .6vw .8vh;flex:1;min-height:0;overflow:auto}
 .partition.selected .partition-body{display:flex}
-.partition.selected{flex:3 }
 
 /* ===== L2: Part file — click to select+expand ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;background:var(--panel);
   overflow:hidden;cursor:pointer;transition:all .25s;
+  display:flex;flex-direction:column;min-height:0;flex-shrink:1;
 }
+.part:not(.selected){flex:0 0 auto}
+.part.selected{flex:1 1 0;min-height:0}
 .part:hover{border-color:var(--mut)}
 .part.selected{
   border:2px solid var(--cyan);background:var(--sel);
-  box-shadow:0 0 10px rgba(9,105,218,.1);flex:3;
+  box-shadow:0 0 10px rgba(9,105,218,.1);
 }
 .part-header{
   padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
   font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);user-select:none;
+  flex-shrink:0;
 }
 .part-header .rows{color:var(--mut);font-size:1.1vh}
-.part-body{display:none;padding:.6vh .6vw .7vh;flex-direction:column;gap:.5vh}
+.part-body{display:none;padding:.6vh .6vw .7vh;flex-direction:column;gap:.5vh;flex:1;min-height:0}
 .part.selected .part-body{display:flex}
 
 /* ===== L3: Row Group blocks (vertical stack — RG-A on top, RG-B below, etc.) ===== */
-.rgs{display:flex;flex-direction:column;gap:5px;align-items:stretch}
+.rgs{display:flex;flex-direction:column;gap:5px;align-items:stretch;flex:1}
 .rg{
-  flex:1;border-radius:4px;min-height:3vh;
+  flex:1 1 0;border-radius:4px;min-height:2.5vh;max-height:5vh;
   display:flex;align-items:center;justify-content:center;
   font-size:1.2vh;font-family:Consolas,monospace;font-weight:500;
   cursor:default;position:relative;transition:transform .15s;
