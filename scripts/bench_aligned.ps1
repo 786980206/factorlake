@@ -3,7 +3,8 @@
 # vs polars horizontal concat (position-aligned concat of per-group files).
 # Dataset: bench_ixday (1M rows x 127 cols, 4 daily partitions, sparse factors).
 # Dimensions: projection 5/25/100+ cols, scan 25%/100%, threads 1/4/8.
-# Output: docs/BENCHMARK.md + bench/out/bench_output.csv.
+# Output: bench/out/bench_output.csv (stdout for human reading).
+# Note: docs/BENCHMARK.md is hand-maintained; this script only emits the CSV.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\bench_aligned.ps1
 # Requires: scripts\gen_bench.ps1 has been run; python + polars available.
 
@@ -156,53 +157,10 @@ foreach ($e in 'wide', 'join', 'polars') {
 }
 if ($ok) { Write-Host 'PASS: all engines agree on p5 counts' }
 
-# ---- report ----------------------------------------------------------------------
-$report = Join-Path $root 'docs\BENCHMARK.md'
-$rows = @()
-foreach ($line in $all) {
-    $p = $line -split ','
-    $cold = [double]$p[3]
-    $warm = [double]$p[4]
-    $rows += "| $($p[0]) | $($p[1]) | $($p[2]) | $('{0:F3}' -f $cold) | $('{0:F3}' -f $warm) |"
-}
-$lines = @(
-    "# AlignedTable Benchmark (Phase 6)",
-    "",
-    "Date: $(Get-Date -Format 'yyyy-MM-dd')  Machine: local Windows (see AGENTS.md 16)",
-    "Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 + ma 21),",
-    "4 daily partitions, factors sparse (non-null 1/7). Aligned layout: 3 independent Parquet column groups.",
-    "",
-    "## Workloads",
-    "",
-    "| id | description |",
-    "|----|-------------|",
-    "| p5 | project 5 factor columns, full scan |",
-    "| p25 | project 25 factor columns, full scan |",
-    "| p100 | project 120 columns (100 alpha + 20 ma), full scan |",
-    "| s25 | project 25 columns, WHERE date = '2026-09-01' (25% scan, partition pruning) |",
-    "| s100 | project 25 columns, full scan |",
-    "",
-    "## Engines",
-    "",
-    "- **aligned** - `aligned_table('bench_ixday')`: 3 groups assembled into one DataChunk,",
-    "  no JOIN, projection pushdown, partition pruning, parallel range scan, metadata cache, window carry reuse.",
-    "- **wide** - single wide Parquet (127 columns, 1M rows), DuckDB `read_parquet`.",
-    "- **join** - three separate Parquet files (index/alpha/ma) joined on rowid (keyed layout).",
-    "- **polars** - the same three files read separately (projection per file) and horizontally",
-    "  concatenated (position-aligned) - the classic wide-table assembly path we eliminate.",
-    "",
-    "## Results (seconds; warm = 2nd run in the same process)",
-    "",
-    "| engine | workload | threads | cold | warm |",
-    "|--------|----------|---------|------|------|",
-    $rows,
-    "",
-    "## Observations",
-    "",
-    "(filled in by the analysis step)"
-)
-$lines | Set-Content -Path $report -Encoding UTF8
+# ---- CSV output ----------------------------------------------------------------
+$csvDir = Join-Path $root 'bench\out'
+New-Item -ItemType Directory -Force -Path $csvDir | Out-Null
 $csv = @('engine,workload,threads,cold_s,warm_s')
 $csv += $all
-$csv | Set-Content -Path (Join-Path $root 'bench\out\bench_output.csv') -Encoding UTF8
-Write-Host "Report: $report"
+$csv | Set-Content -Path (Join-Path $csvDir 'bench_output.csv') -Encoding UTF8
+Write-Host "CSV: $(Join-Path $csvDir 'bench_output.csv')"

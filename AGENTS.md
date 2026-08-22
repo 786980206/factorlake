@@ -632,7 +632,7 @@ bash scripts/test_aligned.sh
     （ObjectCache 已缓解热查询，冷查询收益不值得改动量）、P1-C 聚合 stats 快速路径
     （**依赖 DuckDB ≥ v1.6 的 AggregatePushdown API**，v1.5.4 无）。文档已删除，
     结论并路线图。
-  - `docs/WRITE_PLAN.md`（新增）：写入增强计划（Phase 8）。W-1 目录源（glob 多文件）、
+  - `docs/WRITE_PLAN.md`（已删除，v7 mutator 已取代 aligned_write）：写入增强计划。W-1 目录源（glob 多文件）、
     W-2 part_rows 上限切分（同分区多 part，不破坏探测公式）、W-3 并发写互斥
     （last_txid CAS）、W-4 写后校验（validate=true）、W-5 group 间并行、
     W-6 UPDATE/DELETE 明确不做、W-7 公共 JSON helper + rg_rows 默认值 131072；
@@ -933,7 +933,7 @@ tive'）→ 断言 pattern 必须用
 - [x] **读+写基准完成（2026-08-22）**：
   - **读基准**（bench_ixday 1M×127 列，4 引擎×5 工作负载×3 线程数）：aligned vs join 在 p100 1 线程 2.06s vs 1.79s（aligned 1.15× 慢——位置组装固定开销），4 线程 1.04s vs 0.93s（差距收窄）；aligned 在 s25 分区剪枝上 **快于** join（0.159s vs 0.177s 1t——3 组独立剪枝 vs join 仍需开 3 文件）；wide（单 parquet）在此规模最快；polars 在小投影最快但 p100 仍付 hstack 代价。详见 docs/BENCHMARK.md
   - **写基准**（bench_write.ps1，600k 基础行单分区最坏情况）：append 1k 新键 aligned 4× 快（0.088s vs 0.356s——只写新分区）；append 100k native 追平（0.402s vs 0.505s——aligned 须重写基础分区 part）；update 300k/600k aligned 慢（2.4s vs 0.5s——per-part 重写 O(part_size) 与改行数无关；native LEFT JOIN+COPY O(n) 常数更低）。**aligned 写优势 = 多分区 part 级粒度**（单分区布局隐藏此优势）
-  - 产物：docs/BENCHMARK.md（读+写完整分析）、docs/bench_write_results.csv、scripts/bench_write.ps1、scripts/bench_output.csv
+  - 产物：docs/BENCHMARK.md（读+写完整分析，手写）、scripts/bench_write.ps1、scripts/bench_aligned.ps1
 - [ ] **Phase 8（后续）**：aligned_compactor 跨组原子性加固（单组失败时回滚已移动的组）；DML 大批量写入的分块物化
 
 ### Phase 8 关键经验

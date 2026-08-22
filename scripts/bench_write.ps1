@@ -11,9 +11,10 @@
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\bench_write.ps1
 
 $ErrorActionPreference = 'Stop'
-$duckdb = 'D:\proj\factorlake\duckdb\build3\duckdb_al3.exe'
+$repo = Split-Path -Parent $PSScriptRoot
+$duckdb = Join-Path $repo 'duckdb\build3\duckdb_al3.exe'
 if (-not (Test-Path $duckdb)) { throw "duckdb binary not found: $duckdb" }
-$oc = 'C:\Users\winds\AppData\Local\Temp\opencode'
+$oc = $env:TEMP
 New-Item -ItemType Directory -Force -Path $oc | Out-Null
 
 $root = 'D:/proj/factorlake/testdata/bench_write'
