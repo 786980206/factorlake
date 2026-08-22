@@ -171,15 +171,16 @@ body{
 
 /* L4: Column list inside RG — vertically stacked fields */
 .rg-body{
-  display:none;flex-direction:column;gap:3px;
-  padding:.4vh .6vw .5vh;flex:1;min-height:0;overflow:auto;
+  display:none;flex-direction:column;gap:4px;
+  padding:.5vh .6vw .6vh;flex:1;min-height:0;overflow:auto;
 }
 .rg.selected .rg-body{display:flex}
 .rg-body .col-chip{
   display:block;width:100%;
   font-family:Consolas,monospace;font-size:1.1vh;
-  padding:2px 8px;border-radius:3px;text-align:left;white-space:nowrap;
+  padding:3px 8px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   background:var(--panel2);border:1px solid var(--line2);
+  flex-shrink:0;
 }
 
 /* ===== Empty partition ===== */
