@@ -119,11 +119,12 @@ body{
 .g-panel{background:rgba(154,103,0,.04);border:1.5px solid rgba(154,103,0,.25)}
 .g-panel .group-label{color:var(--yel)}
 
-/* ===== Partition band ===== */
+/* ===== Partition band — height proportional to row count (inline flex-grow) ===== */
 .partition{
   border:1px dashed var(--line);border-radius:7px;padding:1vh 1vw;
   margin-bottom:1vh;background:rgba(0,0,0,.01);
-  display:flex;flex-direction:column;flex:1;
+  display:flex;flex-direction:column;
+  flex-basis:0;flex-shrink:1;min-height:0;
 }
 .partition:last-child{margin-bottom:0}
 .part-label{
@@ -132,11 +133,12 @@ body{
 }
 .part-label .tag{color:var(--dim);font-size:1.4vh}
 
-/* ===== Part file ===== */
+/* ===== Part file — height proportional to its row count ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;
   background:#f0f3f6;padding:.8vh .8vw;margin-bottom:.6vh;
-  flex:1;display:flex;flex-direction:column;
+  display:flex;flex-direction:column;
+  flex-basis:0;flex-shrink:1;min-height:0;
 }
 .part:last-child{margin-bottom:0}
 .part-name{
@@ -255,16 +257,16 @@ body{
           <div class="group g-index">
             <div class="group-label">🔑 index <span class="path">/ index/</span></div>
 
-            <div class="partition">
+            <div class="partition" style="flex-grow:5998">
               <div class="part-label"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
-              <div class="part">
+              <div class="part" style="flex-grow:2998">
                 <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
                 <div class="rgs">
                   <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
                   <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">B</div>
                 </div>
               </div>
-              <div class="part">
+              <div class="part" style="flex-grow:3000">
                 <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
                 <div class="rgs">
                   <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">B</div>
@@ -273,9 +275,9 @@ body{
               </div>
             </div>
 
-            <div class="partition">
+            <div class="partition" style="flex-grow:5998">
               <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part">
+              <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
                   <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
@@ -285,9 +287,9 @@ body{
               </div>
             </div>
 
-            <div class="partition" style="border-color:rgba(26,127,55,.4);background:rgba(26,127,55,.04)">
+            <div class="partition" style="flex-grow:1;border-color:rgba(26,127,55,.4);background:rgba(26,127,55,.04)">
               <div class="part-label"><span style="color:var(--grn)">month=2026-10</span><span class="tag" style="color:var(--grn)">新分区 · 1 part · 1 行</span></div>
-              <div class="part" style="border-color:rgba(26,127,55,.3)">
+              <div class="part" style="flex-grow:1;border-color:rgba(26,127,55,.3)">
                 <div class="part-name">0000-0000000001.parquet <span class="rows">1 row</span></div>
                 <div class="rgs">
                   <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">D</div>
@@ -300,9 +302,9 @@ body{
           <div class="group g-factor">
             <div class="group-label">🧮 alpha101 <span class="path">/ factor/alpha101/</span></div>
 
-            <div class="partition">
+            <div class="partition" style="flex-grow:5998">
               <div class="part-label"><span>month=2026-07</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part">
+              <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
                   <div class="rg rg-A" data-tip="RG-A · 同 index 行区间">A</div>
@@ -311,9 +313,9 @@ body{
               </div>
             </div>
 
-            <div class="partition">
+            <div class="partition" style="flex-grow:5998">
               <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part">
+              <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
                   <div class="rg rg-A" data-tip="RG-A · 同 index RG-A">A</div>
@@ -323,7 +325,7 @@ body{
               </div>
             </div>
 
-            <div class="partition" style="opacity:.4;border-style:dotted">
+            <div class="partition" style="flex-grow:1;opacity:.4;border-style:dotted">
               <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
               <div style="font-size:1.4vh;color:var(--dim);text-align:center;padding:.5vh 0;font-style:italic">
                 — 该组未写入此分区 —
@@ -335,9 +337,9 @@ body{
           <div class="group g-fieldset">
             <div class="group-label">📐 ma <span class="path">/ fieldset/ma/</span></div>
 
-            <div class="partition">
+            <div class="partition" style="flex-grow:5998">
               <div class="part-label"><span>month=2026-07</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part">
+              <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
                   <div class="rg rg-A" data-tip="RG-A">A</div>
@@ -346,9 +348,9 @@ body{
               </div>
             </div>
 
-            <div class="partition">
+            <div class="partition" style="flex-grow:5998">
               <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part">
+              <div class="part" style="flex-grow:5998">
                 <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
                 <div class="rgs">
                   <div class="rg rg-A" data-tip="RG-A · 同 index">A</div>
@@ -358,7 +360,7 @@ body{
               </div>
             </div>
 
-            <div class="partition" style="opacity:.4;border-style:dotted">
+            <div class="partition" style="flex-grow:1;opacity:.4;border-style:dotted">
               <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
               <div style="font-size:1.4vh;color:var(--dim);text-align:center;padding:.5vh 0;font-style:italic">
                 — 未写入 —
