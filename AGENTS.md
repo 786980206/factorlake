@@ -211,14 +211,21 @@ aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewri
 - **并发写互斥**（`.aligned_write.lock`）：mutator/compactor 执行前在表目录创建
   lock 文件，完成后删除（RAII）。已有 lock 则报错拒绝。crash 后残留 lock 用户可
   手动删除。TableWriteLock 类在 aligned_mutator.hpp 共享给 mutator + compactor。
+- **DML 直接 C++ 调用**（绕过嵌套 SQL + worker thread）：INSERT/UPDATE/DELETE 的
+  Finalize 直接在 pipeline 线程上调 AlignedUpsertFromCollection /
+  AlignedDeleteFromCollection（mutator 只做文件系统 + parquet I/O，不碰 catalog/
+  executor，无嵌套查询死锁风险）。DELETE 的 key 解析改为 ResolveKeysForRowids
+  返回 ColumnDataCollection（替代 StageKeysForRowids 写 temp parquet）。DmlWorkerPool
+  类已删除。
 - **写入路径优化**（7 项）：
   1. 向量化 Source 读取（key building）：逐 chunk 扫 + ToUnifiedFormat 直取 date/symbol。
   2. 分区 symbol 边界索引（RG stats）：超范围 key 跳过全量 LoadPartition。
   3. 多 part 并行重写：std::thread 池并行执行 RewritePart。
-  4. 标准 INSERT 消除双写：AlignedUpsertFromCollection C++ API 跳过 temp parquet。
+  4. 标准 DML 消除双写 + worker thread：AlignedUpsertFromCollection /
+     AlignedDeleteFromCollection 直接 C++ 调用，跳过 temp parquet + SQL + 线程。
   5. 并发写 lock 文件（见上）。
   6. 向量化 Synth 填充：STANDARD_VECTOR_SIZE 行批量替代逐行。
-  7. DML worker 线程池：DmlWorkerPool 持久线程替代每语句 std::thread。
+  7. ~~DML worker 线程池~~（已删除：直接 pipeline 线程调用不再需要线程池）。
 - **Sparse**：靠 Parquet RLE/Dictionary/Compression 天然压缩；未来极端 sparse 列
   再考虑独立 Group（如 `sparse/alpha999`）。
 - **不做**：Tombstone/Delta、类型升级。
@@ -1090,7 +1097,24 @@ tive'）→ 断言 pattern 必须用
   - **#7 DML worker 线程池**：`DmlWorkerPool` 单持久线程（static singleton）替代每语句
     `std::thread`。`Submit(task)+Wait()` API，condvar 同步。Insert/Delete/Update 三路共用。
     初始实现有 race（worker 循环未 reset `has_task_` → 任务重复执行），已修复。
-    committed `b35bf04`
+    committed 35bf04
+  - **深化：消除 worker thread + Connection（直接 pipeline 线程调用）**：根因分析——
+    worker thread 原为避免 con.Query() 嵌套 SQL 的 catalog 死锁，但 AlignedUpsertFromCollection
+    / AlignedDeleteFromCollection 是纯 C++ 函数（只做文件系统 + parquet I/O，不碰 catalog/
+    executor），无死锁风险。三路 DML Finalize 改为直接在 pipeline 线程调用：
+    INSERT -> AlignedUpsertFromCollection；DELETE -> ResolveKeysForRowids（返回
+    ColumnDataCollection 替代 StageKeysForRowids 写 temp parquet）-> AlignedDeleteFromCollection；
+    UPDATE -> ResolveKeysForRowids + build staged collection -> AlignedUpsertFromCollection。
+    DmlWorkerPool 类删除。AlignedDeleteFunction 加 source_collection 支持（同
+    AlignedUpsertFunction）。每语句消除：1 线程创建/join + 1 Connection + 1 SQL parse/plan/bind +
+    DELETE/UPDATE 1 次 temp parquet 写读。committed 9e87c5b
+   - **验收**：SQLLogicTest 97/97（+3 lock 测试）、test_upsert 50/50（+5 lock 测试）、
+     test_aligned 42/42、test_compaction 16/16、test_parallel 8/8、test_dml 7/7 全 PASS
+   - **经验**：TableFunctionInput 无默认构造函数（需 TableFunctionInput(bind, local, global)）；
+     ConstantVector::IsNull 需 include vector.hpp；FileHandle::Write(void*, idx_t) 无
+     position 参数（vs Write(QueryContext, void*, idx_t, idx_t)）；std::set 非线程安全
+     需 mutex 保护；DML worker pool 的 Wait() 谓词只需 done_==true（不需要 !has_task_）；
+     嵌套查询死锁根因 = con.Query()（catalog 锁），非 mutator 本身——直接 C++ 调用无此风险；
   - **验收**：SQLLogicTest 97/97（+3 lock 测试）、test_upsert 50/50（+5 lock 测试）、
     test_aligned 42/42、test_compaction 16/16、test_parallel 8/8、test_dml 7/7 全 PASS
   - **经验**：`TableFunctionInput` 无默认构造函数（需 `TableFunctionInput(bind, local, global)`）；
