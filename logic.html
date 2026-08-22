@@ -6,11 +6,10 @@
 <title>AlignedTable · 目录结构</title>
 <style>
 :root{
-  --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --line:#30363d; --line2:#21262d;
-  --tx:#c9d1d9; --mut:#8b949e; --dim:#484f58;
-  --cyan:#58a6ff; --teal:#39d2c0; --org:#f78166; --grn:#3fb950;
-  --prp:#bc8cff; --red:#f85149; --yel:#d29922;
-  --db:#1a2332; --idx:#2a1a14; --fac:#1a1a2e; --fld:#122218; --pan:#1a1822;
+  --bg:#f6f8fa; --panel:#ffffff; --panel2:#eef1f4; --line:#d0d7de; --line2:#e1e4e8;
+  --tx:#1f2328; --mut:#656d76; --dim:#8c959f;
+  --cyan:#0969da; --teal:#0a7b83; --org:#bc4c00; --grn:#1a7f37;
+  --prp:#8250df; --red:#cf222e; --yel:#9a6700;
 }
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;overflow:hidden}
@@ -24,63 +23,64 @@ body{
 .deck{width:100vw;height:100vh;display:flex;flex-direction:column}
 .slide{
   flex:1;display:none;flex-direction:column;
-  padding:3vh 5vw;position:relative;
+  padding:1.5vh 4vw;position:relative;
 }
 .slide.active{display:flex}
 
 /* ===== Top bar ===== */
 .topbar{
   display:flex;align-items:center;justify-content:space-between;
-  padding:0 5vw;height:52px;border-bottom:1px solid var(--line);
-  background:rgba(13,17,23,.95);backdrop-filter:blur(6px);flex-shrink:0;
+  padding:0 4vw;height:42px;border-bottom:1px solid var(--line);
+  background:var(--panel);flex-shrink:0;
 }
-.topbar .logo{font-size:16px;font-weight:600;color:var(--teal)}
-.topbar .logo span{color:var(--mut);font-weight:400;margin-left:8px;font-size:13px}
+.topbar .logo{font-size:15px;font-weight:600;color:var(--teal)}
+.topbar .logo span{color:var(--mut);font-weight:400;margin-left:8px;font-size:12px}
 .nav-btns{display:flex;gap:8px;align-items:center}
-.nav-btns .pg{color:var(--mut);font-size:13px;font-family:Consolas,monospace;margin-right:12px}
+.nav-btns .pg{color:var(--mut);font-size:12px;font-family:Consolas,monospace;margin-right:12px}
 .nb{
   background:var(--panel2);border:1px solid var(--line);color:var(--mut);
-  width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:16px;
+  width:30px;height:30px;border-radius:7px;cursor:pointer;font-size:15px;
   display:flex;align-items:center;justify-content:center;transition:all .15s;
 }
 .nb:hover{border-color:var(--cyan);color:var(--cyan)}
 .nb:disabled{opacity:.3;cursor:default}
 
-/* ===== Slide title ===== */
+/* ===== Slide title — compact, single line ===== */
 .slide-title{
-  font-size:2.2vh;font-weight:600;color:var(--tx);margin-bottom:1.5vh;
-  display:flex;align-items:center;gap:10px;
+  font-size:1.8vh;font-weight:600;color:var(--tx);margin-bottom:.8vh;
+  display:flex;align-items:center;gap:8px;
 }
 .slide-title::before{
-  content:"";width:5px;height:2.2vh;border-radius:3px;
+  content:"";width:4px;height:1.8vh;border-radius:2px;
   background:linear-gradient(180deg,var(--cyan),var(--teal));
 }
-.slide-title .sub{color:var(--mut);font-weight:400;font-size:1.6vh;margin-left:8px}
+.slide-title .sub{color:var(--mut);font-weight:400;font-size:1.3vh;margin-left:6px}
 
 /* ===== Slide body (scrollable if needed) ===== */
 .slide-body{flex:1;overflow:auto;display:flex;flex-direction:column}
 
-/* ===== Database big box ===== */
+/* ===== Compact concept strip (replaces large cards) ===== */
+.concepts{
+  display:flex;gap:1vw;flex-wrap:wrap;margin-bottom:1vh;
+}
+.concept{
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:.5vh .8vw;display:flex;align-items:center;gap:6px;
+}
+.concept .ico{font-size:1.4vh}
+.concept .name{font-size:1.1vh;font-weight:600;color:var(--tx)}
+.concept .detail{font-size:1vh;color:var(--mut)}
+.concept .detail b{color:var(--teal)}
+.concept .detail code{color:var(--cyan);font-family:Consolas,monospace}
+
+/* ===== Table box (top-level, no database wrapper) ===== */
 .db-wrap{
   flex:1;display:flex;align-items:center;justify-content:center;
 }
-.database{
-  border:3px solid var(--cyan);border-radius:18px;
-  background:linear-gradient(160deg,rgba(88,166,255,.04),rgba(13,17,23,.6));
-  padding:2.5vh 3vw;min-width:70vw;max-width:90vw;position:relative;
-  box-shadow:0 0 60px rgba(88,166,255,.08);
-}
-.database::before{
-  content:"DATABASE · data_root/";position:absolute;top:-14px;left:24px;
-  background:var(--bg);padding:0 12px;font-size:1.4vh;
-  font-family:Consolas,monospace;color:var(--cyan);letter-spacing:1px;
-}
-
-/* ===== Table box (inside database) ===== */
 .table-box{
   border:2px solid var(--org);border-radius:14px;
-  background:rgba(247,129,102,.03);padding:2vh 2vw;margin:2vh 0;
-  position:relative;
+  background:var(--panel);padding:2vh 2vw;min-width:72vw;max-width:94vw;
+  position:relative;box-shadow:0 4px 24px rgba(0,0,0,.06);
 }
 .table-box::before{
   content:attr(data-name);position:absolute;top:-13px;left:20px;
@@ -88,52 +88,52 @@ body{
   font-family:Consolas,monospace;color:var(--org);letter-spacing:.5px;
 }
 .table-box .desc{
-  font-size:1.3vh;color:var(--mut);margin-bottom:1.5vh;
+  font-size:1.2vh;color:var(--mut);margin-bottom:1.2vh;
 }
-.table-box .desc code{color:var(--teal);font-family:Consolas,monospace;font-size:1.2vh}
+.table-box .desc code{color:var(--teal);font-family:Consolas,monospace;font-size:1.1vh}
 
 /* ===== Group columns layout ===== */
 .groups{
-  display:flex;gap:1.5vw;align-items:stretch;flex-wrap:nowrap;
+  display:flex;gap:1.2vw;align-items:stretch;flex-wrap:nowrap;
 }
 .group{
-  flex:1;min-width:0;border-radius:10px;padding:1.2vh 1vw;
-  display:flex;flex-direction:column;gap:.8vh;
+  flex:1;min-width:0;border-radius:10px;padding:1vh .8vw;
+  display:flex;flex-direction:column;gap:.6vh;
   position:relative;
 }
 .group-label{
   font-size:1.3vh;font-weight:600;letter-spacing:.5px;
-  font-family:Consolas,monospace;margin-bottom:.5vh;
+  font-family:Consolas,monospace;margin-bottom:.3vh;
   display:flex;align-items:center;gap:6px;
 }
 .group-label .path{color:var(--mut);font-weight:400;font-size:1.1vh}
 
 /* color-coded group types */
-.g-index{background:rgba(247,129,102,.06);border:1.5px solid rgba(247,129,102,.35)}
+.g-index{background:rgba(188,76,0,.05);border:1.5px solid rgba(188,76,0,.3)}
 .g-index .group-label{color:var(--org)}
-.g-factor{background:rgba(188,140,255,.05);border:1.5px solid rgba(188,140,255,.3)}
+.g-factor{background:rgba(130,80,223,.04);border:1.5px solid rgba(130,80,223,.25)}
 .g-factor .group-label{color:var(--prp)}
-.g-fieldset{background:rgba(63,185,80,.05);border:1.5px solid rgba(63,185,80,.3)}
+.g-fieldset{background:rgba(26,127,55,.04);border:1.5px solid rgba(26,127,55,.25)}
 .g-fieldset .group-label{color:var(--grn)}
-.g-panel{background:rgba(210,153,34,.05);border:1.5px solid rgba(210,153,34,.3)}
+.g-panel{background:rgba(154,103,0,.04);border:1.5px solid rgba(154,103,0,.25)}
 .g-panel .group-label{color:var(--yel)}
 
 /* ===== Partition band ===== */
 .partition{
-  border:1px dashed var(--line);border-radius:7px;padding:.6vh .8vw;
-  margin-bottom:.6vh;background:rgba(255,255,255,.015);
+  border:1px dashed var(--line);border-radius:7px;padding:.5vh .6vw;
+  margin-bottom:.5vh;background:rgba(0,0,0,.01);
 }
 .partition:last-child{margin-bottom:0}
 .part-label{
   font-family:Consolas,monospace;font-size:1.1vh;color:var(--mut);
-  margin-bottom:.4vh;display:flex;justify-content:space-between;
+  margin-bottom:.3vh;display:flex;justify-content:space-between;
 }
 .part-label .tag{color:var(--dim);font-size:1vh}
 
 /* ===== Part file ===== */
 .part{
   border:1px solid var(--line2);border-radius:6px;
-  background:#11161d;padding:.4vh .6vw;margin-bottom:.4vh;
+  background:#f0f3f6;padding:.4vh .5vw;margin-bottom:.4vh;
 }
 .part:last-child{margin-bottom:0}
 .part-name{
@@ -154,20 +154,20 @@ body{
 .rg[data-tip]:hover::after{
   content:attr(data-tip);position:absolute;bottom:130%;
   left:50%;transform:translateX(-50%);
-  background:#0a0e14;border:1px solid var(--teal);border-radius:6px;
+  background:#1f2328;border:1px solid var(--teal);border-radius:6px;
   padding:4px 8px;font-size:1vh;white-space:nowrap;z-index:10;
-  color:var(--tx);pointer-events:none;
+  color:#fff;pointer-events:none;
 }
-.rg-A{background:rgba(88,166,255,.4);border:1px solid rgba(88,166,255,.7)}
-.rg-B{background:rgba(247,129,102,.4);border:1px solid rgba(247,129,102,.7)}
-.rg-C{background:rgba(63,185,80,.4);border:1px solid rgba(63,185,80,.7)}
-.rg-D{background:rgba(188,140,255,.4);border:1px solid rgba(188,140,255,.7)}
+.rg-A{background:rgba(9,105,218,.3);border:1px solid rgba(9,105,218,.6);color:var(--cyan)}
+.rg-B{background:rgba(188,76,0,.25);border:1px solid rgba(188,76,0,.55);color:var(--org)}
+.rg-C{background:rgba(26,127,55,.25);border:1px solid rgba(26,127,55,.55);color:var(--grn)}
+.rg-D{background:rgba(130,80,223,.25);border:1px solid rgba(130,80,223,.55);color:var(--prp)}
 
 /* ===== Manifest badge ===== */
 .manifest{
   display:inline-flex;align-items:center;gap:6px;
-  background:#010409;border:1px solid var(--line);border-radius:8px;
-  padding:4px 10px;font-family:Consolas,monospace;font-size:1.1vh;color:var(--mut);
+  background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:3px 8px;font-family:Consolas,monospace;font-size:1.1vh;color:var(--mut);
 }
 .manifest b{color:var(--tx)}
 .manifest .key{color:var(--cyan)}
@@ -185,21 +185,21 @@ body{
 
 /* ===== Legend ===== */
 .legend{
-  display:flex;gap:1.5vw;flex-wrap:wrap;justify-content:center;
-  margin-top:2vh;padding-top:1.5vh;border-top:1px solid var(--line);
+  display:flex;gap:1.2vw;flex-wrap:wrap;justify-content:center;
+  margin-top:1.2vh;padding-top:1vh;border-top:1px solid var(--line);
 }
 .legend-item{
-  display:flex;align-items:center;gap:6px;font-size:1.2vh;color:var(--mut);
+  display:flex;align-items:center;gap:6px;font-size:1.1vh;color:var(--mut);
 }
 .legend-item .swatch{
   width:14px;height:14px;border-radius:3px;flex-shrink:0;
 }
-.legend-item code{color:var(--tx);font-size:1.1vh}
+.legend-item code{color:var(--tx);font-size:1vh}
 
 /* ===== Dots navigation ===== */
 .dots{display:flex;gap:6px;align-items:center}
 .dot{
-  width:8px;height:8px;border-radius:50%;background:var(--line);cursor:pointer;
+  width:7px;height:7px;border-radius:50%;background:var(--line);cursor:pointer;
   transition:all .2s;
 }
 .dot.active{background:var(--teal);transform:scale(1.4)}
@@ -207,22 +207,8 @@ body{
 /* ===== Slide footer ===== */
 .slide-footer{
   text-align:center;color:var(--dim);font-size:1.1vh;
-  padding-top:1vh;border-top:1px solid var(--line2);margin-top:auto;
+  padding-top:.8vh;border-top:1px solid var(--line2);margin-top:auto;
 }
-
-/* ===== Key concept badges ===== */
-.concepts{
-  display:flex;gap:1vw;flex-wrap:wrap;margin-bottom:2vh;
-}
-.concept{
-  background:var(--panel);border:1px solid var(--line);border-radius:10px;
-  padding:1vh 1.2vw;flex:1;min-width:200px;
-}
-.concept .ico{font-size:2vh;margin-bottom:.5vh}
-.concept .name{font-size:1.3vh;font-weight:600;color:var(--tx);margin-bottom:.3vh}
-.concept .detail{font-size:1.1vh;color:var(--mut);line-height:1.5}
-.concept .detail b{color:var(--teal)}
-.concept .detail code{color:var(--cyan);font-family:Consolas,monospace}
 </style>
 </head>
 <body>
@@ -248,171 +234,153 @@ body{
   <div class="slide-body">
 
     <div class="concepts">
-      <div class="concept">
-        <div class="ico">🗂</div>
-        <div class="name">Logical Table = 目录</div>
-        <div class="desc"><code>cnstk_ixday/</code> 就是一张表。没有独立元数据库，<b>_table.json</b> 只是轻量清单（可选）。</div>
-      </div>
-      <div class="concept">
-        <div class="ico">🧱</div>
-        <div class="name">Column Group = 子目录</div>
-        <div class="desc"><code>index/</code> <code>factor/alpha101/</code> <code>fieldset/ma/</code> 各是一个列组，独立存 Parquet。</div>
-      </div>
-      <div class="concept">
-        <div class="ico">🔑</div>
-        <div class="name">Key 只存一份</div>
-        <div class="desc"><code>(date, symbol)</code> 只在 <code>index/</code> 组里；其他组不重复存键，靠行号对齐。</div>
-      </div>
-      <div class="concept">
-        <div class="ico">📦</div>
-        <div class="name">Part = Parquet 文件</div>
-        <div class="desc">文件名自描述行区间：<code>0000-0000005998.parquet</code> = 索引 0000 · 5998 行。</div>
-      </div>
+      <div class="concept"><div class="ico">🗂</div><div><span class="name">Logical Table</span> <span class="detail"><code>cnstk_ixday/</code> 就是一张表，<b>_table.json</b> 是可选清单</span></div></div>
+      <div class="concept"><div class="ico">🧱</div><div><span class="name">Column Group</span> <span class="detail"><code>index/</code> <code>factor/alpha101/</code> 各独立存 Parquet</span></div></div>
+      <div class="concept"><div class="ico">🔑</div><div><span class="name">Key 只存一份</span> <span class="detail"><code>(date,symbol)</code> 只在 index 组</span></div></div>
+      <div class="concept"><div class="ico">📦</div><div><span class="name">Part = Parquet</span> <span class="detail"><code>0000-0000005998.parquet</code> = idx 0000 · 5998 行</span></div></div>
     </div>
 
     <div class="db-wrap">
-      <div class="database">
-        <!-- ===== Table: cnstk_ixday ===== -->
-        <div class="table-box" data-name="cnstk_ixday/  ·  逻辑表">
-          <div class="desc">
-            <span class="manifest">_table.json · <b>last_txid</b>:<span class="val">42</span> · <span class="key">groups</span>:[index, factor/alpha101, factor/alpha191, fieldset/ema, fieldset/ma, …] · <span class="key">partitioning</span>:{index:[{template:"month=%Y-%m"}]}</span>
+      <!-- ===== Table: cnstk_ixday (no database wrapper) ===== -->
+      <div class="table-box" data-name="cnstk_ixday/  ·  逻辑表">
+        <div class="desc">
+          <span class="manifest">_table.json · <b>last_txid</b>:<span class="val">42</span> · <span class="key">groups</span>:[index, factor/alpha101, factor/alpha191, fieldset/ema, fieldset/ma, …] · <span class="key">partitioning</span>:{index:[{template:"month=%Y-%m"}]}</span>
+        </div>
+
+        <div class="groups">
+          <!-- ===== index group (has the keys) ===== -->
+          <div class="group g-index">
+            <div class="group-label">🔑 index <span class="path">/ index/</span></div>
+
+            <div class="partition">
+              <div class="part-label"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
+                  <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">B</div>
+                </div>
+              </div>
+              <div class="part">
+                <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
+                <div class="rgs">
+                  <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">B</div>
+                  <div class="rg rg-C" data-tip="RG-C · rows 4998–5997">C</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition">
+              <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
+                  <div class="rg rg-B" data-tip="RG-B · rows 16384–32767">B</div>
+                  <div class="rg rg-C" data-tip="RG-C · rows 32768–5997">C</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition" style="border-color:rgba(26,127,55,.4);background:rgba(26,127,55,.04)">
+              <div class="part-label"><span style="color:var(--grn)">month=2026-10</span><span class="tag" style="color:var(--grn)">新分区 · 1 part · 1 行</span></div>
+              <div class="part" style="border-color:rgba(26,127,55,.3)">
+                <div class="part-name">0000-0000000001.parquet <span class="rows">1 row</span></div>
+                <div class="rgs">
+                  <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">D</div>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div class="groups">
-            <!-- ===== index group (has the keys) ===== -->
-            <div class="group g-index">
-              <div class="group-label">🔑 index <span class="path">/ index/</span></div>
+          <!-- ===== factor/alpha101 ===== -->
+          <div class="group g-factor">
+            <div class="group-label">🧮 alpha101 <span class="path">/ factor/alpha101/</span></div>
 
-              <div class="partition">
-                <div class="part-label"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
-                    <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">B</div>
-                  </div>
-                </div>
-                <div class="part">
-                  <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">B</div>
-                    <div class="rg rg-C" data-tip="RG-C · rows 4998–5997">C</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="partition">
-                <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-A · rows 0–16383">A</div>
-                    <div class="rg rg-B" data-tip="RG-B · rows 16384–32767">B</div>
-                    <div class="rg rg-C" data-tip="RG-C · rows 32768–5997">C</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="partition" style="border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.04)">
-                <div class="part-label"><span style="color:var(--grn)">month=2026-10</span><span class="tag" style="color:var(--grn)">新分区 · 1 part · 1 行</span></div>
-                <div class="part" style="border-color:rgba(63,185,80,.3)">
-                  <div class="part-name">0000-0000000001.parquet <span class="rows">1 row</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">D</div>
-                  </div>
+            <div class="partition">
+              <div class="part-label"><span>month=2026-07</span><span class="tag">1 part · 5998 行</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-A · 同 index 行区间">A</div>
+                  <div class="rg rg-B" data-tip="RG-B">B</div>
                 </div>
               </div>
             </div>
 
-            <!-- ===== factor/alpha101 ===== -->
-            <div class="group g-factor">
-              <div class="group-label">🧮 alpha101 <span class="path">/ factor/alpha101/</span></div>
-
-              <div class="partition">
-                <div class="part-label"><span>month=2026-07</span><span class="tag">1 part · 5998 行</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-A · 同 index 行区间">A</div>
-                    <div class="rg rg-B" data-tip="RG-B">B</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="partition">
-                <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-A · 同 index RG-A">A</div>
-                    <div class="rg rg-B" data-tip="RG-B">B</div>
-                    <div class="rg rg-C" data-tip="RG-C">C</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="partition" style="opacity:.35;border-style:dotted">
-                <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
-                <div style="font-size:1vh;color:var(--dim);text-align:center;padding:.6vh 0;font-style:italic">
-                  — 该组未写入此分区 —
+            <div class="partition">
+              <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-A · 同 index RG-A">A</div>
+                  <div class="rg rg-B" data-tip="RG-B">B</div>
+                  <div class="rg rg-C" data-tip="RG-C">C</div>
                 </div>
               </div>
             </div>
 
-            <!-- ===== fieldset/ma ===== -->
-            <div class="group g-fieldset">
-              <div class="group-label">📐 ma <span class="path">/ fieldset/ma/</span></div>
-
-              <div class="partition">
-                <div class="part-label"><span>month=2026-07</span><span class="tag">1 part · 5998 行</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-A">A</div>
-                    <div class="rg rg-B" data-tip="RG-B">B</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="partition">
-                <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-A · 同 index">A</div>
-                    <div class="rg rg-B" data-tip="RG-B">B</div>
-                    <div class="rg rg-C" data-tip="RG-C">C</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="partition" style="opacity:.35;border-style:dotted">
-                <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
-                <div style="font-size:1vh;color:var(--dim);text-align:center;padding:.6vh 0;font-style:italic">
-                  — 未写入 —
-                </div>
+            <div class="partition" style="opacity:.4;border-style:dotted">
+              <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
+              <div style="font-size:1vh;color:var(--dim);text-align:center;padding:.4vh 0;font-style:italic">
+                — 该组未写入此分区 —
               </div>
             </div>
-
-          </div><!-- /groups -->
-
-          <div class="align-arrow">
-            <span>row 0</span>
-            <span class="ln"></span>
-            <span>同色 RG 跨组等高 = 行号对齐 · 查询绝不 JOIN</span>
-            <span class="ln"></span>
-            <span>row N</span>
           </div>
 
-        </div><!-- /table-box -->
-      </div><!-- /database -->
+          <!-- ===== fieldset/ma ===== -->
+          <div class="group g-fieldset">
+            <div class="group-label">📐 ma <span class="path">/ fieldset/ma/</span></div>
+
+            <div class="partition">
+              <div class="part-label"><span>month=2026-07</span><span class="tag">1 part · 5998 行</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-A">A</div>
+                  <div class="rg rg-B" data-tip="RG-B">B</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition">
+              <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-A · 同 index">A</div>
+                  <div class="rg rg-B" data-tip="RG-B">B</div>
+                  <div class="rg rg-C" data-tip="RG-C">C</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition" style="opacity:.4;border-style:dotted">
+              <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
+              <div style="font-size:1vh;color:var(--dim);text-align:center;padding:.4vh 0;font-style:italic">
+                — 未写入 —
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /groups -->
+
+        <div class="align-arrow">
+          <span>row 0</span>
+          <span class="ln"></span>
+          <span>同色 RG 跨组等高 = 行号对齐 · 查询绝不 JOIN</span>
+          <span class="ln"></span>
+          <span>row N</span>
+        </div>
+
+      </div><!-- /table-box -->
     </div><!-- /db-wrap -->
 
     <div class="legend">
-      <div class="legend-item"><div class="swatch" style="background:rgba(247,129,102,.3);border:1px solid rgba(247,129,102,.6)"></div><code>index/</code> 主键列组 (date, symbol, close…)</div>
-      <div class="legend-item"><div class="swatch" style="background:rgba(188,140,255,.25);border:1px solid rgba(188,140,255,.5)"></div><code>factor/alpha101/</code> 因子列组</div>
-      <div class="legend-item"><div class="swatch" style="background:rgba(63,185,80,.25);border:1px solid rgba(63,185,80,.5)"></div><code>fieldset/ma/</code> 均线列组</div>
-      <div class="legend-item"><div class="swatch rg-A"></div><code>RG-A</code> Row Group（默认 16384 行）</div>
+      <div class="legend-item"><div class="swatch" style="background:rgba(188,76,0,.2);border:1px solid rgba(188,76,0,.5)"></div><code>index/</code> 主键列组</div>
+      <div class="legend-item"><div class="swatch" style="background:rgba(130,80,223,.18);border:1px solid rgba(130,80,223,.4)"></div><code>factor/alpha101/</code> 因子列组</div>
+      <div class="legend-item"><div class="swatch" style="background:rgba(26,127,55,.18);border:1px solid rgba(26,127,55,.4)"></div><code>fieldset/ma/</code> 均线列组</div>
+      <div class="legend-item"><div class="swatch rg-A"></div><code>RG-A</code> Row Group</div>
       <div class="legend-item"><div class="swatch rg-B"></div><code>RG-B</code></div>
       <div class="legend-item"><div class="swatch rg-C"></div><code>RG-C</code></div>
       <div class="legend-item"><div class="swatch rg-D"></div><code>RG-D</code></div>
@@ -430,64 +398,64 @@ body{
   <div class="slide-body">
 
     <div class="db-wrap" style="align-items:flex-start">
-      <div class="database" style="min-width:80vw">
+      <div class="table-box" style="min-width:80vw" data-name="factor/alpha101/  ·  一个列组的内部">
+        <div class="desc">每个列组内部按 <code>month=YYYY-MM</code> 分区，分区内是 part 文件（Parquet），part 内是 Row Group（默认 16384 行）</div>
 
-        <div class="table-box" data-name="factor/alpha101/  ·  一个列组的内部">
-          <div class="desc">每个列组内部按 <code>month=YYYY-MM</code> 分区，分区内是 part 文件（Parquet），part 内是 Row Group（默认 16384 行）</div>
+        <div class="groups">
+          <!-- Zoomed-in: single group structure -->
+          <div class="group g-factor" style="flex:2">
+            <div class="group-label">🧮 factor/alpha101/ <span class="path">列组目录</span></div>
 
-          <div class="groups">
-            <!-- Zoomed-in: single group structure -->
-            <div class="group g-factor" style="flex:2">
-              <div class="group-label">🧮 factor/alpha101/ <span class="path">列组目录</span></div>
-
-              <div class="partition">
-                <div class="part-label"><span>month=2026-07</span><span class="tag">分区目录</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet</div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-0 · rows 0–16383 · 含 alpha001…alpha101 列">RG0</div>
-                    <div class="rg rg-B" data-tip="RG-1 · rows 16384–2997 · 最后一 RG 可能不满">RG1</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="partition">
-                <div class="part-label"><span>month=2026-09</span><span class="tag">分区目录</span></div>
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet</div>
-                  <div class="rgs">
-                    <div class="rg rg-A" data-tip="RG-0">RG0</div>
-                    <div class="rg rg-B" data-tip="RG-1">RG1</div>
-                    <div class="rg rg-C" data-tip="RG-2 · 末 RG">RG2</div>
-                  </div>
+            <div class="partition">
+              <div class="part-label"><span>month=2026-07</span><span class="tag">分区目录</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet</div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-0 · rows 0–16383 · 含 alpha001…alpha101 列">RG0</div>
+                  <div class="rg rg-B" data-tip="RG-1 · rows 16384–2997 · 最后一 RG 可能不满">RG1</div>
                 </div>
               </div>
             </div>
 
-            <!-- Zoomed-in: part anatomy -->
-            <div class="group" style="flex:1.2;background:rgba(57,210,192,.04);border:1.5px solid rgba(57,210,192,.3)">
-              <div class="group-label" style="color:var(--teal)">🔍 Part 解剖</div>
-
-              <div style="font-size:1.1vh;color:var(--mut);line-height:1.8;margin-top:.5vh">
-                <div style="color:var(--teal);font-family:Consolas,monospace;font-size:1.1vh;margin-bottom:.5vh">0000-0000005998.parquet</div>
-                <div>├ 文件名 = <b style="color:var(--tx)">{idx:04d}-{rows:010d}</b></div>
-                <div>├ idx = 分区内序号（0000 起）</div>
-                <div>├ rows = 文件总行数（10 位定宽）</div>
-                <div>├ 行区间 = <b style="color:var(--tx)">文件名累加推导</b></div>
-                <div>│&nbsp;&nbsp;start_row = 分区起点 + Σ(更小 idx part 行数)</div>
-                <div>├ 格式 = <b style="color:var(--tx)">Parquet</b>（ZSTD 压缩）</div>
-                <div>├ 列 = 组 schema 的子集（evolution）</div>
-                <div>└ RG = Row Group（默认 16384 行）</div>
-                <div style="margin-top:.8vh;color:var(--cyan)">读 part 时 <b>零 footer IO</b>：行区间从文件名已知，只在需要 min/max 统计时才读 footer</div>
+            <div class="partition">
+              <div class="part-label"><span>month=2026-09</span><span class="tag">分区目录</span></div>
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet</div>
+                <div class="rgs">
+                  <div class="rg rg-A" data-tip="RG-0">RG0</div>
+                  <div class="rg rg-B" data-tip="RG-1">RG1</div>
+                  <div class="rg rg-C" data-tip="RG-2 · 末 RG">RG2</div>
+                </div>
               </div>
             </div>
           </div>
 
-        </div><!-- /table-box -->
+          <!-- Zoomed-in: part anatomy -->
+          <div class="group" style="flex:1.2;background:rgba(10,123,131,.04);border:1.5px solid rgba(10,123,131,.25)">
+            <div class="group-label" style="color:var(--teal)">🔍 Part 解剖</div>
 
-        <!-- Manifest detail -->
-        <div class="table-box" data-name="_table.json  ·  可选清单（缺失时全部用默认值）">
-          <div class="desc" style="font-family:Consolas,monospace;font-size:1.2vh;color:var(--mut);white-space:pre;line-height:1.6">
+            <div style="font-size:1.1vh;color:var(--mut);line-height:1.8;margin-top:.5vh">
+              <div style="color:var(--teal);font-family:Consolas,monospace;font-size:1.1vh;margin-bottom:.5vh">0000-0000005998.parquet</div>
+              <div>├ 文件名 = <b style="color:var(--tx)">{idx:04d}-{rows:010d}</b></div>
+              <div>├ idx = 分区内序号（0000 起）</div>
+              <div>├ rows = 文件总行数（10 位定宽）</div>
+              <div>├ 行区间 = <b style="color:var(--tx)">文件名累加推导</b></div>
+              <div>│&nbsp;&nbsp;start_row = 分区起点 + Σ(更小 idx part 行数)</div>
+              <div>├ 格式 = <b style="color:var(--tx)">Parquet</b>（ZSTD 压缩）</div>
+              <div>├ 列 = 组 schema 的子集（evolution）</div>
+              <div>└ RG = Row Group（默认 16384 行）</div>
+              <div style="margin-top:.8vh;color:var(--cyan)">读 part 时 <b>零 footer IO</b>：行区间从文件名已知</div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /table-box -->
+    </div><!-- /db-wrap -->
+
+    <!-- Manifest detail -->
+    <div class="db-wrap" style="flex:none;margin-top:1vh">
+      <div class="table-box" style="min-width:60vw;padding:1.5vh 2vw" data-name="_table.json  ·  可选清单（缺失时全部用默认值）">
+        <div class="desc" style="font-family:Consolas,monospace;font-size:1.2vh;color:var(--mut);white-space:pre;line-height:1.6">
 {
   <span style="color:var(--cyan)">"name"</span>: <span style="color:var(--grn)">"cnstk_ixday"</span>,
   <span style="color:var(--cyan)">"version"</span>: <span style="color:var(--org)">1</span>,
@@ -501,11 +469,9 @@ body{
   }
 }
 <span style="color:var(--dim)">// groups 字段读端永不解析（Group 发现唯一路径 = glob）；唯一例外 = 空表起步给 Writer 提供骨架</span>
-          </div>
         </div>
-
-      </div><!-- /database -->
-    </div><!-- /db-wrap -->
+      </div>
+    </div>
 
   </div>
   <div class="slide-footer">分区对齐唯一契约：所有组用同一种一层分区段（year= / month= / date=）· 共享分区总行数必须一致</div>
@@ -519,79 +485,77 @@ body{
   <div class="slide-body">
 
     <div class="db-wrap">
-      <div class="database" style="min-width:75vw">
-        <div class="table-box" data-name="month=2026-09  ·  共享分区（放大视图）">
+      <div class="table-box" style="min-width:75vw" data-name="month=2026-09  ·  共享分区（放大视图）">
 
-          <div class="desc">三个组在 <code>month=2026-09</code> 分区各有 5998 行 → 总行数一致 ✓ · 同色 RG 跨组等高 = 同一逻辑行区间</div>
+        <div class="desc">三个组在 <code>month=2026-09</code> 分区各有 5998 行 → 总行数一致 ✓ · 同色 RG 跨组等高 = 同一逻辑行区间</div>
 
-          <div class="groups">
-            <!-- index -->
-            <div class="group g-index">
-              <div class="group-label">🔑 index <span class="path">date, symbol, close</span></div>
-              <div class="partition" style="border:none;padding:0">
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs" style="height:100%;flex-direction:column;gap:4px">
-                    <div class="rg rg-A" style="flex:none;height:3vh;width:100%" data-tip="RG-0 · rows 0–16383 · date=2026-09-01..09-17">RG0 · rows 0–16k</div>
-                    <div class="rg rg-B" style="flex:none;height:2vh;width:100%" data-tip="RG-1 · rows 16384–32767 · date=2026-09-18..09-20">RG1 · rows 16k–32k</div>
-                    <div class="rg rg-C" style="flex:none;height:1.5vh;width:100%" data-tip="RG-2 · rows 32768–5997 · 末 RG（不满 16384）">RG2 · rows 32k–5998</div>
-                  </div>
+        <div class="groups">
+          <!-- index -->
+          <div class="group g-index">
+            <div class="group-label">🔑 index <span class="path">date, symbol, close</span></div>
+            <div class="partition" style="border:none;padding:0">
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs" style="height:100%;flex-direction:column;gap:4px">
+                  <div class="rg rg-A" style="flex:none;height:3vh;width:100%" data-tip="RG-0 · rows 0–16383 · date=2026-09-01..09-17">RG0 · rows 0–16k</div>
+                  <div class="rg rg-B" style="flex:none;height:2vh;width:100%" data-tip="RG-1 · rows 16384–32767 · date=2026-09-18..09-20">RG1 · rows 16k–32k</div>
+                  <div class="rg rg-C" style="flex:none;height:1.5vh;width:100%" data-tip="RG-2 · rows 32768–5997 · 末 RG（不满 16384）">RG2 · rows 32k–5998</div>
                 </div>
               </div>
             </div>
-
-            <!-- alpha101 -->
-            <div class="group g-factor">
-              <div class="group-label">🧮 alpha101 <span class="path">alpha001…alpha101</span></div>
-              <div class="partition" style="border:none;padding:0">
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs" style="height:100%;flex-direction:column;gap:4px">
-                    <div class="rg rg-A" style="flex:none;height:3vh;width:100%" data-tip="RG-0 · 与 index RG0 同一行区间">RG0 · rows 0–16k</div>
-                    <div class="rg rg-B" style="flex:none;height:2vh;width:100%" data-tip="RG-1 · 与 index RG1 同一行区间">RG1 · rows 16k–32k</div>
-                    <div class="rg rg-C" style="flex:none;height:1.5vh;width:100%" data-tip="RG-2">RG2 · rows 32k–5998</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- ma -->
-            <div class="group g-fieldset">
-              <div class="group-label">📐 ma <span class="path">ma5, ma20…</span></div>
-              <div class="partition" style="border:none;padding:0">
-                <div class="part">
-                  <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                  <div class="rgs" style="height:100%;flex-direction:column;gap:4px">
-                    <div class="rg rg-A" style="flex:none;height:3vh;width:100%" data-tip="RG-0 · 与 index RG0 同一行区间">RG0 · rows 0–16k</div>
-                    <div class="rg rg-B" style="flex:none;height:2vh;width:100%" data-tip="RG-1">RG1 · rows 16k–32k</div>
-                    <div class="rg rg-C" style="flex:none;height:1.5vh;width:100%" data-tip="RG-2">RG2 · rows 32k–5998</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-          </div><!-- /groups -->
-
-          <div class="align-arrow" style="margin-top:1.5vh">
-            <span>row 0</span>
-            <span class="ln"></span>
-            <span style="color:var(--teal);font-weight:600">三个 Parquet Reader 的 Vector 直接装入同一个 DataChunk · 没有 JOIN · 没有横向拼接</span>
-            <span class="ln"></span>
-            <span>row 5997</span>
           </div>
 
-        </div><!-- /table-box -->
+          <!-- alpha101 -->
+          <div class="group g-factor">
+            <div class="group-label">🧮 alpha101 <span class="path">alpha001…alpha101</span></div>
+            <div class="partition" style="border:none;padding:0">
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs" style="height:100%;flex-direction:column;gap:4px">
+                  <div class="rg rg-A" style="flex:none;height:3vh;width:100%" data-tip="RG-0 · 与 index RG0 同一行区间">RG0 · rows 0–16k</div>
+                  <div class="rg rg-B" style="flex:none;height:2vh;width:100%" data-tip="RG-1 · 与 index RG1 同一行区间">RG1 · rows 16k–32k</div>
+                  <div class="rg rg-C" style="flex:none;height:1.5vh;width:100%" data-tip="RG-2">RG2 · rows 32k–5998</div>
+                </div>
+              </div>
+            </div>
+          </div>
 
-        <!-- Key invariants -->
-        <div style="display:flex;gap:1vw;flex-wrap:wrap;margin-top:2vh;justify-content:center">
-          <div style="background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.3);border-radius:22px;padding:1vh 1.5vw;font-size:1.3vh;color:var(--cyan)">↔️ 所有组行号严格对齐</div>
-          <div style="background:rgba(247,129,102,.08);border:1px solid rgba(247,129,102,.3);border-radius:22px;padding:1vh 1.5vw;font-size:1.3vh;color:var(--org)">🔑 Key 只存一份（index 组）</div>
-          <div style="background:rgba(57,210,192,.08);border:1px solid rgba(57,210,192,.3);border-radius:22px;padding:1vh 1.5vw;font-size:1.3vh;color:var(--teal)">🚫 查询绝不 JOIN</div>
-          <div style="background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.3);border-radius:22px;padding:1vh 1.5vw;font-size:1.3vh;color:var(--grn)">🏷 文件名即行区间</div>
-          <div style="background:rgba(188,140,255,.08);border:1px solid rgba(188,140,255,.3);border-radius:22px;padding:1vh 1.5vw;font-size:1.3vh;color:var(--prp)">📐 分区对齐唯一契约</div>
+          <!-- ma -->
+          <div class="group g-fieldset">
+            <div class="group-label">📐 ma <span class="path">ma5, ma20…</span></div>
+            <div class="partition" style="border:none;padding:0">
+              <div class="part">
+                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
+                <div class="rgs" style="height:100%;flex-direction:column;gap:4px">
+                  <div class="rg rg-A" style="flex:none;height:3vh;width:100%" data-tip="RG-0 · 与 index RG0 同一行区间">RG0 · rows 0–16k</div>
+                  <div class="rg rg-B" style="flex:none;height:2vh;width:100%" data-tip="RG-1">RG1 · rows 16k–32k</div>
+                  <div class="rg rg-C" style="flex:none;height:1.5vh;width:100%" data-tip="RG-2">RG2 · rows 32k–5998</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /groups -->
+
+        <div class="align-arrow" style="margin-top:1.5vh">
+          <span>row 0</span>
+          <span class="ln"></span>
+          <span style="color:var(--teal);font-weight:600">三个 Parquet Reader 的 Vector 直接装入同一个 DataChunk · 没有 JOIN · 没有横向拼接</span>
+          <span class="ln"></span>
+          <span>row 5997</span>
         </div>
 
-      </div><!-- /database -->
+      </div><!-- /table-box -->
+
+      <!-- Key invariants -->
+      <div style="display:flex;gap:1vw;flex-wrap:wrap;margin-top:2vh;justify-content:center">
+        <div style="background:rgba(9,105,218,.06);border:1px solid rgba(9,105,218,.25);border-radius:22px;padding:.8vh 1.2vw;font-size:1.2vh;color:var(--cyan)">↔️ 所有组行号严格对齐</div>
+        <div style="background:rgba(188,76,0,.06);border:1px solid rgba(188,76,0,.25);border-radius:22px;padding:.8vh 1.2vw;font-size:1.2vh;color:var(--org)">🔑 Key 只存一份（index 组）</div>
+        <div style="background:rgba(10,123,131,.06);border:1px solid rgba(10,123,131,.25);border-radius:22px;padding:.8vh 1.2vw;font-size:1.2vh;color:var(--teal)">🚫 查询绝不 JOIN</div>
+        <div style="background:rgba(26,127,55,.06);border:1px solid rgba(26,127,55,.25);border-radius:22px;padding:.8vh 1.2vw;font-size:1.2vh;color:var(--grn)">🏷 文件名即行区间</div>
+        <div style="background:rgba(130,80,223,.06);border:1px solid rgba(130,80,223,.25);border-radius:22px;padding:.8vh 1.2vw;font-size:1.2vh;color:var(--prp)">📐 分区对齐唯一契约</div>
+      </div>
+
     </div><!-- /db-wrap -->
 
   </div>
