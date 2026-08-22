@@ -762,16 +762,18 @@ body{
     });
   });
 
-  // Click RG LABEL → toggle independently (multi-select)
+  // Click RG LABEL → toggle independently, synced only within same partition+part
   document.querySelectorAll(".rg-label").forEach(function(h){
     h.addEventListener("click", function(e){
       e.stopPropagation();
       var rg = h.closest(".rg");
       var rgKey = rg.getAttribute("data-rg");
+      var pKey = rg.closest(".partition").getAttribute("data-p");
+      var partKey = rg.closest(".part").getAttribute("data-part");
 
-      // Toggle all groups' same-data-rg RGs together
+      // Toggle only RGs in the SAME partition + SAME part across all groups
       var isOn = rg.classList.contains("selected");
-      document.querySelectorAll('.rg[data-rg="'+rgKey+'"]').forEach(function(x){
+      document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"] .rg[data-rg="'+rgKey+'"]').forEach(function(x){
         if (isOn) x.classList.remove("selected");
         else x.classList.add("selected");
       });
