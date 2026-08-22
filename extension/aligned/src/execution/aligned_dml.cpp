@@ -481,9 +481,14 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 	// None of these steps touch the catalog or executor; safe on the pipeline
 	// thread.
 	try {
-		// Collect all rowids + set values from the sink collection.
-		vector<int64_t> rowids;
-		std::map<int64_t, std::vector<Value>> set_by_row;
+		// Collect all rowids + set values from the sink collection into a
+		// sorted vector for efficient merge with resolved keys.
+		struct RowData {
+			int64_t rowid;
+			vector<Value> set_values;
+		};
+		vector<RowData> rows;
+		rows.reserve(g.row_count);
 		{
 			ColumnDataScanState ss;
 			g.collection.InitializeScan(ss);
@@ -491,23 +496,32 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 			g.collection.InitializeScanChunk(c);
 			while (g.collection.Scan(ss, c)) {
 				for (idx_t r = 0; r < c.size(); r++) {
-					int64_t rid = c.GetValue(0, r).GetValue<int64_t>();
-					rowids.push_back(rid);
-					std::vector<Value> vals;
+					RowData rd;
+					rd.rowid = c.GetValue(0, r).GetValue<int64_t>();
 					for (idx_t k = 1; k < c.ColumnCount(); k++) {
-						vals.push_back(c.GetValue(k, r));
+						rd.set_values.push_back(c.GetValue(k, r));
 					}
-					set_by_row[rid] = vals;
+					rows.push_back(std::move(rd));
 				}
 				c.Reset();
 			}
 		}
+		// Sort by rowid for merge with resolved keys (which are also sorted).
+		sort(rows.begin(), rows.end(),
+		     [](const RowData &a, const RowData &b) { return a.rowid < b.rowid; });
 
 		// Resolve keys: (rowid, symbol, date) — v8: symbol before date.
 		auto keys_types = vector<LogicalType> {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DATE};
 		ColumnDataCollection keys(context, keys_types);
 		ColumnDataAppendState append;
 		keys.InitializeAppend(append);
+
+		// Extract rowids for the resolver.
+		vector<int64_t> rowids;
+		rowids.reserve(rows.size());
+		for (auto &rd : rows) {
+			rowids.push_back(rd.rowid);
+		}
 		ResolveKeysForRowids(context, root, table, rowids, keys, append);
 
 		// staged schema: symbol, date, then set columns in set_names order (v8)
@@ -530,24 +544,33 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 		DataChunk out_chunk;
 		out_chunk.Initialize(context, staged_types);
 		idx_t out_n = 0;
+
+		// Merge-join the resolved keys (sorted by rowid) with the collected
+		// set values (sorted by rowid). Both sides are sorted → single pass,
+		// no hash map needed.
 		ColumnDataScanState ss;
 		keys.InitializeScan(ss);
 		DataChunk kc;
 		keys.InitializeScanChunk(kc);
+		idx_t row_idx = 0; // cursor into `rows`
 		while (keys.Scan(ss, kc)) {
 			for (idx_t r = 0; r < kc.size(); r++) {
 				int64_t rid = kc.GetValue(0, r).GetValue<int64_t>();
-				auto it = set_by_row.find(rid);
-				if (it == set_by_row.end()) {
-					continue;
+				// Advance `rows` cursor to match rid (both sorted).
+				while (row_idx < rows.size() && rows[row_idx].rowid < rid) {
+					row_idx++;
+				}
+				if (row_idx >= rows.size() || rows[row_idx].rowid != rid) {
+					continue; // key not in set rows (shouldn't happen)
 				}
 				// kc layout: (rowid, symbol, date) — v8
 				out_chunk.SetValue(0, out_n, kc.GetValue(1, r)); // symbol
 				out_chunk.SetValue(1, out_n, kc.GetValue(2, r)); // date
-				for (idx_t k = 0; k < it->second.size(); k++) {
-					out_chunk.SetValue(2 + k, out_n, it->second[k]);
+				for (idx_t k = 0; k < rows[row_idx].set_values.size(); k++) {
+					out_chunk.SetValue(2 + k, out_n, rows[row_idx].set_values[k]);
 				}
 				out_n++;
+				row_idx++;
 				if (out_n >= STANDARD_VECTOR_SIZE) {
 					out_chunk.SetCardinality(out_n);
 					staged_coll.Append(out_chunk);

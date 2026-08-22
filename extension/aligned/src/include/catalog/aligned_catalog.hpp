@@ -5,6 +5,8 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
+#include <mutex>
+
 namespace duckdb {
 
 class AlignedTableEntry;
@@ -64,6 +66,12 @@ private:
 	void EnsureTablesLoaded(ClientContext &context);
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> tables;
 	bool tables_loaded = false;
+	//! Guards tables + tables_loaded. DuckDB's catalog framework serializes
+	//! most access via the catalog transaction, but Scan(CatalogType, ...) (the
+	//! no-context overload) iterates `tables` without calling
+	//! EnsureTablesLoaded, so we need our own lock for concurrent Scan vs
+	//! CreateTable reload.
+	std::mutex tables_mutex;
 };
 
 //! DuckLake-style catalog over a parquet column-group data root.

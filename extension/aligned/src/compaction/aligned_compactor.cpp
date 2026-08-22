@@ -157,10 +157,22 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 		idx_t parts_before = 0;
 		idx_t parts_after = 0;
 
-		// Compaction processes EVERY group in one atomic transaction so the
-		// full-alignment contract (same part count across groups) is
-		// preserved; the parts are grouped by partition directory and merged
-		// per directory.
+		// === Phase 1: Stage all merged parts in _tmp ===
+		// All groups are staged first. If any group/partition fails during
+		// staging, we clean up _tmp and the table is unchanged — no old
+		// parts have been deleted and no new parts have been moved into place.
+
+		// Collect a list of staged→target moves + old-part deletions to
+		// execute in Phase 2.
+		struct PendingMove {
+			string staged_path;
+			string target_path;
+			vector<string> old_paths;
+			GroupPlan *group;
+			string dir;
+		};
+		vector<PendingMove> pending_moves;
+
 		for (auto &group : bind.plan.groups) {
 			// Group the parts by partition directory
 			std::map<string, vector<const PartInfo *>> by_dir;
@@ -284,27 +296,43 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			writer->Flush(*buffer, transform);
 			writer->Finalize();
 
-			// Commit: move the new part into place, then delete the old
-			// parts. There are no sidecars and no commit markers — the part
-			// file move is the atomic switch (readers glob only visible
-			// part-*.parquet files).
+			// Record the pending move — do NOT move into place or delete
+			// old parts yet. This is the key change for cross-group atomicity:
+			// if a later group fails during staging, the old parts of earlier
+			// groups are still on disk and the table is unchanged.
 			string target_path = dir + "/" + part_name + ".parquet";
 			if (fs.FileExists(target_path)) {
 				throw IOException("Aligned table '%s' group '%s': part '%s' already exists in '%s'",
 				                  bind.plan.table_name, group.manifest.group, part_name, dir);
 			}
-			fs.MoveFile(staged_path, target_path);
 
-			// Delete the old parts (after the new part is in place: they are
-			// already invisible to readers; failure here only leaves
-			// orphaned files)
+			PendingMove pm;
+			pm.staged_path = staged_path;
+			pm.target_path = target_path;
 			for (auto &part : parts) {
-				fs.RemoveFile(part->path);
+				pm.old_paths.push_back(part->path);
 			}
+			pending_moves.push_back(std::move(pm));
 
 			dirs_compacted++;
 				parts_after -= parts.size();
 				parts_after += 1;
+			}
+		}
+
+		// === Phase 2: Commit — move all staged parts into place, then delete old ===
+		// All staging succeeded. Now we atomically switch: move every new part
+		// into its target directory, then delete all old parts. If a move fails
+		// mid-way, the already-moved new parts are valid (they cover the same
+		// row range), but the not-yet-moved groups still have their old parts.
+		// The reader's fail-fast on part-count mismatch will catch this, but
+		// this is a best-effort phase — MoveFile on the same volume is atomic.
+		for (auto &pm : pending_moves) {
+			fs.MoveFile(pm.staged_path, pm.target_path);
+		}
+		for (auto &pm : pending_moves) {
+			for (auto &old : pm.old_paths) {
+				fs.RemoveFile(old);
 			}
 		}
 

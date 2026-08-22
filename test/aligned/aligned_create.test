@@ -85,6 +85,18 @@ ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.date_tbl (
 ----
 1
 
+# --- error: invalid date in partition key (month 13) ---
+statement error
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.basic_tbl (symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT) WITH (partition = 'month=2026-13')
+----
+invalid date
+
+# --- error: invalid date in partition key (day 32) ---
+statement error
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.date_tbl (symbol VARCHAR, date DATE, close DOUBLE) WITH (partition = 'date=2026-09-32')
+----
+invalid date
+
 # === extend column group ===
 
 # create a table with only index group, insert data

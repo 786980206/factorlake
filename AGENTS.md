@@ -160,7 +160,9 @@ aligned_delete(table, keys_source, root=...)      → (rows_deleted, parts_rewri
 - **并发写互斥**（`.aligned_write.lock`）：mutator/compactor 执行前创建 lock 文件
   （RAII），已有 lock 则拒绝。crash 残留用户手动删除。
 - **Compaction**：`aligned_compact(table, 'all')` 单事务合并所有组，原子切换。
-  同目录必须同列集（拒绝 schema-evolution 合并）。
+  同目录必须同列集（拒绝 schema-evolution 合并）。**两阶段提交**：所有组的合并
+  part 先写入 `_tmp/`，全部成功后再统一 move 到目标目录 + 删除旧 part；任一组
+  合并失败则清理 `_tmp`、表状态不变（旧 part 仍在原位）。
 
 ### CREATE TABLE DDL
 
@@ -242,7 +244,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本：test_aligned 42/42、test_upsert 50/50、test_dml 7/7、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 122/122 + 5 PS 套件全 PASS
+- 当前总：SQLLogicTest 124/124 + 5 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`

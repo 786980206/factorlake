@@ -213,6 +213,10 @@ aligned_delete(table, keys_source, root=...)              → (rows_deleted, par
   3. 崩溃 → 丢弃 `_tmp/transaction-<txid>/`（读端从不读 `_tmp/`）。
 - `aligned_delete`：删空最高索引 part → 直接移除；删空单 part 分区 → 整分区移除；
   删空内部 part → fail-fast（"run aligned_compact first"）。
+- **Compaction**（`aligned_compact(table, 'all')`）：合并所有组的多 part 分区为
+  单 part（同目录必须同列集，拒绝 schema-evolution 合并）。**两阶段提交**：所有组
+  的合并 part 先全部写入 `_tmp/`，全部成功后再统一 move 到目标目录并删除旧 part；
+  任一组合并失败则清理 `_tmp`、表状态不变（旧 part 仍在原位）。
 
 ---
 
@@ -245,7 +249,8 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 
 **分区创建规则**：
 - 表必须已存在。分区键格式必须匹配现有模板（`date=YYYY-MM-DD` 15 字符 /
-  `month=YYYY-MM` 13 字符 / `year=YYYY` 9 字符）。
+  `month=YYYY-MM` 13 字符 / `year=YYYY` 9 字符），且日期部分必须是有效的
+  日历日期（如 `month=2026-13` 会 fail-fast）。
 - 为每个已发现 Group 在新分区目录下写 0 行占位 parquet。
 - 若 index 已有该分区 → fail-fast "partition already exists"。
 

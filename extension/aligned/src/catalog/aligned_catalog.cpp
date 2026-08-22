@@ -97,6 +97,7 @@ AlignedSchemaEntry::AlignedSchemaEntry(Catalog &catalog, const string &schema_na
 }
 
 void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
+	std::lock_guard<std::mutex> lock(tables_mutex);
 	if (tables_loaded) {
 		return;
 	}
@@ -144,6 +145,7 @@ void AlignedSchemaEntry::Scan(CatalogType type, const std::function<void(Catalog
 	if (type != CatalogType::TABLE_ENTRY && type != CatalogType::INVALID) {
 		return;
 	}
+	std::lock_guard<std::mutex> lock(tables_mutex);
 	for (auto &entry : tables) {
 		callback(*entry.second);
 	}
@@ -164,6 +166,7 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::LookupEntry(CatalogTransaction tr
 		if (transaction.HasContext()) {
 			EnsureTablesLoaded(transaction.GetContext());
 		}
+		std::lock_guard<std::mutex> lock(tables_mutex);
 		auto it = tables.find(lookup_info.GetEntryName());
 		if (it != tables.end()) {
 			return optional_ptr<CatalogEntry>(it->second.get());
@@ -234,9 +237,13 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction tr
 	}
 
 	// Force re-discovery of tables (the new table is now on disk)
-	tables_loaded = false;
+	{
+		std::lock_guard<std::mutex> lock(tables_mutex);
+		tables_loaded = false;
+	}
 	EnsureTablesLoaded(transaction.GetContext());
 
+	std::lock_guard<std::mutex> lock(tables_mutex);
 	auto it = tables.find(base.table);
 	if (it == tables.end()) {
 		throw CatalogException("aligned CREATE TABLE: table '%s' was created but could not be loaded",

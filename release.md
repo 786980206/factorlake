@@ -224,7 +224,26 @@
 - 验收：SQLLogicTest 122/122、test_aligned 42/42、test_upsert 50/50、
   test_dml 7/7、test_compaction 16/16、test_parallel 8/8 全 PASS。
 
+### 后续加固（2026-08）
+
+- **M2: ValidatePartitionKey 日期格式校验**：`ValidatePartitionKey` 原先只检查
+  长度（如 `date=1970-13-99` 能通过），现使用 `Date::TryConvertDate` 校验日期
+  有效性（`month=2026-13` → fail-fast "invalid date"）。新增 2 个 SQLLogicTest
+  错误用例（122→124）。
+- **M4: tables map 线程安全**：`AlignedSchemaEntry` 的 `tables` map + `tables_loaded`
+  原先无锁，`Scan` (no-context overload) 迭代 `tables` 不调用 `EnsureTablesLoaded`
+  可能与并发 `CreateTable` reload 竞争。新增 `std::mutex tables_mutex`，保护
+  `EnsureTablesLoaded`、`Scan`、`LookupEntry`、`CreateTable` reload 路径。
+- **Compactor 跨组原子性加固**：原先 per-group commit（合并组 A → 删旧 part →
+  合并组 B 失败 → 组 A 已提交、组 B 未变 → 不一致）。改为**两阶段提交**：
+  Phase 1 所有组的合并 part 先写入 `_tmp/`；Phase 2 全部成功后统一 move + 删旧。
+  任一组失败 → 清理 `_tmp`、表状态不变。
+- **DML UPDATE 向量化**：`PhysicalAlignedUpdate::Finalize` 原先用
+  `std::map<int64_t, vector<Value>>` 存 set 值 + 逐行 `GetValue`/`SetValue` join。
+  改为 sorted vector + merge-join（两端按 rowid 排序，单遍扫描），消除
+  `std::map` 开销。
+
 ### 后续待办
 
-- aligned_compactor 跨组原子性加固（单组失败时回滚已移动的组）
-- DML 大批量写入的分块物化
+- DML INSERT 超大 batch 内存控制（当前全部物化到内存 ColumnDataCollection，
+  10M+ 行可能 OOM；需流式 mutator API）

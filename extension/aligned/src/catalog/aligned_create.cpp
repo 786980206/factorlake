@@ -5,6 +5,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/common/types/date.hpp"
 
 #include "parquet_writer.hpp"
 #include "parquet_field_id.hpp"
@@ -193,26 +194,44 @@ static string DefaultPartitionKey(const string &template_str) {
 	                       template_str);
 }
 
-//! Validates that a partition key matches the given template kind.
+//! Validates that a partition key matches the given template kind, including
+//! that the date portion is a real calendar date (not just the right length).
 static void ValidatePartitionKey(const string &key, const string &template_str) {
+	// Helper: validate that a date string (e.g. "2026-09-01" or "2026-09" or "2026")
+	// parses as a real date via DuckDB's Date::TryConvertDate.
+	auto validate_date = [&](const string &date_str) {
+		date_t result;
+		idx_t pos = 0;
+		bool special = false;
+		auto rc = Date::TryConvertDate(date_str.c_str(), date_str.size(), pos, result,
+		                                special, true /* strict */);
+		if (rc != DateCastResult::SUCCESS) {
+			throw BinderException("aligned CREATE TABLE: partition key '%s' contains "
+			                       "an invalid date '%s'", key, date_str);
+		}
+	};
+
 	if (template_str.rfind("date=", 0) == 0) {
 		// Expect "date=YYYY-MM-DD" (15 chars)
 		if (key.rfind("date=", 0) != 0 || key.size() != 15) {
 			throw BinderException("aligned CREATE TABLE: partition key '%s' does not match "
 			                       "template 'date=%%Y-%%m-%%d' (expected 'date=YYYY-MM-DD')", key);
 		}
+		validate_date(key.substr(5));
 	} else if (template_str.rfind("month=", 0) == 0) {
 		// Expect "month=YYYY-MM" (13 chars)
 		if (key.rfind("month=", 0) != 0 || key.size() != 13) {
 			throw BinderException("aligned CREATE TABLE: partition key '%s' does not match "
 			                       "template 'month=%%Y-%%m' (expected 'month=YYYY-MM')", key);
 		}
+		validate_date(key.substr(6) + "-01");
 	} else if (template_str.rfind("year=", 0) == 0) {
 		// Expect "year=YYYY" (9 chars)
 		if (key.rfind("year=", 0) != 0 || key.size() != 9) {
 			throw BinderException("aligned CREATE TABLE: partition key '%s' does not match "
 			                       "template 'year=%%Y' (expected 'year=YYYY')", key);
 		}
+		validate_date(key.substr(5) + "-01-01");
 	} else {
 		throw BinderException("aligned CREATE TABLE: invalid partition_template '%s'", template_str);
 	}
