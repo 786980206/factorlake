@@ -186,14 +186,17 @@ body{
 .manifest .key{color:var(--cyan)}
 .manifest .val{color:var(--grn)}
 
-/* ===== Alignment indicator ===== */
-.align-arrow{
-  display:flex;align-items:center;gap:4px;color:var(--teal);
-  font-size:1.5vh;font-family:Consolas,monospace;margin-top:.8vh;
+/* ===== Row axis (vertical, left of groups) ===== */
+.row-axis{
+  display:flex;flex-direction:column;align-items:center;
+  width:3vw;flex-shrink:0;justify-content:space-between;
+  color:var(--teal);font-size:1.4vh;font-family:Consolas,monospace;
+  padding-top:.5vh;padding-bottom:.5vh;
 }
-.align-arrow .ln{
-  flex:1;height:1px;background:repeating-linear-gradient(90deg,
+.row-axis .arrow{
+  flex:1;width:2px;background:repeating-linear-gradient(180deg,
     var(--teal) 0,var(--teal) 6px,transparent 6px,transparent 12px);
+  margin:4px 0;
 }
 
 /* ===== Legend ===== */
@@ -258,6 +261,15 @@ body{
       <div class="table-box" data-name="cnstk_ixday/  ·  逻辑表">
         <div class="desc">
           <span class="manifest">_table.json · <b>last_txid</b>:<span class="val">42</span> · <span class="key">groups</span>:[index, factor/alpha101, factor/alpha191, fieldset/ema, fieldset/ma, …] · <span class="key">partitioning</span>:{index:[{template:"month=%Y-%m"}]}</span>
+        </div>
+
+        <div style="display:flex;flex:1;min-height:0">
+
+        <!-- ===== Row axis (vertical, left side) ===== -->
+        <div class="row-axis">
+          <span>row 0</span>
+          <div class="arrow"></div>
+          <span>row N</span>
         </div>
 
         <div class="groups">
@@ -397,12 +409,10 @@ body{
 
         </div><!-- /groups -->
 
-        <div class="align-arrow">
-          <span>row 0</span>
-          <span class="ln"></span>
-          <span>同色 RG 跨组等高 = 行号对齐 · 查询绝不 JOIN</span>
-          <span class="ln"></span>
-          <span>row N</span>
+        </div><!-- /flex row-axis + groups -->
+
+        <div style="text-align:center;color:var(--teal);font-size:1.4vh;font-family:Consolas,monospace;margin-top:.8vh">
+          同色 RG 跨组等高 = 行号对齐 · 查询绝不 JOIN
         </div>
 
       </div><!-- /table-box -->
