@@ -141,57 +141,45 @@ body{
 .part-body{display:none;padding:.6vh .6vw .7vh;flex-direction:column;gap:.5vh;flex:1;min-height:0}
 .part.selected .part-body{display:flex}
 
-/* ===== L3: Row Group blocks (vertical stack — RG-A on top, RG-B below, etc.) ===== */
+/* ===== L3: Row Group blocks — same styling pattern as partition/part ===== */
 .rgs{display:flex;flex-direction:column;gap:5px;align-items:stretch;flex:1}
 .rg{
-  flex:1 1 0;border-radius:4px;min-height:2.5vh;max-height:5vh;
-  display:flex;flex-direction:column;align-items:stretch;
-  cursor:pointer;position:relative;transition:all .2s;
-  overflow:hidden;white-space:nowrap;
+  border:1px solid var(--line2);border-radius:6px;background:var(--panel);
+  overflow:hidden;cursor:pointer;transition:all .25s;
+  display:flex;flex-direction:column;min-height:0;flex-shrink:1;
+}
+.rg:not(.selected){flex:0 0 auto}
+.rg.selected{flex:1 1 0;min-height:0}
+.rg:hover{border-color:var(--mut)}
+.rg.selected{
+  border:2px solid var(--cyan);background:var(--sel);
+  box-shadow:0 0 10px rgba(9,105,218,.1);
 }
 .rg-label{
-  text-align:center;font-size:1.2vh;font-family:Consolas,monospace;
-  font-weight:500;padding:1px 0;flex-shrink:0;
+  padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
+  font-family:Consolas,monospace;font-size:1.2vh;font-weight:500;
+  user-select:none;flex-shrink:0;
 }
-.rg:hover{border-width:2px;z-index:2}
-.rg[data-tip]:hover::after{
-  content:attr(data-tip);position:absolute;bottom:130%;
-  left:50%;transform:translateX(-50%);
-  background:#1f2328;border:1px solid var(--teal);border-radius:6px;
-  padding:4px 8px;font-size:1.2vh;white-space:nowrap;z-index:10;
-  color:#fff;pointer-events:none;
-}
-.rg-A{background:rgba(9,105,218,.12);border:1px solid rgba(9,105,218,.3);color:var(--cyan)}
-.rg-B{background:rgba(188,76,0,.10);border:1px solid rgba(188,76,0,.25);color:var(--org)}
-.rg-C{background:rgba(26,127,55,.10);border:1px solid rgba(26,127,55,.25);color:var(--grn)}
-.rg-D{background:rgba(130,80,223,.10);border:1px solid rgba(130,80,223,.25);color:var(--prp)}
-
-/* RG selected state */
-.rg.selected{
-  flex:1 1 0;max-height:40vh;min-height:0;
-  border-width:2px;
-}
-.rg.selected.rg-A{background:rgba(9,105,218,.18);border-color:rgba(9,105,218,.6)}
-.rg.selected.rg-B{background:rgba(188,76,0,.16);border-color:rgba(188,76,0,.5)}
-.rg.selected.rg-C{background:rgba(26,127,55,.16);border-color:rgba(26,127,55,.5)}
-.rg.selected.rg-D{background:rgba(130,80,223,.16);border-color:rgba(130,80,223,.5)}
+.rg-A .rg-label{color:var(--cyan)}
+.rg-B .rg-label{color:var(--org)}
+.rg-C .rg-label{color:var(--grn)}
+.rg-D .rg-label{color:var(--prp)}
+.rg-A{border-left:3px solid rgba(9,105,218,.4)}
+.rg-B{border-left:3px solid rgba(188,76,0,.4)}
+.rg-C{border-left:3px solid rgba(26,127,55,.4)}
+.rg-D{border-left:3px solid rgba(130,80,223,.4)}
 
 /* L4: Column list inside RG — vertically stacked fields */
 .rg-body{
-  display:none;flex-direction:column;gap:2px;
-  padding:.3vh .4vw;flex:1;min-height:0;overflow:auto;
-  align-items:stretch;
+  display:none;flex-direction:column;gap:3px;
+  padding:.4vh .6vw .5vh;flex:1;min-height:0;overflow:auto;
 }
 .rg.selected .rg-body{display:flex}
 .rg-body .col-chip{
-  font-family:Consolas,monospace;font-size:1vh;
-  padding:2px 6px;border-radius:3px;text-align:left;white-space:nowrap;
-  background:transparent;opacity:.85;
+  font-family:Consolas,monospace;font-size:1.1vh;
+  padding:2px 8px;border-radius:3px;text-align:left;white-space:nowrap;
+  background:var(--panel2);border:1px solid var(--line2);
 }
-.rg.selected.rg-A .col-chip{border-left:2px solid rgba(9,105,218,.4)}
-.rg.selected.rg-B .col-chip{border-left:2px solid rgba(188,76,0,.4)}
-.rg.selected.rg-C .col-chip{border-left:2px solid rgba(26,127,55,.4)}
-.rg.selected.rg-D .col-chip{border-left:2px solid rgba(130,80,223,.4)}
 
 /* ===== Empty partition ===== */
 .partition-empty{
