@@ -1086,6 +1086,7 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 
 	// 5.5 Fill synthesized parts: append R_i rows in sorted position order —
 	// keyed rows carry the captured mapped values, everything else NULL.
+	// Vectorized: process STANDARD_VECTOR_SIZE rows per chunk instead of one.
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 		for (auto &kv : targets[gi]) {
 			auto &t = *kv.second;
@@ -1093,17 +1094,35 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 				continue;
 			}
 			const auto &mtypes = bind.group_mapping[gi].col_types;
-			DataChunk row;
-			row.Initialize(context, t.insert_buffer->Types());
-			for (idx_t pos = 0; pos < t.synth_rows; pos++) {
-				row.Reset();
-				row.SetCardinality(1);
-				row.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(pos)));
-				auto it = t.synth_values.find(pos);
-				for (idx_t c = 0; c < mtypes.size(); c++) {
-					row.SetValue(1 + c, 0, it != t.synth_values.end() ? it->second[c] : Value(mtypes[c]));
+			const auto &buf_types = t.insert_buffer->Types();
+			DataChunk chunk;
+			chunk.Initialize(context, buf_types);
+			for (idx_t pos = 0; pos < t.synth_rows; pos += STANDARD_VECTOR_SIZE) {
+				idx_t n = MinValue<idx_t>(STANDARD_VECTOR_SIZE, t.synth_rows - pos);
+				chunk.Reset();
+				chunk.SetCardinality(n);
+				// Position column (BIGINT): 0, 1, 2, ... (sequential)
+				auto &pos_vec = chunk.data[0];
+				auto pos_data = FlatVector::GetData<int64_t>(pos_vec);
+				for (idx_t i = 0; i < n; i++) {
+					pos_data[i] = NumericCast<int64_t>(pos + i);
 				}
-				t.insert_buffer->Append(t.insert_append, row);
+				// Mapped columns: NULL by default, then set keyed-row values
+				for (idx_t c = 0; c < mtypes.size(); c++) {
+					// Initialize all rows to NULL for this column
+					auto &vec = chunk.data[1 + c];
+					auto &validity = FlatVector::Validity(vec);
+					validity.SetAllInvalid(n);
+					// Set non-NULL values for keyed rows in this batch
+					for (idx_t i = 0; i < n; i++) {
+						idx_t key_pos = pos + i;
+						auto it = t.synth_values.find(key_pos);
+						if (it != t.synth_values.end()) {
+							chunk.SetValue(1 + c, i, it->second[c]);
+						}
+					}
+				}
+				t.insert_buffer->Append(t.insert_append, chunk);
 			}
 			t.inserts_count = t.synth_rows;
 			t.synth_values.clear();
