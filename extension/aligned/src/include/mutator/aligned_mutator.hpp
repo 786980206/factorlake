@@ -214,4 +214,9 @@ struct DeleteResult {
 DeleteResult AlignedDeleteFromCollection(ClientContext &context, const string &table_name,
                                           const string &root, ColumnDataCollection &keys_collection);
 
+//! Shared transaction ID counter (process-wide). Used by both the mutator
+//! and the compactor for `_tmp/transaction-<id>/` staging directory names.
+//! Not persisted — only used for the staging directory name and txid return.
+idx_t NextTransactionId();
+
 } // namespace duckdb

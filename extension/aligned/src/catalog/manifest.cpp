@@ -1,6 +1,5 @@
 #include "catalog/manifest.hpp"
 #include "resolver/partition_resolver.hpp"
-#include "resolver/row_space.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"

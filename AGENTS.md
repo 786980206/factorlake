@@ -216,15 +216,18 @@ Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
 ```
 extension/aligned/src/
 ├── extension.cpp
-├── catalog/       logical_table.cpp  schema.cpp  manifest.cpp
-│                  aligned_catalog.cpp  aligned_create.cpp  aligned_dml.cpp
-├── resolver/      group_resolver.cpp  partition_resolver.cpp  row_space.cpp  key_resolver.cpp
-├── scan/          aligned_scan.cpp  aligned_scan_state.cpp  group_scan.cpp  scheduler.cpp
+├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp
+├── resolver/      partition_resolver.cpp  key_resolver.cpp
+├── scan/          aligned_scan.cpp
 ├── mutator/       aligned_mutator.cpp
 ├── rewriter/      part_rewriter.cpp
-├── compaction/    compactor.cpp
-└── optimizer/     projection.cpp  filter.cpp
+├── compaction/    aligned_compactor.cpp
+├── io/            parquet_io.cpp
+├── execution/     aligned_dml.cpp
+└── transaction/   aligned_transaction.cpp
 ```
+
+对应 `src/include/` 下头文件。
 
 ---
 

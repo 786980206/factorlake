@@ -8,9 +8,7 @@
 #include "duckdb/parallel/async_result.hpp"
 #include "parquet_reader.hpp"
 #include "parquet_writer.hpp"
-#include "parquet_field_id.hpp"
-#include "parquet_shredding.hpp"
-#include "zstd_file_system.hpp"
+#include "io/parquet_io.hpp"
 
 namespace duckdb {
 
@@ -288,12 +286,10 @@ idx_t RewritePart(ClientContext &context, const PartMergeInput &input) {
 		}
 	}
 
-	// Writer (same parameters as aligned_write / aligned_compact).
-	mw.writer = make_uniq<ParquetWriter>(
-	    context, FileSystem::GetFileSystem(context), input.staged_path, input.col_types, input.col_names,
-	    duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(), ShreddingType(), vector<pair<string, string>>(),
-	    nullptr, optional_idx(), 1073741824ULL /* PrimitiveColumnWriter::MAX_UNCOMPRESSED_DICT_PAGE_SIZE */, 1, 0.01,
-	    ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
+	// Writer (standard aligned-extension options, shared with aligned_create /
+	// aligned_compact — see io::CreateParquetWriter).
+	mw.writer = CreateParquetWriter(context, FileSystem::GetFileSystem(context),
+	                               input.staged_path, input.col_names, input.col_types);
 
 	if (input.inserts) {
 		mw.insert_cursor.Init(context, *input.inserts);

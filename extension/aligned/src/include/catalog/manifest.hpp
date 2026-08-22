@@ -1,7 +1,6 @@
 #pragma once
 
 #include "duckdb.hpp"
-#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector.hpp"
 
 namespace duckdb {

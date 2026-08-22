@@ -249,6 +249,50 @@
   （≤1M 行）走原单次路径（零开销）。新增 test_dml.ps1 1.1M 行批量 INSERT 测试
   （count/distinct/date filter 全验证通过）。
 
+## v0.11-audit-cleanup — 代码结构审查修复
+
+基于全量代码审查报告，系统性修复所有发现项：
+
+### 死代码清理
+- **删除 `resolver/row_space.{cpp,hpp}`**：`ValidateRowSpace` 零调用点（49 行死代码），
+  `BuildTablePlan` 已内联等价校验。连带清理 compactor/manifest 中的无用 include。
+- **删除 `compactor::NextPartIndex`**：零调用点（~30 行），compactor 把合并 part
+  硬编码为 0000。
+- **删除 6 个死结构体字段**：`AlignedInsertGlobalState::{rows_inserted,rows_updated,
+  error}`、`AlignedDeleteGlobalState::{error,staged_path}`、
+  `AlignedUpdateGlobalState::error` — 全部 write-only 或 never-touched。
+- **删除 12 个无用 include**：跨 6 个文件的 `<fstream>`/`<future>`/
+  `vector_operations.hpp`/`database.hpp`/`expression_executor.hpp`/
+  `create_table_info.hpp`/`not_null_constraint.hpp`/`file_system.hpp`(header)/
+  `row_space.hpp` 等，全部 grep 确认无符号引用后移除。
+
+### 正确性修复
+- **修复硬编码主键列名**：`aligned_dml.cpp` 的 `ResolveKeysForRowids` 和 UPDATE
+  `Finalize` 原先硬编码 `"date"`/`"symbol"` 列名查找，改用 plan 权威字段
+  `plan.groups[0].partition_source`/`symbol_column`（与 `key_resolver.cpp` 一致）。
+  若表使用了不同的主键列名（如 `dt`/`sym`），旧代码会失败。
+
+### 重复代码消除
+- **提取 `io/parquet_io.cpp`**：`CreateParquetWriter` 共享函数，消除
+  `aligned_create.cpp`/`part_rewriter.cpp`/`aligned_compactor.cpp` 三处 14 行
+  ParquetWriter 构造参数的逐字复制粘贴。
+- **合并 `ResolveKeysForRowids`**：DELETE 和 UPDATE 各一份 ~80 行几乎逐行相同
+  的函数，合并为单一 helper + `op_name` 参数 + `ProjectRowidFromKeys` 零拷贝
+  投影辅助。
+- **统一 `NextTransactionId`**：mutator 和 compactor 各自维护独立 `static idx_t`
+  计数器，txid 可能撞号导致 `_tmp/transaction-1` 冲突。改为共享 `std::atomic` 计数器
+  （声明在 `aligned_mutator.hpp`）。
+
+### 文档同步
+- **AGENTS.md §10**：修正为真实文件列表（删除虚构的 `row_space.cpp`/`group_resolver.cpp`/
+  `aligned_scan_state.cpp`/`group_scan.cpp`/`scheduler.cpp`/`logical_table.cpp`/
+  `schema.cpp`/`optimizer/`，新增 `io/parquet_io.cpp`）。
+- **删除 `_table.json` 过时注释**：`mutator.cpp` ExecuteAndCommit 注释提及
+  "rewrite _table.json"，与 §4"无 manifest"契约矛盾。
+
 ### 后续待办
 
-- （暂无已知遗留项）
+- BuildTablePlan 无缓存（UPDATE 触发 3 次全量 glob + footer 读取）— 性能优化，
+  需设计缓存失效策略（按 part mtime/size），影响面较广，暂缓。
+- StagedTransaction RAII（mutator + compactor 暂存逻辑统一）— 中等优先级重构。
+- manifest → plan/table_plan 重命名 — 低优先级命名清理。

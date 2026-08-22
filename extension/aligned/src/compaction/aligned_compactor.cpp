@@ -2,19 +2,15 @@
 
 #include "catalog/manifest.hpp"
 #include "mutator/aligned_mutator.hpp"
-#include "resolver/row_space.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
-#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "parquet_reader.hpp"
 #include "parquet_writer.hpp"
-#include "parquet_field_id.hpp"
-#include "parquet_shredding.hpp"
-#include "zstd_file_system.hpp"
+#include "io/parquet_io.hpp"
 
 #include <map>
 
@@ -39,41 +35,7 @@ struct AlignedCompactGlobalState : public GlobalTableFunctionState {
 
 //! In-process transaction counter (starts at 1, increments each call). Not
 //! persisted — only used for the staging directory name.
-static idx_t NextTransactionId() {
-	static idx_t counter = 0;
-	return ++counter;
-}
-
-static idx_t NextPartIndex(FileSystem &fs, const string &dir) {
-	idx_t next = 0;
-	if (!fs.DirectoryExists(dir)) {
-		return 0;
-	}
-	fs.ListFiles(dir, [&](OpenFileInfo &info) {
-		auto &name = info.path;
-		if (name.size() >= 16 && StringUtil::EndsWith(name, ".parquet")) {
-			// base = "0002-0000002048" (15 chars, '-' at position 4)
-			string base = name.substr(0, name.size() - 8);
-			if (base.size() == 15 && base[4] == '-') {
-				bool digits = true;
-				for (idx_t i = 0; i < 15; i++) {
-					if (i != 4 && (base[i] < '0' || base[i] > '9')) {
-						digits = false;
-						break;
-					}
-				}
-				if (digits) {
-					try {
-						unsigned long long value = std::stoull(base.substr(0, 4));
-						next = MaxValue<idx_t>(next, (idx_t)value + 1);
-					} catch (...) {
-					}
-				}
-			}
-		}
-	});
-	return next;
-}
+// NextTransactionId is now shared with the mutator (see aligned_mutator.hpp).
 
 //===----------------------------------------------------------------------===//
 // Bind
@@ -232,11 +194,9 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			string staged_dir = tmp_root + "/" + group.manifest.group + group_rel;
 			fs.CreateDirectoriesRecursive(staged_dir);
 			string staged_path = staged_dir + "/" + part_name + ".parquet";
-			auto writer = make_uniq<ParquetWriter>(
-			    context, fs, staged_path, col_types, columns, duckdb_parquet::CompressionCodec::ZSTD,
-			    ChildFieldIDs(), ShreddingType(), vector<pair<string, string>>(), nullptr, optional_idx(),
-			    1073741824ULL /* PrimitiveColumnWriter::MAX_UNCOMPRESSED_DICT_PAGE_SIZE */, 1, 0.01,
-			    ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
+			// Standard aligned-extension writer options (shared with aligned_create
+			// / part_rewriter — see io::CreateParquetWriter).
+			auto writer = CreateParquetWriter(context, fs, staged_path, columns, col_types);
 			unique_ptr<ParquetWriteTransformData> transform;
 			auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
 			ColumnDataAppendState append_state;

@@ -8,18 +8,13 @@
 
 #include "execution/aligned_dml.hpp"
 
-#include "catalog/aligned_catalog.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/database.hpp"
-#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/parallel/event.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "mutator/aligned_mutator.hpp"
 #include "scan/aligned_scan.hpp"
-
-#include "duckdb/parser/parsed_data/create_table_info.hpp"
 
 namespace duckdb {
 
@@ -32,9 +27,6 @@ struct AlignedInsertGlobalState : public GlobalSinkState {
 	}
 	ColumnDataCollection collection;
 	idx_t row_count = 0;
-	idx_t rows_inserted = 0;
-	idx_t rows_updated = 0;
-	string error;
 };
 
 struct AlignedInsertLocalState : public LocalSinkState {
@@ -105,9 +97,7 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 	try {
 		if (g.collection.Count() <= INSERT_BATCH_SIZE) {
 			// Small enough — single call (the common case).
-			auto result = AlignedUpsertFromCollection(context, table, root, "", g.collection, row_names);
-			g.rows_inserted = result.rows_inserted;
-			g.rows_updated = result.rows_updated;
+			AlignedUpsertFromCollection(context, table, root, "", g.collection, row_names);
 		} else {
 			// Large INSERT — scan the collection in batches, calling the
 			// mutator per batch. Each batch is an independent transaction.
@@ -131,9 +121,7 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 				batch_rows += scan_chunk.size();
 
 				if (batch_rows >= INSERT_BATCH_SIZE) {
-					auto result = AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
-					g.rows_inserted += result.rows_inserted;
-					g.rows_updated += result.rows_updated;
+					AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
 					batch.Reset();
 					batch.InitializeAppend(batch_append);
 					batch_rows = 0;
@@ -141,9 +129,7 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 			}
 			// Flush the final partial batch.
 			if (batch_rows > 0) {
-				auto result = AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
-				g.rows_inserted += result.rows_inserted;
-				g.rows_updated += result.rows_updated;
+				AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
 			}
 		}
 	} catch (std::exception &ex) {
@@ -165,14 +151,155 @@ unique_ptr<GlobalSourceState> PhysicalAlignedInsert::GetGlobalSourceState(Client
 	return make_uniq<AlignedInsertSourceState>();
 }
 
+//===----------------------------------------------------------------------===//
+// Shared key resolver (used by both DELETE and UPDATE)
+//===----------------------------------------------------------------------===//
+//! Scans the index group's (symbol, date) columns and collects the keys of the
+//! given rowids into an in-memory ColumnDataCollection. No temp parquet file.
+//!
+//! The returned collection has three columns in the layout
+//! (rowid BIGINT, symbol VARCHAR, date DATE), emitted in ascending rowid
+//! order (only rowids that actually exist in the table produce a row). The
+//! `op_name` parameter ("DELETE"/"UPDATE") is used in error messages. The
+//! (rowid, symbol, date) superset layout lets both callers share one
+//! implementation: the UPDATE caller merge-joins the result against the
+//! collected set values on rowid, and the DELETE caller projects out the
+//! leading rowid column to obtain the (symbol, date) collection that the
+//! delete mutator requires.
+static ColumnDataCollection ResolveKeysForRowids(ClientContext &context, const string &root,
+                                                 const string &table_name, const vector<int64_t> &rowids,
+                                                 const string &op_name) {
+	auto sorted = rowids;
+	sort(sorted.begin(), sorted.end());
+	sorted.erase(unique(sorted.begin(), sorted.end()), sorted.end());
 
+	vector<LogicalType> scan_types;
+	vector<string> scan_names;
+	auto bind_data = AlignedBindForCatalog(context, root, table_name, scan_types, scan_names);
+	// v8: the primary key column names are authoritative from the table plan
+	// (plan.groups[0] is the index group): symbol_column is col0,
+	// partition_source is col1 (the DATE/TIMESTAMP column). Do NOT hardcode
+	// "date"/"symbol" — a table may use different column names.
+	auto &plan = bind_data->Cast<AlignedTableBindData>().plan;
+	if (plan.groups.empty()) {
+		throw IOException("aligned %s: table '%s' has no column groups to resolve keys against", op_name, table_name);
+	}
+	const string &symbol_name = plan.groups[0].symbol_column;
+	const string &date_name = plan.groups[0].partition_source;
+	if (symbol_name.empty() || date_name.empty()) {
+		throw IOException("aligned %s: primary key columns not resolved for '%s' (symbol_column/partition_source "
+		                  "empty in table plan)",
+		                  op_name, table_name);
+	}
+	idx_t date_pos = DConstants::INVALID_INDEX;
+	idx_t symbol_pos = DConstants::INVALID_INDEX;
+	for (idx_t i = 0; i < scan_names.size(); i++) {
+		if (StringUtil::CIEquals(scan_names[i], date_name)) {
+			date_pos = i;
+		} else if (StringUtil::CIEquals(scan_names[i], symbol_name)) {
+			symbol_pos = i;
+		}
+	}
+	if (date_pos == DConstants::INVALID_INDEX || symbol_pos == DConstants::INVALID_INDEX) {
+		throw IOException("aligned %s: primary key columns (%s, %s) not found in '%s'", op_name, symbol_name, date_name,
+		                  table_name);
+	}
 
+	// Scan symbol/date only (v8: symbol first, then date); logical row numbers
+	// come from a sequential counter (a single local state consumes the shared
+	// cursor in order).
+	vector<column_t> col_ids = {symbol_pos, date_pos};
+	TableFunctionInitInput init_input(bind_data.get(), col_ids, {}, nullptr);
+	auto gstate = AlignedInitGlobal(context, init_input);
+	ThreadContext thread_context(context);
+	ExecutionContext exec(context, thread_context, nullptr);
+	auto lstate = AlignedInitLocal(exec, init_input, gstate.get());
 
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(context, scan_types);
 
+	// Output layout: (rowid, symbol, date). rowid is emitted first so the
+	// UPDATE merge-join can join on it; the DELETE caller drops the leading
+	// rowid to obtain the (symbol, date) collection the mutator requires.
+	auto out_types = vector<LogicalType> {LogicalType::BIGINT, scan_types[symbol_pos], scan_types[date_pos]};
+	ColumnDataCollection keys(context, out_types);
+	ColumnDataAppendState append;
+	keys.InitializeAppend(append);
+	DataChunk out_chunk;
+	out_chunk.Initialize(context, out_types);
 
+	idx_t next = 0;      // cursor into sorted rowids
+	int64_t abs_row = 0; // logical row number of scan_chunk row 0
+	while (next < sorted.size()) {
+		AlignedScanFunction(context, TableFunctionInput(bind_data.get(), lstate.get(), gstate.get()), scan_chunk);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		UnifiedVectorFormat sv, dv;
+		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), sv); // symbol
+		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), dv); // date
+		auto sptr = UnifiedVectorFormat::GetData<string_t>(sv);
+		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);     // DATE = int32 days since epoch
+		idx_t out_n = 0;
+		for (idx_t i = 0; i < scan_chunk.size(); i++) {
+			int64_t rid = abs_row + static_cast<int64_t>(i);
+			bool want = false;
+			while (next < sorted.size() && sorted[next] < rid) {
+				next++;
+			}
+			if (next < sorted.size() && sorted[next] == rid) {
+				want = true;
+				next++;
+			}
+			if (want) {
+				auto si = sv.sel->get_index(i);
+				auto di = dv.sel->get_index(i);
+				out_chunk.SetValue(0, out_n, Value::BIGINT(rid));            // rowid
+				out_chunk.SetValue(1, out_n, Value(sptr[si].GetString()));   // symbol
+				out_chunk.SetValue(2, out_n, Value::DATE(date_t(dptr[di]))); // date
+				out_n++;
+			}
+		}
+		abs_row += static_cast<int64_t>(scan_chunk.size());
+		if (out_n > 0) {
+			out_chunk.SetCardinality(out_n);
+			keys.Append(out_chunk);
+			out_chunk.Reset();
+		}
+		scan_chunk.Reset();
+	}
 
+	return keys;
+}
 
-
+//! Projects the leading rowid column out of a (rowid, symbol, date) collection
+//! produced by ResolveKeysForRowids, returning a (symbol, date) collection
+//! suitable for AlignedDeleteFromCollection (which requires exactly the two
+//! key columns). Used by PhysicalAlignedDelete.
+static ColumnDataCollection ProjectRowidFromKeys(ClientContext &context, const ColumnDataCollection &resolved) {
+	auto keys_types = vector<LogicalType> {resolved.Types()[1], resolved.Types()[2]};
+	ColumnDataCollection keys(context, keys_types);
+	ColumnDataAppendState append;
+	keys.InitializeAppend(append);
+	ColumnDataScanState ss;
+	DataChunk in_chunk;
+	DataChunk out_chunk;
+	resolved.InitializeScan(ss);
+	resolved.InitializeScanChunk(in_chunk);
+	out_chunk.Initialize(context, keys_types);
+	while (resolved.Scan(ss, in_chunk)) {
+		if (in_chunk.size() == 0) {
+			continue;
+		}
+		out_chunk.data[0].Reference(in_chunk.data[1]); // symbol
+		out_chunk.data[1].Reference(in_chunk.data[2]); // date
+		out_chunk.SetCardinality(in_chunk.size());
+		keys.Append(out_chunk);
+		out_chunk.Reset();
+		in_chunk.Reset();
+	}
+	return keys;
+}
 
 //===----------------------------------------------------------------------===//
 // PhysicalAlignedDelete
@@ -181,8 +308,6 @@ struct AlignedDeleteGlobalState : public GlobalSinkState {
 	mutex lock;
 	vector<int64_t> rowids; // selected logical row numbers
 	idx_t rows_deleted = 0;
-	string error;
-	string staged_path; // keys parquet staged by the worker (cleanup after join)
 };
 
 PhysicalAlignedDelete::PhysicalAlignedDelete(PhysicalPlan &physical_plan, vector<LogicalType> types_p,
@@ -225,95 +350,6 @@ SinkCombineResultType PhysicalAlignedDelete::Combine(ExecutionContext &context,
 	return SinkCombineResultType::FINISHED;
 }
 
-//! Scans the index group's (symbol, date) columns and collects the keys of the
-//! given rowids into an in-memory ColumnDataCollection. No temp parquet file.
-static ColumnDataCollection ResolveKeysForRowids(ClientContext &context, const string &root,
-                                                 const string &table_name, const vector<int64_t> &rowids) {
-	auto sorted = rowids;
-	sort(sorted.begin(), sorted.end());
-	sorted.erase(unique(sorted.begin(), sorted.end()), sorted.end());
-
-	vector<LogicalType> scan_types;
-	vector<string> scan_names;
-	auto bind_data = AlignedBindForCatalog(context, root, table_name, scan_types, scan_names);
-	// Locate the key columns in the schema by name.
-	idx_t date_pos = DConstants::INVALID_INDEX;
-	idx_t symbol_pos = DConstants::INVALID_INDEX;
-	for (idx_t i = 0; i < scan_names.size(); i++) {
-		if (StringUtil::CIEquals(scan_names[i], "date")) {
-			date_pos = i;
-		} else if (StringUtil::CIEquals(scan_names[i], "symbol")) {
-			symbol_pos = i;
-		}
-	}
-	if (date_pos == DConstants::INVALID_INDEX || symbol_pos == DConstants::INVALID_INDEX) {
-		throw IOException("aligned DELETE: primary key columns (symbol, date) not found in '%s'", table_name);
-	}
-
-	// Scan symbol/date only (v8: symbol first, then date); logical row numbers
-	// come from a sequential counter (a single local state consumes the shared
-	// cursor in order).
-	vector<column_t> col_ids = {symbol_pos, date_pos};
-	TableFunctionInitInput init_input(bind_data.get(), col_ids, {}, nullptr);
-	auto gstate = AlignedInitGlobal(context, init_input);
-	ThreadContext thread_context(context);
-	ExecutionContext exec(context, thread_context, nullptr);
-	auto lstate = AlignedInitLocal(exec, init_input, gstate.get());
-
-	DataChunk scan_chunk;
-	scan_chunk.Initialize(context, scan_types);
-
-	// v8: keys are (symbol, date) — symbol first to match the index schema.
-	auto keys_types = vector<LogicalType> {scan_types[symbol_pos], scan_types[date_pos]};
-	ColumnDataCollection keys(context, keys_types);
-	ColumnDataAppendState append;
-	keys.InitializeAppend(append);
-	DataChunk out_chunk;
-	out_chunk.Initialize(context, keys_types);
-
-	idx_t next = 0;      // cursor into sorted rowids
-	int64_t abs_row = 0; // logical row number of scan_chunk row 0
-	while (next < sorted.size()) {
-		AlignedScanFunction(context, TableFunctionInput(bind_data.get(), lstate.get(), gstate.get()), scan_chunk);
-		if (scan_chunk.size() == 0) {
-			break;
-		}
-		UnifiedVectorFormat sv, dv;
-		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), sv); // symbol
-		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), dv); // date
-		auto sptr = UnifiedVectorFormat::GetData<string_t>(sv);
-		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);     // DATE = int32 days since epoch
-		idx_t out_n = 0;
-		for (idx_t i = 0; i < scan_chunk.size(); i++) {
-			int64_t rid = abs_row + static_cast<int64_t>(i);
-			bool want = false;
-			while (next < sorted.size() && sorted[next] < rid) {
-				next++;
-			}
-			if (next < sorted.size() && sorted[next] == rid) {
-				want = true;
-				next++;
-			}
-			if (want) {
-				auto si = sv.sel->get_index(i);
-				auto di = dv.sel->get_index(i);
-				out_chunk.SetValue(0, out_n, Value(sptr[si].GetString())); // symbol
-				out_chunk.SetValue(1, out_n, Value::DATE(date_t(dptr[di]))); // date
-				out_n++;
-			}
-		}
-		abs_row += static_cast<int64_t>(scan_chunk.size());
-		if (out_n > 0) {
-			out_chunk.SetCardinality(out_n);
-			keys.Append(out_chunk);
-			out_chunk.Reset();
-		}
-		scan_chunk.Reset();
-	}
-
-	return keys;
-}
-
 SinkFinalizeType PhysicalAlignedDelete::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                  OperatorSinkFinalizeInput &input) const {
 	auto &g = input.global_state.Cast<AlignedDeleteGlobalState>();
@@ -322,11 +358,13 @@ SinkFinalizeType PhysicalAlignedDelete::Finalize(Pipeline &pipeline, Event &even
 	}
 
 	// Direct C++ call — no worker thread, no Connection, no temp parquet.
-	// 1. Resolve rowids → (symbol, date) keys via direct index scan.
-	// 2. Delete via AlignedDeleteFromCollection (in-memory keys collection).
+	// 1. Resolve rowids → (rowid, symbol, date) via direct index scan.
+	// 2. Project out rowid → (symbol, date) keys.
+	// 3. Delete via AlignedDeleteFromCollection (in-memory keys collection).
 	// Neither step touches the catalog or executor; safe on the pipeline thread.
 	try {
-		auto keys = ResolveKeysForRowids(context, root, table, g.rowids);
+		auto resolved = ResolveKeysForRowids(context, root, table, g.rowids, "DELETE");
+		auto keys = ProjectRowidFromKeys(context, resolved);
 		auto result = AlignedDeleteFromCollection(context, table, root, keys);
 		g.rows_deleted = result.rows_deleted;
 	} catch (std::exception &ex) {
@@ -348,7 +386,6 @@ unique_ptr<GlobalSourceState> PhysicalAlignedDelete::GetGlobalSourceState(Client
 	return make_uniq<AlignedInsertSourceState>();
 }
 
-
 //===----------------------------------------------------------------------===//
 // PhysicalAlignedUpdate
 //
@@ -364,7 +401,6 @@ struct AlignedUpdateGlobalState : public GlobalSinkState {
 	// (rowid, set values...) per row, accumulated across sink calls.
 	ColumnDataCollection collection;
 	idx_t row_count = 0;
-	string error;
 	explicit AlignedUpdateGlobalState(ClientContext &context, const vector<LogicalType> &types)
 	    : collection(context, types) {
 	}
@@ -428,86 +464,6 @@ SinkCombineResultType PhysicalAlignedUpdate::Combine(ExecutionContext &context,
 	return SinkCombineResultType::FINISHED;
 }
 
-//! Scans the index group's (date, symbol) for the given rowids and appends the
-//! matched rows as (rowid, date, symbol) in ascending rowid order.
-static void ResolveKeysForRowids(ClientContext &context, const string &root, const string &table_name,
-                                 const vector<int64_t> &rowids, ColumnDataCollection &out,
-                                 ColumnDataAppendState &append) {
-	auto sorted = rowids;
-	sort(sorted.begin(), sorted.end());
-	sorted.erase(unique(sorted.begin(), sorted.end()), sorted.end());
-
-	vector<LogicalType> scan_types;
-	vector<string> scan_names;
-	auto bind_data = AlignedBindForCatalog(context, root, table_name, scan_types, scan_names);
-	idx_t date_pos = DConstants::INVALID_INDEX;
-	idx_t symbol_pos = DConstants::INVALID_INDEX;
-	for (idx_t i = 0; i < scan_names.size(); i++) {
-		if (StringUtil::CIEquals(scan_names[i], "date")) {
-			date_pos = i;
-		} else if (StringUtil::CIEquals(scan_names[i], "symbol")) {
-			symbol_pos = i;
-		}
-	}
-	if (date_pos == DConstants::INVALID_INDEX || symbol_pos == DConstants::INVALID_INDEX) {
-		throw IOException("aligned UPDATE: primary key columns (symbol, date) not found in '%s'", table_name);
-	}
-	// v8: scan symbol first, then date.
-	vector<column_t> col_ids = {symbol_pos, date_pos};
-	TableFunctionInitInput init_input(bind_data.get(), col_ids, {}, nullptr);
-	auto gstate = AlignedInitGlobal(context, init_input);
-	ThreadContext thread_context(context);
-	ExecutionContext exec(context, thread_context, nullptr);
-	auto lstate = AlignedInitLocal(exec, init_input, gstate.get());
-
-	DataChunk scan_chunk;
-	scan_chunk.Initialize(context, scan_types);
-	DataChunk row_chunk;
-	row_chunk.Initialize(context, out.Types());
-
-	idx_t next = 0;
-	int64_t abs_row = 0;
-	while (next < sorted.size()) {
-		AlignedScanFunction(context, TableFunctionInput(bind_data.get(), lstate.get(), gstate.get()), scan_chunk);
-		if (scan_chunk.size() == 0) {
-			break;
-		}
-		UnifiedVectorFormat sv, dv;
-		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), sv); // symbol
-		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), dv); // date
-		auto sptr = UnifiedVectorFormat::GetData<string_t>(sv);
-		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);
-		idx_t out_n = 0;
-		for (idx_t i = 0; i < scan_chunk.size(); i++) {
-			int64_t rid = abs_row + static_cast<int64_t>(i);
-			bool want = false;
-			while (next < sorted.size() && sorted[next] < rid) {
-				next++;
-			}
-			if (next < sorted.size() && sorted[next] == rid) {
-				want = true;
-				next++;
-			}
-			if (want) {
-				auto si = sv.sel->get_index(i);
-				auto di = dv.sel->get_index(i);
-				row_chunk.SetValue(0, out_n, Value::BIGINT(rid));
-				// v8: row_chunk layout = (rowid, symbol, date)
-				row_chunk.SetValue(1, out_n, Value(sptr[si].GetString()));
-				row_chunk.SetValue(2, out_n, Value::DATE(date_t(dptr[di])));
-				out_n++;
-			}
-		}
-		abs_row += static_cast<int64_t>(scan_chunk.size());
-		if (out_n > 0) {
-			row_chunk.SetCardinality(out_n);
-			out.Append(row_chunk);
-			row_chunk.Reset();
-		}
-		scan_chunk.Reset();
-	}
-}
-
 SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                  OperatorSinkFinalizeInput &input) const {
 	auto &g = input.global_state.Cast<AlignedUpdateGlobalState>();
@@ -523,6 +479,25 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 	// None of these steps touch the catalog or executor; safe on the pipeline
 	// thread.
 	try {
+		// v8: the primary key column names are authoritative from the table
+		// plan (plan.groups[0] is the index group): symbol_column is col0,
+		// partition_source is col1 (the DATE/TIMESTAMP column). The staged
+		// collection and the upsert mapping must use these names — NOT
+		// hardcoded "date"/"symbol" — or the mutator's key-column validation
+		// would reject a table that uses different column names.
+		TablePlan plan;
+		BuildTablePlan(context, root, table, plan);
+		if (plan.groups.empty()) {
+			throw IOException("aligned UPDATE: table '%s' has no column groups to resolve keys against", table);
+		}
+		const string symbol_name = plan.groups[0].symbol_column;
+		const string date_name = plan.groups[0].partition_source;
+		if (symbol_name.empty() || date_name.empty()) {
+			throw IOException("aligned UPDATE: primary key columns not resolved for '%s' (symbol_column/partition_source "
+			                  "empty in table plan)",
+			                  table);
+		}
+
 		// Collect all rowids + set values from the sink collection into a
 		// sorted vector for efficient merge with resolved keys.
 		struct RowData {
@@ -552,27 +527,23 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 		sort(rows.begin(), rows.end(),
 		     [](const RowData &a, const RowData &b) { return a.rowid < b.rowid; });
 
-		// Resolve keys: (rowid, symbol, date) — v8: symbol before date.
-		auto keys_types = vector<LogicalType> {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DATE};
-		ColumnDataCollection keys(context, keys_types);
-		ColumnDataAppendState append;
-		keys.InitializeAppend(append);
-
-		// Extract rowids for the resolver.
+		// Resolve keys: (rowid, symbol, date) — v8: symbol before date. The
+		// shared resolver returns a collection in this exact layout.
 		vector<int64_t> rowids;
 		rowids.reserve(rows.size());
 		for (auto &rd : rows) {
 			rowids.push_back(rd.rowid);
 		}
-		ResolveKeysForRowids(context, root, table, rowids, keys, append);
+		auto keys = ResolveKeysForRowids(context, root, table, rowids, "UPDATE");
 
-		// staged schema: symbol, date, then set columns in set_names order (v8)
+		// staged schema: <symbol_col>, <date_col>, then set columns in
+		// set_names order (v8). The key column NAMES come from the table plan.
 		vector<LogicalType> staged_types;
 		vector<string> staged_names;
 		staged_types.push_back(LogicalType::VARCHAR);
-		staged_names.push_back("symbol");
+		staged_names.push_back(symbol_name);
 		staged_types.push_back(LogicalType::DATE);
-		staged_names.push_back("date");
+		staged_names.push_back(date_name);
 		for (auto &expr : expressions) {
 			staged_types.push_back(expr->return_type);
 		}
@@ -627,10 +598,12 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 			staged_coll.Append(out_chunk);
 		}
 
-		// Upsert mapping (v8): index:symbol,date(+ any index-group set
-		// columns); each non-index set group gets its own mapping segment.
-		string index_cols = "symbol,date";
-		string mapping = "index:symbol,date";
+		// Upsert mapping (v8): index:<symbol_col>,<date_col> (+ any
+		// index-group set columns); each non-index set group gets its own
+		// mapping segment. The key column names come from the table plan.
+		string index_cols = symbol_name + "," + date_name;
+		string index_prefix = "index:" + index_cols;
+		string mapping = index_prefix;
 		for (idx_t i = 0; i < set_names.size(); i++) {
 			if (set_groups[i].empty()) {
 				continue;
@@ -641,8 +614,8 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 				mapping += ";" + set_groups[i] + ":" + set_names[i];
 			}
 		}
-		if (index_cols != "symbol,date") {
-			mapping = "index:" + index_cols + mapping.substr(strlen("index:symbol,date"));
+		if (index_cols != symbol_name + "," + date_name) {
+			mapping = "index:" + index_cols + mapping.substr(index_prefix.size());
 		}
 
 		auto result = AlignedUpsertFromCollection(context, table, root, mapping, staged_coll, staged_names);

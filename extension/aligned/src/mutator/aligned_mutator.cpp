@@ -18,18 +18,17 @@
 #include <map>
 #include <set>
 #include <atomic>
-#include <future>
 #include <mutex>
 #include <thread>
 #include <utility>
 
 namespace duckdb {
 
-//! In-process transaction counter (starts at 1, increments each call). Not
-//! persisted — the counter is only used for the txid return value and the
-//! _tmp/transaction-<txid>/ staging directory name (both transient).
-static idx_t NextTransactionId() {
-	static idx_t counter = 0;
+//! Shared transaction counter (process-wide, non-persisted). Defined here
+//! and declared in aligned_mutator.hpp so the compactor shares the same
+//! counter — avoids txid collision between mutator and compactor.
+idx_t NextTransactionId() {
+	static std::atomic<idx_t> counter{0};
 	return ++counter;
 }
 
@@ -1025,8 +1024,8 @@ static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buff
 
 //! Stage + commit one mutation: rewrite every affected part into
 //! _tmp/transaction-<txid>/, move the parts into place (atomic per move),
-//! delete the superseded parts, remove delete-emptied single-part partitions
-//! from every group, and rewrite _table.json (groups + partitioning only).
+//! delete the superseded parts, and remove delete-emptied single-part partitions
+//! from every group.
 static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind, MutateGlobalState &gstate,
                              vector<TargetMap> &targets) {
 	auto &fs = FileSystem::GetFileSystem(context);

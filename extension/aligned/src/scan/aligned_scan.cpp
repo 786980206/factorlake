@@ -1,5 +1,4 @@
 #include "scan/aligned_scan.hpp"
-#include <fstream>
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
