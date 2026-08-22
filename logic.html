@@ -17,15 +17,6 @@ body{
   background:var(--bg);color:var(--tx);
   font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
 }
-.mono{font-family:Consolas,"Cascadia Mono",monospace}
-
-/* ===== Slide Deck (16:9 full-screen) ===== */
-.deck{width:100vw;height:100vh;display:flex;flex-direction:column}
-.slide{
-  flex:1;display:none;flex-direction:column;
-  padding:1.5vh 2vw 3vh;position:relative;
-}
-.slide.active{display:flex}
 
 /* ===== Top bar ===== */
 .topbar{
@@ -35,135 +26,127 @@ body{
 }
 .topbar .logo{font-size:15px;font-weight:600;color:var(--teal)}
 .topbar .logo span{color:var(--mut);font-weight:400;margin-left:8px;font-size:12px}
-.nav-btns{display:flex;gap:8px;align-items:center}
-.nav-btns .pg{color:var(--mut);font-size:12px;font-family:Consolas,monospace;margin-right:12px}
-.nb{
-  background:var(--panel2);border:1px solid var(--line);color:var(--mut);
-  width:30px;height:30px;border-radius:7px;cursor:pointer;font-size:15px;
-  display:flex;align-items:center;justify-content:center;transition:all .15s;
-}
-.nb:hover{border-color:var(--cyan);color:var(--cyan)}
-.nb:disabled{opacity:.3;cursor:default}
+.hint{color:var(--mut);font-size:12px}
+.hint b{color:var(--teal)}
 
-/* ===== Slide title — compact, single line ===== */
-.slide-title{
-  font-size:2.2vh;font-weight:600;color:var(--tx);margin-bottom:1vh;
-  display:flex;align-items:center;gap:8px;
-}
-.slide-title::before{
-  content:"";width:4px;height:2.2vh;border-radius:2px;
-  background:linear-gradient(180deg,var(--cyan),var(--teal));
-}
-.slide-title .sub{color:var(--mut);font-weight:400;font-size:1.6vh;margin-left:6px}
+/* ===== Slide ===== */
+.slide{padding:2vh 3vw 3vh;height:calc(100vh - 42px);display:flex;flex-direction:column}
 
-/* ===== Slide body (scrollable if needed) ===== */
-.slide-body{flex:1;overflow:visible;display:flex;flex-direction:column}
-
-/* ===== Compact concept strip (replaces large cards) ===== */
-.concepts{
-  display:flex;gap:1vw;flex-wrap:wrap;margin-bottom:1.5vh;
-}
-.concept{
-  background:var(--panel);border:1px solid var(--line);border-radius:8px;
-  padding:.6vh .8vw;display:flex;align-items:center;gap:6px;
-}
-.concept .ico{font-size:1.8vh}
-.concept .name{font-size:1.4vh;font-weight:600;color:var(--tx)}
-.concept .detail{font-size:1.3vh;color:var(--mut)}
-.concept .detail b{color:var(--teal)}
-.concept .detail code{color:var(--cyan);font-family:Consolas,monospace}
-
-/* ===== Table box (top-level, no database wrapper) ===== */
-.db-wrap{
-  flex:1;display:flex;align-items:stretch;justify-content:center;overflow:visible;
-}
+/* ===== Table box ===== */
 .table-box{
   border:2px solid var(--org);border-radius:14px;
-  background:var(--panel);padding:2.5vh 2vw;width:100%;
-  display:flex;flex-direction:column;
-  position:relative;box-shadow:0 4px 24px rgba(0,0,0,.06);
+  background:var(--panel);padding:3vh 2vw;flex:1;
+  display:flex;flex-direction:column;position:relative;
+  box-shadow:0 4px 24px rgba(0,0,0,.06);min-height:0;
 }
 .table-box::before{
   content:attr(data-name);position:absolute;top:-13px;left:20px;
-  background:var(--bg);padding:0 10px;font-size:2vh;
+  background:var(--bg);padding:0 10px;font-size:1.8vh;
   font-family:Consolas,monospace;color:var(--org);letter-spacing:.5px;
 }
-.table-box .desc{
-  font-size:1.8vh;color:var(--mut);margin-bottom:2vh;
-}
-.table-box .desc code{color:var(--teal);font-family:Consolas,monospace;font-size:1.6vh}
+.desc{font-size:1.6vh;color:var(--mut);margin-bottom:1.5vh}
+.desc code{color:var(--teal);font-family:Consolas,monospace}
 
-/* ===== Group columns layout ===== */
-.groups{
-  display:flex;gap:1.2vw;align-items:stretch;flex-wrap:nowrap;flex:1;
+/* ===== Main area: row-axis + groups ===== */
+.main-area{display:flex;flex:1;min-height:0}
+
+/* ===== Row axis (vertical, left) ===== */
+.row-axis{
+  display:flex;flex-direction:column;align-items:center;
+  width:3.5vw;flex-shrink:0;justify-content:space-between;
+  color:var(--teal);font-size:1.3vh;font-family:Consolas,monospace;
+  padding-top:1vh;padding-bottom:1vh;
 }
+.row-axis .arrow{
+  flex:1;width:2px;background:repeating-linear-gradient(180deg,
+    var(--teal) 0,var(--teal) 6px,transparent 6px,transparent 12px);
+  margin:4px 0;
+}
+
+/* ===== Groups row ===== */
+.groups{display:flex;gap:1vw;flex:1;align-items:stretch;min-width:0}
+
+/* ===== L0: Column Group (clickable) ===== */
 .group{
-  flex:1;min-width:0;border-radius:10px;padding:1.5vh 1.2vw;
-  display:flex;flex-direction:column;gap:1vh;
-  position:relative;
+  flex:1;min-width:0;border-radius:10px;
+  display:flex;flex-direction:column;cursor:pointer;
+  transition:all .3s;overflow:hidden;
 }
-.group-label{
-  font-size:2vh;font-weight:600;letter-spacing:.5px;
-  font-family:Consolas,monospace;margin-bottom:.5vh;
-  display:flex;align-items:center;gap:6px;
+.group-header{
+  padding:1.5vh 1vw;display:flex;align-items:center;justify-content:space-between;
+  font-family:Consolas,monospace;font-size:1.8vh;font-weight:600;
+  transition:all .2s;user-select:none;
 }
-.group-label .path{color:var(--mut);font-weight:400;font-size:1.6vh}
+.group-header .gpath{font-weight:400;font-size:1.3vh;color:var(--mut)}
+.group-header .expand-icon{font-size:1.4vh;color:var(--dim);transition:transform .3s}
+.group.expanded .group-header .expand-icon{transform:rotate(90deg)}
+.group-body{display:none;flex-direction:column;gap:.6vh;padding:0 1vw 1vh;flex:1;min-height:0;overflow:auto}
+.group.expanded .group-body{display:flex}
 
-/* color-coded group types */
-.g-index{background:rgba(188,76,0,.05);border:1.5px solid rgba(188,76,0,.3)}
-.g-index .group-label{color:var(--org)}
-.g-factor{background:rgba(130,80,223,.04);border:1.5px solid rgba(130,80,223,.25)}
-.g-factor .group-label{color:var(--prp)}
-.g-fieldset{background:rgba(26,127,55,.04);border:1.5px solid rgba(26,127,55,.25)}
-.g-fieldset .group-label{color:var(--grn)}
-.g-panel{background:rgba(154,103,0,.04);border:1.5px solid rgba(154,103,0,.25)}
-.g-panel .group-label{color:var(--yel)}
+.g-index{background:rgba(188,76,0,.06);border:1.5px solid rgba(188,76,0,.3)}
+.g-index .group-header{color:var(--org)}
+.g-index:hover{border-color:rgba(188,76,0,.5)}
+.g-factor{background:rgba(130,80,223,.05);border:1.5px solid rgba(130,80,223,.25)}
+.g-factor .group-header{color:var(--prp)}
+.g-factor:hover{border-color:rgba(130,80,223,.4)}
+.g-fieldset{background:rgba(26,127,55,.05);border:1.5px solid rgba(26,127,55,.25)}
+.g-fieldset .group-header{color:var(--grn)}
+.g-fieldset:hover{border-color:rgba(26,127,55,.4)}
 
-/* ===== "more groups" placeholder ===== */
 .group-more{
-  flex:0 0 3vw;align-items:center;justify-content:center;
-  border:1.5px dashed var(--line);background:transparent;
+  flex:0 0 3vw;border:1.5px dashed var(--line);background:transparent;
+  align-items:center;justify-content:center;cursor:default;
 }
-.group-more .group-label{font-size:2.5vh;justify-content:center;margin:0}
+.group-more span{font-size:2.5vh;color:var(--dim)}
 
-/* ===== Partition band — L1: partition level ===== */
+/* ===== L1: Partition (clickable) ===== */
 .partition{
-  border:1px solid var(--line);border-radius:8px;padding:.8vh .8vw;
-  margin-bottom:.8vh;background:rgba(0,0,0,.015);
-  display:flex;flex-direction:column;
-  flex-basis:0;flex-shrink:1;min-height:0;
+  border:1px solid var(--line);border-radius:8px;
+  background:rgba(0,0,0,.012);overflow:hidden;transition:border-color .2s;
 }
-.partition:last-child{margin-bottom:0}
-.part-label{
-  font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);
-  margin-bottom:.4vh;display:flex;justify-content:space-between;
+.partition:hover{border-color:var(--mut)}
+.partition-header{
+  padding:.8vh .8vw;display:flex;align-items:center;justify-content:space-between;
+  font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);cursor:pointer;
+  user-select:none;transition:background .15s;
 }
-.part-label .tag{color:var(--dim);font-size:1.2vh}
+.partition-header:hover{background:rgba(0,0,0,.03)}
+.partition-header .ph-left{display:flex;align-items:center;gap:6px}
+.partition-header .expand-icon{font-size:1.2vh;color:var(--dim);transition:transform .3s}
+.partition.expanded .partition-header .expand-icon{transform:rotate(90deg)}
+.partition-header .tag{color:var(--dim);font-size:1.2vh}
+.partition-body{display:none;flex-direction:column;gap:.5vh;padding:0 .6vw .6vh}
+.partition.expanded .partition-body{display:flex}
 
-/* ===== Part file — L2: parquet file level ===== */
+/* ===== L2: Part file (clickable) ===== */
 .part{
-  border:1px solid var(--line2);border-radius:6px;
-  background:var(--panel);padding:.6vh .6vw;margin-bottom:.5vh;
-  display:flex;flex-direction:column;
-  flex-basis:0;flex-shrink:1;min-height:0;
+  border:1px solid var(--line2);border-radius:6px;background:var(--panel);
+  overflow:hidden;transition:border-color .2s;
 }
-.part:last-child{margin-bottom:0}
-.part-name{
-  font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);
-  margin-bottom:.3vh;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+.part:hover{border-color:var(--mut)}
+.part-header{
+  padding:.6vh .6vw;display:flex;align-items:center;justify-content:space-between;
+  font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);cursor:pointer;
+  user-select:none;transition:background .15s;
 }
-.part-name .rows{color:var(--mut);font-size:1.1vh}
+.part-header:hover{background:rgba(0,0,0,.02)}
+.part-header .ph-left{display:flex;align-items:center;gap:6px}
+.part-header .expand-icon{font-size:1.1vh;color:var(--dim);transition:transform .3s}
+.part.expanded .part-header .expand-icon{transform:rotate(90deg)}
+.part-header .rows{color:var(--mut);font-size:1.1vh}
+.part-body{display:none;padding:.4vh .6vw .5vh}
+.part.expanded .part-body{display:block}
 
-/* ===== Row groups — L3: RG level (same visual weight as L1/L2) ===== */
-.rgs{display:flex;gap:3px;align-items:stretch;flex:1}
+/* ===== L3: Row Group blocks ===== */
+.rgs{display:flex;gap:4px;align-items:stretch}
 .rg{
-  flex:1;border-radius:3px;min-width:10px;
+  flex:1;height:4vh;border-radius:4px;min-width:14px;
   display:flex;align-items:center;justify-content:center;
-  font-size:1vh;font-family:Consolas,monospace;font-weight:500;
-  cursor:default;transition:transform .15s;position:relative;
+  font-size:1.1vh;font-family:Consolas,monospace;font-weight:500;
+  cursor:default;position:relative;transition:transform .15s;
   overflow:hidden;white-space:nowrap;
 }
-.rg:hover{transform:scale(1.12);z-index:2}
+.rg:hover{transform:scale(1.1);z-index:2}
 .rg[data-tip]:hover::after{
   content:attr(data-tip);position:absolute;bottom:130%;
   left:50%;transform:translateX(-50%);
@@ -176,36 +159,15 @@ body{
 .rg-C{background:rgba(26,127,55,.10);border:1px solid rgba(26,127,55,.25);color:var(--grn)}
 .rg-D{background:rgba(130,80,223,.10);border:1px solid rgba(130,80,223,.25);color:var(--prp)}
 
-/* ===== Manifest badge ===== */
-.manifest{
-  display:inline-flex;align-items:center;gap:6px;
-  background:var(--panel2);border:1px solid var(--line);border-radius:8px;
-  padding:5px 10px;font-family:Consolas,monospace;font-size:1.6vh;color:var(--mut);
-}
-.manifest b{color:var(--tx)}
-.manifest .key{color:var(--cyan)}
-.manifest .val{color:var(--grn)}
-
-/* ===== Row axis (vertical, left of groups) ===== */
-.row-axis{
-  display:flex;flex-direction:column;align-items:center;
-  width:3vw;flex-shrink:0;justify-content:space-between;
-  color:var(--teal);font-size:1.4vh;font-family:Consolas,monospace;
-  padding-top:.5vh;padding-bottom:.5vh;
-}
-.row-axis .arrow{
-  flex:1;width:2px;background:repeating-linear-gradient(180deg,
-    var(--teal) 0,var(--teal) 6px,transparent 6px,transparent 12px);
-  margin:4px 0;
+/* ===== Empty partition (no part) ===== */
+.partition-empty{
+  padding:.5vh .8vw;text-align:center;font-size:1.2vh;
+  color:var(--dim);font-style:italic;
 }
 
-/* ===== Column axis (horizontal, below groups) ===== */
-.col-axis{
-  display:flex;gap:0;margin-top:.6vh;align-items:stretch;
-}
-.col-axis .col-spacer{
-  width:3vw;flex-shrink:0;
-}
+/* ===== Column axis (bottom) ===== */
+.col-axis{display:flex;gap:0;margin-top:.6vh}
+.col-axis .col-spacer{width:3.5vw;flex-shrink:0}
 .col-axis .col-block{
   flex:1;display:flex;flex-wrap:wrap;gap:4px;align-items:center;justify-content:center;
   padding:.8vh .5vw;border-radius:0 0 8px 8px;
@@ -214,306 +176,330 @@ body{
   border-radius:4px;padding:3px 8px;font-size:1.3vh;
   font-family:Consolas,monospace;white-space:nowrap;font-weight:500;
 }
-.col-axis .col-more{
-  flex:0 0 3vw;
-}
-.col-axis .col-arrow{
-  width:3vw;flex-shrink:0;display:flex;flex-direction:column;
-  align-items:center;justify-content:center;color:var(--teal);
-  font-size:1.4vh;font-family:Consolas,monospace;
-}
-.col-axis .col-arrow .aln{
-  flex:1;width:2px;background:repeating-linear-gradient(180deg,
-    var(--teal) 0,var(--teal) 6px,transparent 6px,transparent 12px);
-  margin:4px 0;
-}
-.legend{
-  display:flex;gap:1.2vw;flex-wrap:wrap;justify-content:center;
-  margin-top:1.5vh;padding-top:1.2vh;border-top:1px solid var(--line);
-}
-.legend-item{
-  display:flex;align-items:center;gap:6px;font-size:1.6vh;color:var(--mut);
-}
-.legend-item .swatch{
-  width:18px;height:18px;border-radius:3px;flex-shrink:0;
-}
-.legend-item code{color:var(--tx);font-size:1.4vh}
-
-/* ===== Dots navigation ===== */
-.dots{display:flex;gap:6px;align-items:center}
-.dot{
-  width:7px;height:7px;border-radius:50%;background:var(--line);cursor:pointer;
-  transition:all .2s;
-}
-.dot.active{background:var(--teal);transform:scale(1.4)}
-
-/* ===== Slide footer ===== */
-.slide-footer{
-  text-align:center;color:var(--dim);font-size:1.4vh;
-  padding-top:1vh;border-top:1px solid var(--line2);margin-top:auto;
-}
+.col-axis .col-more{flex:0 0 3vw;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:2vh}
 </style>
 </head>
 <body>
 
-<!-- ===== Top navigation bar ===== -->
 <div class="topbar">
   <div class="logo">AlignedTable<span>目录结构</span></div>
-  <div class="nav-btns">
-    <span class="pg" id="pg-indicator">1 / 1</span>
-    <button class="nb" id="prev-btn">‹</button>
-    <div class="dots" id="dots"></div>
-    <button class="nb" id="next-btn">›</button>
-  </div>
+  <div class="hint">点击展开各层级 · <b>Group → Partition → Part → Row Group</b></div>
 </div>
 
-<div class="deck">
-
-<!-- ==================== SLIDE 1: 概念 + 目录总览 ==================== -->
-<div class="slide active" id="s1">
-  <div class="slide-title">目录即 Catalog
-    <span class="sub">— 一个目录 = 一张逻辑表，每个子目录 = 一个列组</span>
-  </div>
-  <div class="slide-body">
-
-    <div class="concepts">
-      <div class="concept"><div class="ico">🗂</div><div><span class="name">Logical Table</span> <span class="detail"><code>cnstk_ixday/</code> 就是一张表，<b>_table.json</b> 是可选清单</span></div></div>
-      <div class="concept"><div class="ico">🧱</div><div><span class="name">Column Group</span> <span class="detail"><code>index/</code> <code>factor/alpha101/</code> 各独立存 Parquet</span></div></div>
-      <div class="concept"><div class="ico">🔑</div><div><span class="name">Key 只存一份</span> <span class="detail"><code>(date,symbol)</code> 只在 index 组</span></div></div>
-      <div class="concept"><div class="ico">📦</div><div><span class="name">Part = Parquet</span> <span class="detail"><code>0000-0000005998.parquet</code> = idx 0000 · 5998 行</span></div></div>
+<div class="slide">
+  <div class="table-box" data-name="cnstk_ixday/  ·  逻辑表">
+    <div class="desc">
+      <code>_table.json</code> · last_txid: 42 · groups: [index, factor/alpha101, fieldset/ma, …] · partitioning: {month=%Y-%m}
     </div>
 
-    <div class="db-wrap">
-      <!-- ===== Table: cnstk_ixday (no database wrapper) ===== -->
-      <div class="table-box" data-name="cnstk_ixday/  ·  逻辑表">
-        <div class="desc">
-          <span class="manifest">_table.json · <b>last_txid</b>:<span class="val">42</span> · <span class="key">groups</span>:[index, factor/alpha101, factor/alpha191, fieldset/ema, fieldset/ma, …] · <span class="key">partitioning</span>:{index:[{template:"month=%Y-%m"}]}</span>
+    <div class="main-area">
+      <div class="row-axis">
+        <span>row 0</span>
+        <div class="arrow"></div>
+        <span>row N</span>
+      </div>
+
+      <div class="groups">
+
+        <!-- ===== index group ===== -->
+        <div class="group g-index" data-g="index">
+          <div class="group-header">
+            <span>🔑 index</span>
+            <span class="expand-icon">▶</span>
+          </div>
+          <div class="group-body">
+
+            <div class="partition" data-p="2026-07">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-07</span>
+                <span class="tag">5998 行</span>
+              </div>
+              <div class="partition-body">
+                <div class="part" data-part="0000">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000002998.parquet</span>
+                    <span class="rows">2998 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
+                      <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">RG-B</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="part" data-part="0001">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0001-0000003000.parquet</span>
+                    <span class="rows">3000 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">RG-B</div>
+                      <div class="rg rg-C" data-tip="RG-C · rows 4998–5997">RG-C</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition" data-p="2026-09">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-09</span>
+                <span class="tag">5998 行</span>
+              </div>
+              <div class="partition-body">
+                <div class="part" data-part="0000">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000005998.parquet</span>
+                    <span class="rows">5998 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
+                      <div class="rg rg-B" data-tip="RG-B · rows 16384–32767">RG-B</div>
+                      <div class="rg rg-C" data-tip="RG-C · rows 32768–5997">RG-C</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition" data-p="2026-10" style="border-color:rgba(26,127,55,.3)">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> <span style="color:var(--grn)">month=2026-10</span></span>
+                <span class="tag" style="color:var(--grn)">新分区 · 1 行</span>
+              </div>
+              <div class="partition-body">
+                <div class="part" data-part="0000" style="border-color:rgba(26,127,55,.2)">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000000001.parquet</span>
+                    <span class="rows">1 row</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">RG-D</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
         </div>
 
-        <div style="display:flex;flex:1;min-height:0">
+        <!-- ===== alpha101 group ===== -->
+        <div class="group g-factor" data-g="alpha101">
+          <div class="group-header">
+            <span>🧮 alpha101</span>
+            <span class="expand-icon">▶</span>
+          </div>
+          <div class="group-body">
 
-        <!-- ===== Row axis (vertical, left side) ===== -->
-        <div class="row-axis">
-          <span>row 0</span>
-          <div class="arrow"></div>
-          <span>row N</span>
+            <div class="partition" data-p="2026-07">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-07</span>
+                <span class="tag">5998 行</span>
+              </div>
+              <div class="partition-body">
+                <div class="part" data-part="0000">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000002998.parquet</span>
+                    <span class="rows">2998 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-A" data-tip="RG-A · 与 index part 0000 同行区间">RG-A</div>
+                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="part" data-part="0001">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0001-0000003000.parquet</span>
+                    <span class="rows">3000 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition" data-p="2026-09">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-09</span>
+                <span class="tag">5998 行</span>
+              </div>
+              <div class="partition-body">
+                <div class="part" data-part="0000">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000005998.parquet</span>
+                    <span class="rows">5998 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
+                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="partition" data-p="2026-10">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-10</span>
+                <span class="tag">无 part · NULL</span>
+              </div>
+              <div class="partition-body">
+                <div class="partition-empty">— 该组未写入此分区 —</div>
+              </div>
+            </div>
+
+          </div>
         </div>
 
-        <div class="groups">
-          <!-- ===== index group (has the keys) ===== -->
-          <div class="group g-index">
-            <div class="group-label">🔑 index <span class="path">/ index/</span></div>
-
-            <div class="partition" style="flex-grow:5998">
-              <div class="part-label"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
-              <div class="part" style="flex-grow:2998">
-                <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
-                  <div class="rg rg-B" data-tip="RG-B · rows 16384–2997">RG-B</div>
-                </div>
-              </div>
-              <div class="part" style="flex-grow:3000">
-                <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-B" data-tip="RG-B · rows 2998–4997">RG-B</div>
-                  <div class="rg rg-C" data-tip="RG-C · rows 4998–5997">RG-C</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="partition" style="flex-grow:5998">
-              <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part" style="flex-grow:5998">
-                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · rows 0–16383">RG-A</div>
-                  <div class="rg rg-B" data-tip="RG-B · rows 16384–32767">RG-B</div>
-                  <div class="rg rg-C" data-tip="RG-C · rows 32768–5997">RG-C</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="partition" style="flex-grow:1;flex-basis:auto;flex-shrink:0;border-color:rgba(26,127,55,.4);background:rgba(26,127,55,.04)">
-              <div class="part-label"><span style="color:var(--grn)">month=2026-10</span><span class="tag" style="color:var(--grn)">新分区 · 1 part · 1 行</span></div>
-              <div class="part" style="flex-grow:0;flex-basis:auto;border-color:rgba(26,127,55,.3)">
-                <div class="part-name">0000-0000000001.parquet <span class="rows">1 row</span></div>
-                <div class="rgs">
-                  <div class="rg rg-D" data-tip="RG-D · 1 行（INSERT 追加）">RG-D</div>
-                </div>
-              </div>
-            </div>
+        <!-- ===== ma group ===== -->
+        <div class="group g-fieldset" data-g="ma">
+          <div class="group-header">
+            <span>📐 ma</span>
+            <span class="expand-icon">▶</span>
           </div>
+          <div class="group-body">
 
-          <!-- ===== factor/alpha101 ===== -->
-          <div class="group g-factor">
-            <div class="group-label">🧮 alpha101 <span class="path">/ factor/alpha101/</span></div>
-
-            <div class="partition" style="flex-grow:5998">
-              <div class="part-label"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
-              <div class="part" style="flex-grow:2998">
-                <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index part 0000 同行区间">RG-A</div>
-                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+            <div class="partition" data-p="2026-07">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-07</span>
+                <span class="tag">5998 行</span>
+              </div>
+              <div class="partition-body">
+                <div class="part" data-part="0000">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000002998.parquet</span>
+                    <span class="rows">2998 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
+                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div class="part" style="flex-grow:3000">
-                <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="partition" style="flex-grow:5998">
-              <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part" style="flex-grow:5998">
-                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
-                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="partition" style="flex-grow:1;flex-basis:auto;flex-shrink:0;opacity:.4;border-style:dotted">
-              <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
-              <div style="font-size:1.4vh;color:var(--dim);text-align:center;padding:.5vh 0;font-style:italic">
-                — 该组未写入此分区 —
-              </div>
-            </div>
-          </div>
-
-          <!-- ===== fieldset/ma ===== -->
-          <div class="group g-fieldset">
-            <div class="group-label">📐 ma <span class="path">/ fieldset/ma/</span></div>
-
-            <div class="partition" style="flex-grow:5998">
-              <div class="part-label"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
-              <div class="part" style="flex-grow:2998">
-                <div class="part-name">0000-0000002998.parquet <span class="rows">2998 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
-                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                </div>
-              </div>
-              <div class="part" style="flex-grow:3000">
-                <div class="part-name">0001-0000003000.parquet <span class="rows">3000 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                <div class="part" data-part="0001">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0001-0000003000.parquet</span>
+                    <span class="rows">3000 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div class="partition" style="flex-grow:5998">
-              <div class="part-label"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
-              <div class="part" style="flex-grow:5998">
-                <div class="part-name">0000-0000005998.parquet <span class="rows">5998 rows</span></div>
-                <div class="rgs">
-                  <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
-                  <div class="rg rg-B" data-tip="RG-B">RG-B</div>
-                  <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+            <div class="partition" data-p="2026-09">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-09</span>
+                <span class="tag">5998 行</span>
+              </div>
+              <div class="partition-body">
+                <div class="part" data-part="0000">
+                  <div class="part-header">
+                    <span class="ph-left"><span class="expand-icon">▶</span> 0000-0000005998.parquet</span>
+                    <span class="rows">5998 rows</span>
+                  </div>
+                  <div class="part-body">
+                    <div class="rgs">
+                      <div class="rg rg-A" data-tip="RG-A · 与 index 同行区间">RG-A</div>
+                      <div class="rg rg-B" data-tip="RG-B">RG-B</div>
+                      <div class="rg rg-C" data-tip="RG-C">RG-C</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div class="partition" style="flex-grow:1;flex-basis:auto;flex-shrink:0;opacity:.4;border-style:dotted">
-              <div class="part-label"><span>month=2026-10</span><span class="tag">无 part · 列全 NULL</span></div>
-              <div style="font-size:1.4vh;color:var(--dim);text-align:center;padding:.5vh 0;font-style:italic">
-                — 未写入 —
+            <div class="partition" data-p="2026-10">
+              <div class="partition-header">
+                <span class="ph-left"><span class="expand-icon">▶</span> month=2026-10</span>
+                <span class="tag">无 part · NULL</span>
+              </div>
+              <div class="partition-body">
+                <div class="partition-empty">— 未写入 —</div>
               </div>
             </div>
-          </div>
 
-          <!-- ===== more groups ===== -->
-          <div class="group group-more">
-            <div class="group-label" style="color:var(--dim)">⋯</div>
           </div>
-
-        </div><!-- /groups -->
-
-        </div><!-- /flex row-axis + groups -->
-
-        <!-- ===== Column axis (horizontal, below groups) ===== -->
-        <div class="col-axis">
-          <div class="col-spacer"></div>
-          <div class="col-block" style="background:rgba(188,76,0,.05);border-top:2px solid var(--org)">
-            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">date</span>
-            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">symbol</span>
-            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">close</span>
-            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">volume</span>
-            <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">amount</span>
-          </div>
-          <div class="col-block" style="background:rgba(130,80,223,.04);border-top:2px solid var(--prp)">
-            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha001</span>
-            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha002</span>
-            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">…</span>
-            <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha101</span>
-          </div>
-          <div class="col-block" style="background:rgba(26,127,55,.04);border-top:2px solid var(--grn)">
-            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma5</span>
-            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma10</span>
-            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma20</span>
-            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma60</span>
-            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma120</span>
-            <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma250</span>
-          </div>
-          <div class="col-more" style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:2vh">⋯</div>
         </div>
 
-      </div><!-- /table-box -->
-    </div><!-- /db-wrap -->
+        <!-- ===== more groups ===== -->
+        <div class="group group-more"><span>⋯</span></div>
+
+      </div>
+    </div>
+
+    <!-- ===== Column axis (bottom) ===== -->
+    <div class="col-axis">
+      <div class="col-spacer"></div>
+      <div class="col-block" style="background:rgba(188,76,0,.05);border-top:2px solid var(--org)">
+        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">date</span>
+        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">symbol</span>
+        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">close</span>
+        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">volume</span>
+        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">amount</span>
+      </div>
+      <div class="col-block" style="background:rgba(130,80,223,.04);border-top:2px solid var(--prp)">
+        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha001</span>
+        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha002</span>
+        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">…</span>
+        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha101</span>
+      </div>
+      <div class="col-block" style="background:rgba(26,127,55,.04);border-top:2px solid var(--grn)">
+        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma5</span>
+        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma10</span>
+        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma20</span>
+        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma60</span>
+        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma120</span>
+        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma250</span>
+      </div>
+      <div class="col-more">⋯</div>
+    </div>
 
   </div>
-  <div class="slide-footer">AlignedTable · DuckDB Extension + Parquet · 单文件自包含（需 Chrome/Edge）</div>
 </div>
-
-</div><!-- /deck -->
 
 <script>
 "use strict";
 (function(){
-  var slides = document.querySelectorAll(".slide");
-  var dotsEl = document.getElementById("dots");
-  var prevBtn = document.getElementById("prev-btn");
-  var nextBtn = document.getElementById("next-btn");
-  var pgEl = document.getElementById("pg-indicator");
-  var cur = 0;
-
-  slides.forEach(function(_, i){
-    var d = document.createElement("span");
-    d.className = "dot" + (i === 0 ? " active" : "");
-    d.onclick = function(){ go(i); };
-    dotsEl.appendChild(d);
+  // Click to toggle expand/collapse at each level
+  document.querySelectorAll(".group-header").forEach(function(h){
+    h.addEventListener("click", function(e){
+      e.stopPropagation();
+      var g = h.closest(".group");
+      g.classList.toggle("expanded");
+    });
   });
-
-  function go(n){
-    n = Math.max(0, Math.min(n, slides.length - 1));
-    slides[cur].classList.remove("active");
-    slides[n].classList.add("active");
-    dotsEl.children[cur].classList.remove("active");
-    dotsEl.children[n].classList.add("active");
-    cur = n;
-    pgEl.textContent = (n + 1) + " / " + slides.length;
-    prevBtn.disabled = (n === 0);
-    nextBtn.disabled = (n === slides.length - 1);
-  }
-
-  prevBtn.onclick = function(){ go(cur - 1); };
-  nextBtn.onclick = function(){ go(cur + 1); };
-
-  document.addEventListener("keydown", function(e){
-    if (e.key === "ArrowLeft" || e.key === "ArrowUp") go(cur - 1);
-    if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === " ") go(cur + 1);
-    if (e.key === "Home") go(0);
-    if (e.key === "End") go(slides.length - 1);
+  document.querySelectorAll(".partition-header").forEach(function(h){
+    h.addEventListener("click", function(e){
+      e.stopPropagation();
+      var p = h.closest(".partition");
+      p.classList.toggle("expanded");
+    });
   });
-
-  go(0);
+  document.querySelectorAll(".part-header").forEach(function(h){
+    h.addEventListener("click", function(e){
+      e.stopPropagation();
+      var p = h.closest(".part");
+      p.classList.toggle("expanded");
+    });
+  });
 })();
 </script>
 </body>
