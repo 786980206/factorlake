@@ -23,14 +23,14 @@ body{
 .deck{width:100vw;height:100vh;display:flex;flex-direction:column}
 .slide{
   flex:1;display:none;flex-direction:column;
-  padding:1.5vh 4vw;position:relative;
+  padding:1.5vh 2vw;position:relative;
 }
 .slide.active{display:flex}
 
 /* ===== Top bar ===== */
 .topbar{
   display:flex;align-items:center;justify-content:space-between;
-  padding:0 4vw;height:42px;border-bottom:1px solid var(--line);
+  padding:0 2vw;height:42px;border-bottom:1px solid var(--line);
   background:var(--panel);flex-shrink:0;
 }
 .topbar .logo{font-size:15px;font-weight:600;color:var(--teal)}
@@ -75,11 +75,11 @@ body{
 
 /* ===== Table box (top-level, no database wrapper) ===== */
 .db-wrap{
-  flex:1;display:flex;align-items:center;justify-content:center;
+  flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;
 }
 .table-box{
   border:2px solid var(--org);border-radius:14px;
-  background:var(--panel);padding:3vh 3vw;min-width:96vw;max-width:99vw;
+  background:var(--panel);padding:3vh 3vw;width:100%;
   position:relative;box-shadow:0 4px 24px rgba(0,0,0,.06);
 }
 .table-box::before{
