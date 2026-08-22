@@ -150,6 +150,7 @@ con.execute("SELECT * FROM aligned_scan('dg5')")
 | 2026-08-23 | stkoe-cli 发现发现 6（aligned_drop 后 ATTACH catalog 变 stale），写入此文件 | 待处理 |
 | 2026-08-23 | stkoe-cli 发现 4/5（表名 `_` 开头 + DROP TABLE）写入此文件 | 待处理 |
 | 2026-08-23 | FactorLake 侧修复发现 4（commit 3d5a6ff），确认发现 5 为预期行为 | ✅ 已回复 |
+| 2026-08-23 | FactorLake 侧修复发现 6（commit 30ece77，ATTACH catalog 动态刷新），回复完成 | ✅ 已回复 |
 
 ### 补充说明（2026-08-23）
 
@@ -328,3 +329,33 @@ SQLLogicTest 132/132 + 4 PS 套件全 PASS。扩展已重新编译。
 **期望行为**：
 
 `aligned_drop` 后 ATTACH catalog 应正确刷新，后续 `aligned_create` 创建的新表能通过 `INSERT INTO al.<table>` 写入。或者 `aligned_drop` 应完全删除列组（而非保留 partition_count=0 的空壳）。
+
+---
+
+### FactorLake 侧回复 — 发现 6（2026-08-23）
+
+#### 根因
+
+`AlignedSchemaEntry::EnsureTablesLoaded` 在 ATTACH 时执行一次表目录扫描，设置 `tables_loaded = true` 后不再重新扫描。`aligned_create` 创建的新表虽然存在于磁盘上，但 ATTACH catalog 的内存表注册表不会自动刷新，导致 `INSERT INTO al.<table>` 找不到新表。
+
+**注意**：关于步骤 5 中 `aligned_groups('smoke_test')` 返回 `partition_count=0` 的问题——`aligned_drop('smoke_test', 'index')` 会删除整个表目录（`fs.RemoveDirectory(table_path)`）。如果 `aligned_groups` 仍返回数据，可能是旧版本缓存问题。在修复后验证中，`aligned_drop` 后 `aligned_groups` 正确报 "table directory does not exist"。
+
+#### 修复
+
+**Commit `30ece77`**：`LookupEntry` 在缓存中找不到表时，检查磁盘上表目录是否存在。如果存在，重置 `tables_loaded = false` 并重新扫描整个数据根目录，使新表被发现并注册到 ATTACH catalog。
+
+#### 验证结果（Python duckdb）
+
+```
+1. aligned_create('smoke_test', ...)     → OK
+2. ATTACH + INSERT INTO al.smoke_test    → OK
+3. SELECT * FROM al.smoke_test           → ('000001', 2024-01-01, 10.5)  [OK]
+4. aligned_drop('smoke_test', 'index')   → (3, 2, 3)  [OK]
+5. aligned_create('ix1', ...)           → (2, 1, 4)  [OK]
+6. INSERT INTO al.ix1 (...)              → OK  ← 之前失败，现在通过
+7. SELECT * FROM al.ix1                  → ('000002', 2024-01-02, 20.0)  [OK]
+```
+
+SQLLogicTest 141/141 + 4 PS 套件全 PASS。扩展已重新编译（23.4 MB）。
+
+请用 `FORCE INSTALL` 重新安装扩展。
