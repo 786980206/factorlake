@@ -703,111 +703,91 @@ body{
 <script>
 "use strict";
 (function(){
-  var selPartition = null;
-  var selPart = null;
-  var selRG = null;
   var tableBox = document.querySelector(".table-box");
 
-  function updateSpotlight(){
-    tableBox.classList.remove("has-sel","has-sel-part","has-sel-rg");
-    if (selRG) tableBox.classList.add("has-sel","has-sel-part","has-sel-rg");
-    else if (selPart) tableBox.classList.add("has-sel","has-sel-part");
-    else if (selPartition) tableBox.classList.add("has-sel");
-  }
-
-  // Click partition HEADER → toggle (only header triggers, not body)
+  // Click partition HEADER → toggle independently (multi-select)
   document.querySelectorAll(".partition-header").forEach(function(h){
     h.addEventListener("click", function(e){
       e.stopPropagation();
       var p = h.closest(".partition");
       var key = p.getAttribute("data-p");
+
+      // Toggle all groups' same-data-p partitions together
       var isOn = p.classList.contains("selected");
-
-      document.querySelectorAll(".partition.selected").forEach(function(x){
-        x.classList.remove("selected");
+      document.querySelectorAll('.partition[data-p="'+key+'"]').forEach(function(x){
+        if (isOn) x.classList.remove("selected");
+        else x.classList.add("selected");
       });
-      document.querySelectorAll(".part.selected").forEach(function(x){
-        x.classList.remove("selected");
-      });
-      document.querySelectorAll(".rg.selected").forEach(function(x){
-        x.classList.remove("selected");
-      });
-      selPart = null;
-      selRG = null;
-
+      // When collapsing a partition, also collapse its child parts/RGs
       if (isOn) {
-        selPartition = null;
-      } else {
-        document.querySelectorAll('.partition[data-p="'+key+'"]').forEach(function(x){
-          x.classList.add("selected");
+        document.querySelectorAll('.partition[data-p="'+key+'"] .part.selected').forEach(function(x){
+          x.classList.remove("selected");
         });
-        selPartition = key;
+        document.querySelectorAll('.partition[data-p="'+key+'"] .rg.selected').forEach(function(x){
+          x.classList.remove("selected");
+        });
       }
       updateSpotlight();
     });
   });
 
-  // Click part HEADER → toggle
+  // Click part HEADER → toggle independently (multi-select)
   document.querySelectorAll(".part-header").forEach(function(h){
     h.addEventListener("click", function(e){
       e.stopPropagation();
       var pt = h.closest(".part");
       var pKey = pt.closest(".partition").getAttribute("data-p");
       var partKey = pt.getAttribute("data-part");
-      var isOn = pt.classList.contains("selected");
 
-      document.querySelectorAll(".part.selected").forEach(function(x){
-        x.classList.remove("selected");
-      });
-      document.querySelectorAll(".rg.selected").forEach(function(x){
-        x.classList.remove("selected");
-      });
-      selRG = null;
-
-      if (isOn) {
-        selPart = null;
-      } else {
-        if (selPartition !== pKey) {
-          document.querySelectorAll(".partition.selected").forEach(function(x){
-            x.classList.remove("selected");
-          });
-          document.querySelectorAll('.partition[data-p="'+pKey+'"]').forEach(function(x){
-            x.classList.add("selected");
-          });
-          selPartition = pKey;
-        }
-        document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"]').forEach(function(x){
+      // Ensure parent partition is selected
+      if (!pt.closest(".partition").classList.contains("selected")) {
+        document.querySelectorAll('.partition[data-p="'+pKey+'"]').forEach(function(x){
           x.classList.add("selected");
         });
-        selPart = partKey;
+      }
+
+      // Toggle all groups' same part together
+      var isOn = pt.classList.contains("selected");
+      document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"]').forEach(function(x){
+        if (isOn) x.classList.remove("selected");
+        else x.classList.add("selected");
+      });
+      // When collapsing a part, also collapse its child RGs
+      if (isOn) {
+        document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"] .rg.selected').forEach(function(x){
+          x.classList.remove("selected");
+        });
       }
       updateSpotlight();
     });
   });
 
-  // Click RG LABEL → toggle
+  // Click RG LABEL → toggle independently (multi-select)
   document.querySelectorAll(".rg-label").forEach(function(h){
     h.addEventListener("click", function(e){
       e.stopPropagation();
       var rg = h.closest(".rg");
       var rgKey = rg.getAttribute("data-rg");
+
+      // Toggle all groups' same-data-rg RGs together
       var isOn = rg.classList.contains("selected");
-
-      document.querySelectorAll(".rg.selected").forEach(function(x){
-        x.classList.remove("selected");
+      document.querySelectorAll('.rg[data-rg="'+rgKey+'"]').forEach(function(x){
+        if (isOn) x.classList.remove("selected");
+        else x.classList.add("selected");
       });
-
-      if (!isOn) {
-        document.querySelectorAll('.rg[data-rg="'+rgKey+'"]').forEach(function(x){
-          x.classList.add("selected");
-        });
-        selRG = rgKey;
-      } else {
-        selRG = null;
-      }
       updateSpotlight();
     });
   });
+
+  function updateSpotlight(){
+    var hasP = document.querySelector(".partition.selected");
+    var hasPt = document.querySelector(".part.selected");
+    var hasRG = document.querySelector(".rg.selected");
+    tableBox.classList.remove("has-sel","has-sel-part","has-sel-rg");
+    if (hasRG) tableBox.classList.add("has-sel","has-sel-part","has-sel-rg");
+    else if (hasPt) tableBox.classList.add("has-sel","has-sel-part");
+    else if (hasP) tableBox.classList.add("has-sel");
+  }
 })();
 </script>
 </body>
