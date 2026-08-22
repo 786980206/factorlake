@@ -686,16 +686,28 @@ static MutateTarget &GetCreateTarget(ClientContext &context, const MutateBindDat
 	return *res.first->second;
 }
 
-//! Appends one [pos, ...mapped values] row to a buffer.
+//! Appends one [pos, ...mapped values] row to a buffer. `scratch` is a
+//! caller-owned reusable chunk (initialized on first use) — allocating a
+//! fresh DataChunk per row dominated batch-insert profiles.
 static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buffer,
                               ColumnDataAppendState &append_state, idx_t pos, const vector<idx_t> &src_pos,
-                              SourceReader &src, idx_t src_row) {
-	DataChunk scratch;
-	scratch.Initialize(context, buffer.Types());
+                              SourceReader &src, idx_t src_row, DataChunk &scratch,
+                              const ColumnDataCollection *&scratch_owner) {
+	if (scratch_owner != &buffer) {
+		// NOTE: DataChunk::Initialize appends vectors (D_ASSERT(data.empty())
+		// is release-noop) - a reused chunk must be reconstructed wholesale.
+		// DataChunk is non-copy-assignable (Vector is), so rebuild in place.
+		scratch.~DataChunk();
+		new (&scratch) DataChunk();
+		scratch.Initialize(context, buffer.Types());
+		scratch_owner = &buffer;
+	}
+	scratch.Reset();
 	scratch.SetCardinality(1);
 	scratch.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(pos)));
 	for (idx_t c = 0; c < src_pos.size(); c++) {
-		scratch.SetValue(1 + c, 0, src.GetValue(src_pos[c], src_row));
+		Value v = src.GetValue(src_pos[c], src_row);
+		scratch.SetValue(1 + c, 0, v);
 	}
 	buffer.Append(append_state, scratch);
 }
@@ -902,6 +914,8 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 
 	// 5. Dispatch to per-group targets (sorted order -> ascending positions).
 	vector<TargetMap> targets(bind.plan.groups.size());
+	DataChunk row_scratch; // reused by AppendRowToBuffer (re-init per buffer type)
+	const ColumnDataCollection *row_scratch_owner = nullptr;
 	for (idx_t i = 0; i < rows.size(); i++) {
 		auto &loc = locs[i];
 		idx_t src_row = rows[i].src_row;
@@ -973,11 +987,11 @@ void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &data, Dat
 					continue;
 				}
 				AppendRowToBuffer(context, *target.update_buffer, target.update_append, local,
-				                  bind.group_mapping[gi].src_pos, reader, src_row);
+				                  bind.group_mapping[gi].src_pos, reader, src_row, row_scratch, row_scratch_owner);
 			} else {
 				idx_t pos = part ? local : target.insert_next++;
 				AppendRowToBuffer(context, *target.insert_buffer, target.insert_append, pos,
-				                  bind.group_mapping[gi].src_pos, reader, src_row);
+				                  bind.group_mapping[gi].src_pos, reader, src_row, row_scratch, row_scratch_owner);
 				target.inserts_count++;
 			}
 		}

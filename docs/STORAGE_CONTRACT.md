@@ -14,7 +14,8 @@
 > + **一列 symbol**，两日期列或无日期列均 fail-fast；`_table.json` **可选**；`groups`
 > 字段读端永不解析（唯一例外：空表起步给 Writer 提供 Group 骨架）；旧字段
 > （`aligned`、`key`、`canonical_order`、`row_count`、`row_group_size`）向后兼容忽略。
-> 写入侧（v7）：`aligned_upsert` / `aligned_delete` 取代 `aligned_write`，见 §9。
+> 写入侧：`aligned_upsert` / `aligned_delete` 表函数，以及经 `ATTACH (TYPE ALIGNED)`
+> 的标准 SQL DML（INSERT/UPDATE/DELETE，见 §9）。
 
 ---
 
@@ -25,7 +26,7 @@
 | Logical Table | 一张逻辑宽表，如 `cnstk_ixday`，对应 `<data_root>/<table_name>/` |
 | Column Group | Logical Table 的一个物理列子集，如 `index`、`factor/alpha101`，对应表内一个目录 |
 | Canonical Row Space | 该表的逻辑行坐标集合 `{0, 1, ..., R-1}`，R = 表行数（= index 各分区行数之和） |
-| Canonical Key | 定义行语义的列集合（v5：**= index Group 的 schema 列**，不再写入 manifest） |
+| Canonical Key | 定义行语义的列集合**= index Group 的 schema 列**，不写入 manifest |
 | Logical Partition | 按 Key 值划分的互斥行子集（如 `date = 2026-08-17` 的所有行） |
 | Physical Partition | 某个 Group 内一个 Hive 风格目录（如 `month=2026-08/`），**单层、各 Group 同一种段** |
 | Part File | 一个 Parquet 文件，**文件名自描述** `{idx:04d}-{rows:10d}.parquet`（v6），是 Group 内最小读取单元 |
@@ -207,7 +208,7 @@ part 文件（§3.3 排序）拼接后，**允许只覆盖 index 行空间的一
   用它给 Writer 提供 Group 骨架（空表起步）；除此之外读端一律从文件布局发现（§5.2）。
   Writer/Compactor 重写 manifest 时必须原样写回 `groups`（round-trip）。
 - `partitioning`（**可选**）：`group → 目录模板列表`。规则：
-  - **每个 Group 恰好一个模板**（v5：分区单层）；模板只有三种合法形式：
+  - **每个 Group 恰好一个模板**（分区单层）；模板只有三种合法形式：
     `year=%Y`、`month=%Y-%m`、`date=%Y-%m-%d`；`source` 为**逻辑日期列名**。
   - **v7 主键契约**：index Group 的 schema 前两列 = 主键 `(date, symbol)`——
     **恰一列 `DATE`/`TIMESTAMP`**（组 schema = rel_path 排序最后 1 个 part 的
@@ -220,10 +221,10 @@ part 文件（§3.3 排序）拼接后，**允许只覆盖 index 行空间的一
     partitioning**，否则 Writer 无法决定目录布局。
   - **Writer 重写 `_table.json` 时必须原样写回 partitioning**，否则显式配置丢失
     （退化为目录推导，可能改变未来写入的目录布局）。
-- **旧字段向后兼容**：`aligned`（v3 三模式）、v2 的 `key`、`schema_version`、
-  `canonical_order`、`row_count`、`row_group_size` 被读端**忽略**（不报错、不参与
-  任何计算）。**对齐模式不存在可配置字段**：分区对齐是唯一契约，数据不满足即
-  fail-fast（§3.2）。v5 的 Canonical Key = index Group 的 schema 列（§1）。
+- **旧字段向后兼容**：`aligned`、`key`、`schema_version`、`canonical_order`、
+  `row_count`、`row_group_size` 被读端**忽略**（不报错、不参与任何计算）。
+  **对齐模式不存在可配置字段**：分区对齐是唯一契约，数据不满足即 fail-fast（§3.2）。
+  Canonical Key = index Group 的 schema 列（§1）。
 
 ### 5.2 目录/组发现（无显式 groups 时）
 
@@ -235,7 +236,7 @@ part 文件（§3.3 排序）拼接后，**允许只覆盖 index 行空间的一
   - 只识别三种固定段：`year=YYYY` → `{template: year=%Y}`、
     `month=YYYY-MM` → `{template: month=%Y-%m}`、`date=YYYY-MM-DD` →
     `{template: date=%Y-%m-%d}`；`source` 一律为 `"date"`。
-  - **v5：只识别单层**；出现多层 `name=value` 段 → 报错（不迭代推导）。
+  - 只识别单层；出现多层 `name=value` 段 → 报错（不迭代推导）。
   - 同一 Group 的 part 之间某段的格式不一致 → 报错（如一部分 `month=2026-08`、
     另一部分 `month=08`）。
   - 无任何识别段 → 该 Group 无分区（part 直接在 Group 目录下，分区键 = `""`；
@@ -296,28 +297,42 @@ part 文件（§3.3 排序）拼接后，**允许只覆盖 index 行空间的一
 
 ---
 
-## 9. 写入与原子提交协议（v7：aligned_upsert / aligned_delete 取代 aligned_write）
+## 9. 写入与原子提交协议（aligned_upsert / aligned_delete + 标准 DML）
 
-**API**（v7）：
+**API**：
 
 ```
-aligned_upsert(table, source_path, mapping, root=...)   → (rows_inserted, rows_updated, parts_rewritten, txid)
-aligned_delete(table, keys_source, root=...)            → (rows_deleted, parts_rewritten, txid)
+aligned_upsert(table, source_path [, mapping], root=...)  → (rows_inserted, rows_updated, parts_rewritten, txid)
+aligned_delete(table, keys_source, root=...)              → (rows_deleted, parts_rewritten, txid)
 ```
 
-- 主键 = `(date, symbol)`（§8 v7 主键契约）；`source_path` 内所有行按此定位：
-  已存在 → 更新（只重写受影响 part，行数不变）；不存在 → 插入（追加到分区内
-  最后一个 part 之后；若键排序于分区末尾 → 创建新 part `idx = max+1`；若分区
-  不存在 → 为所有 mapped Group 创建新分区目录，每个 Group 一个 fresh part）。
+- `mapping` 对**已存在的表可省略**：按列名自动推断所属 Group（大小写不敏感）；
+  空表首写必须显式给出（它定义 Column Group 结构）。
+- **标准 SQL DML（ATTACH 集成）**：`ATTACH '<root>' AS al (TYPE ALIGNED)` 后，
+  `INSERT/UPDATE/DELETE` 经 catalog 的 `PlanInsert/PlanUpdate/PlanDelete` 钩子进入
+  同一 mutator，语义如下；SELECT 走 aligned 扫描，零物化。
+- 主键 = `(date, symbol)`（§8 主键契约）；`source_path` 内所有行按此定位：
+  已存在 → **更新（upsert）**：只重写受影响 part，且只覆盖本次映射/SET 的列，
+  未触及列保持原值，行数不变；不存在 → 插入（若键排序于分区内非末尾位置，
+  则重写该位置所在的 part 并将行插入其中——**中部插入**；排序于分区末尾 →
+  追加新 part `idx = 全组最大索引+1`；分区不存在 → 为所有 mapped Group 创建
+  新分区目录，每个 mapped Group 一个 fresh part）。
+- **部分组两阶段写入**：同一批键先写 M1 组、再写 M2 组是合法序列。第二次写入
+  时键已存在而 M2 组尚无该分区 ⇒ mutator 为 M2 **合成对齐 part**：R_i 行镜像
+  index 分区，全 NULL 行中仅键行携带映射值（part 行数 = index 分区行数，契约
+  §3.2 保持成立）。UPDATE 路径同理：映射组缺分区时合成。
 - **映射列类型 = 组内已存类型**（组 schema），不是源文件类型：跨 part 的列类型
-  必须一致（§8），新分区/新 part 不得改变列类型（首写空表时回退到源类型）。
+  必须一致（§8），新分区/新 part 不得改变列类型（组从未写过时回退到源类型）。
 - 新分区只出现在映射了的 Group；未映射 Group 的该分区行读为 NULL（缺分区
   契约，§3.2）。
-- `aligned_delete`：keys source 只需 `(date, symbol)`；删空单 part 分区 →
-  整分区移除（所有 Group）；删空多 part 分区的 part → fail-fast
-  （"run aligned_compact first"）。
+- **UPDATE 只写 SET 的列**：未映射的组整组跳过（其 part 内容不变，不重写）。
+- `aligned_delete`：keys source 只需 `(date, symbol)`。删空处理：
+  - 删空的 part 是该组在该分区的**最高索引 part** → 直接移除该 part 文件
+    （剩余索引仍连续，各组同索引 part 行数一致故同步移除）；
+  - 删空单 part 分区 → 整分区移除（所有 Group）；
+  - 删空**内部** part → fail-fast（"run aligned_compact first"）。
 
-**提交协议**（与 v5/v6 相同）：
+**提交协议**：
 
 1. Writer 以 **Logical Partition 为提交单位**（如 `month=2026-08` 的全部行）。
 2. 写入路径：`<table>/_tmp/transaction-<txid>/<group>/<partition-dirs...>/`，
@@ -333,7 +348,7 @@ aligned_delete(table, keys_source, root=...)            → (rows_deleted, parts
 4. **Reader 可见性规则**：
    - 一个 part 可见 ⟺ 存在于正式位置（`_tmp/` 内的 part 永不可见，§2.1d）。
    - 崩溃发生在 (a) 与 (b) 之间 → 新 part 已 rename 但 `_table.json.last_txid`
-     未更新：部分 Group 可见部分不可见。这是 v2 起保留的已知取舍：读取一致性
+     未更新：部分 Group 可见部分不可见。这是已知的取舍：读取一致性
      依赖"写入方先写全再 move"的顺序与 §3.3 行序契约；崩溃残留的 `_tmp/` 由
      下一次事务清理（读端从不读 `_tmp/`）。
    - 跨 Group 分区行数一致性在**扫描时**强校验（§3.2 fail-fast）：index 有分区、
@@ -342,10 +357,6 @@ aligned_delete(table, keys_source, root=...)            → (rows_deleted, parts
    序列化保证。
 6. 事务号：`txid = last_txid + 1`；任何失败（写、move、manifest 重写）→ 删除
    `_tmp/transaction-<txid>/`（及 best-effort 清空 `_tmp/`），事务丢弃。
-7. **追加校验（v5 分区对齐）**：写前模拟——index 组必须覆盖追加区间
-   `[start_row, start_row+rows)`（`ValidateRowSpace` 强制）；分区子集组只要求其
-   末 part 结束 == start_row（或空组要求 start_row==0，首写必须从行 0 覆盖全表）。
-   upsert 同理：更新/插入的位置必须落在现有行空间或紧邻其后的追加区间。
 
 ---
 
@@ -434,25 +445,13 @@ aligned_delete(table, keys_source, root=...)            → (rows_deleted, parts
 
 ---
 
-## 14. 验收清单
+## 14. 当前实现状态
 
-- [x] 术语与 7 条不变量定义（§1~§3）
-- [x] "row N 对齐"的精确含义与 Writer/Reader 责任（§3）
-- [x] 目录布局、Manifest、footer 行区间、提交协议（§2, §5, §7, §9）
-- [x] Schema Evolution 规则（§8）
-- [x] 由 Writer（Phase 5）与 Reader（Phase 1）实现并互测通过
-- [x] v2 简化：删除 `_group.json`/sidecar/marker，partitioning 入 `_table.json`，
-      行区间 footer 自描述，`last_txid` 事务记录
-- [x] v3：`_table.json` 可选 + 默认值；aligned 三模式（all/group/none，声明
-      fail-fast / 未声明探测降级链）；Canonical Key = index schema；part 顺序
-      = 相对路径字符串序（索引即 part_id）；行区间公式推导（校验 footer）；
-      旧字段向后兼容忽略
-- [x] v4：删除三模式与探测降级链，只保留全对齐（all）——`aligned` 字段读端
-      忽略；组间 part 数/大小必须一致、组内非最后 part == part_rows，违反即
-      fail-fast（"full alignment required"）；行区间一律公式 `i*part_rows`；
-      数据生成器/测试/文档全部改为全对齐布局；Compaction 改为单事务处理所有组
-- [x] v5：**分区对齐（partition-aligned）唯一契约**——所有 Group 单层同一种分区段；
-      分区键 = 完整 `name=value` 段串；Group 分区键 ⊆ index（缺分区 → 行保留、
-      列全 NULL）；共享分区总行数一致（末 part 行数可不同）；行区间按分区公式
-      `start_row = S_i + j*part_rows`；`groups` 读端永不解析（空表例外）；组 schema
-      = 每分区最后 1 个 part footer；bench/测试/文档全部改为分区对齐布局
+- [x] 分区对齐唯一契约 + 自描述 part 名（文件名即行区间）
+- [x] 主键契约 (date, symbol)；index 组分区内索引 0000 起连续
+- [x] aligned_upsert / aligned_delete：按主键 upsert / 删除，只重写受影响 part，
+      `_tmp` 暂存 + move 原子提交 + last_txid 记账
+- [x] mapping 可选（已有表自动推断）；部分组两阶段写入（缺分区组合成对齐 part）
+- [x] UPDATE 只写 SET 列；未映射组跳过不重写
+- [x] DELETE：删空最高索引 part 直接移除；内部 part 删空 fail-fast
+- [x] ATTACH (TYPE ALIGNED)：标准 SQL DML 经 PlanInsert/PlanUpdate/PlanDelete 钩子直写列组
