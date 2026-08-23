@@ -45,9 +45,11 @@ struct AlignedInsertSourceState : public GlobalSourceState {
 //===----------------------------------------------------------------------===//
 PhysicalAlignedInsert::PhysicalAlignedInsert(PhysicalPlan &physical_plan, vector<LogicalType> types_p,
                                              vector<LogicalType> row_types_p, vector<string> row_names_p,
-                                             const string &table_p, const string &root_p, idx_t est_card)
+                                             const string &table_p, const string &root_p, idx_t est_card,
+                                             string explicit_mapping_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::INSERT, std::move(types_p), est_card),
-      table(table_p), root(root_p), row_types(std::move(row_types_p)), row_names(std::move(row_names_p)) {
+      table(table_p), root(root_p), row_types(std::move(row_types_p)), row_names(std::move(row_names_p)),
+      explicit_mapping(std::move(explicit_mapping_p)) {
 }
 
 unique_ptr<GlobalSinkState> PhysicalAlignedInsert::GetGlobalSinkState(ClientContext &context) const {
@@ -97,7 +99,7 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 	try {
 		if (g.collection.Count() <= INSERT_BATCH_SIZE) {
 			// Small enough — single call (the common case).
-			AlignedUpsertFromCollection(context, table, root, "", g.collection, row_names);
+			AlignedUpsertFromCollection(context, table, root, explicit_mapping, g.collection, row_names);
 		} else {
 			// Large INSERT — scan the collection in batches, calling the
 			// mutator per batch. Each batch is an independent transaction.
@@ -121,7 +123,7 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 				batch_rows += scan_chunk.size();
 
 				if (batch_rows >= INSERT_BATCH_SIZE) {
-					AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
+					AlignedUpsertFromCollection(context, table, root, explicit_mapping, batch, row_names);
 					batch.Reset();
 					batch.InitializeAppend(batch_append);
 					batch_rows = 0;
@@ -129,7 +131,7 @@ SinkFinalizeType PhysicalAlignedInsert::Finalize(Pipeline &pipeline, Event &even
 			}
 			// Flush the final partial batch.
 			if (batch_rows > 0) {
-				AlignedUpsertFromCollection(context, table, root, "", batch, row_names);
+				AlignedUpsertFromCollection(context, table, root, explicit_mapping, batch, row_names);
 			}
 		}
 	} catch (std::exception &ex) {

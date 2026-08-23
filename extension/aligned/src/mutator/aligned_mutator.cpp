@@ -115,6 +115,7 @@ static unique_ptr<MutateBindData> BuildUpsertBindFromCollection(ClientContext &c
 	for (idx_t c = 0; c < source_col_names.size(); c++) {
 		source_schema[source_col_names[c]] = source_collection.Types()[c];
 	}
+	result->source_col_names = source_col_names;
 
 	// Parse mapping
 	case_insensitive_map_t<vector<string>> mapping;
@@ -319,6 +320,7 @@ static unique_ptr<MutateBindData> BuildDeleteBindFromCollection(ClientContext &c
 	result->symbol_col = index_group.symbol_column;
 
 	// The keys collection must have 2 columns matching (symbol, date).
+	result->source_col_names = {result->symbol_col, result->date_col};
 	auto &ktypes = keys_collection.Types();
 	if (ktypes.size() != 2) {
 		throw BinderException("%s: keys collection must have 2 columns (symbol, date), got %llu", fn,
@@ -987,7 +989,7 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 	// 1. Read the needed source columns.
 	unique_ptr<ColumnDataCollection> src;
 	if (bind.source_collection) {
-		src = ReadSourceFromCollection(context, *bind.source_collection, bind.needed_names, bind.needed_names);
+		src = ReadSourceFromCollection(context, *bind.source_collection, bind.needed_names, bind.source_col_names);
 	} else {
 		src = ReadSourceColumns(context, bind.source_path, bind.needed_names);
 	}
@@ -1112,6 +1114,22 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 		bool fresh = FindPartition(index_group, loc.partition_key) == nullptr;
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &group = bind.plan.groups[gi];
+			// Skip groups whose mapped columns are ONLY the key columns (symbol,
+			// date) when this is an update (found=true). The key values don't
+			// change on update, so rewriting those parts is pure waste.
+			if (loc.found) {
+				bool only_keys = !bind.group_mapping[gi].col_names.empty();
+				for (auto &col : bind.group_mapping[gi].col_names) {
+					if (!StringUtil::CIEquals(col, bind.date_col) &&
+					    !StringUtil::CIEquals(col, bind.symbol_col)) {
+						only_keys = false;
+						break;
+					}
+				}
+				if (only_keys) {
+					continue;
+				}
+			}
 			if (gi > 0 && loc.found && bind.group_mapping[gi].col_names.empty()) {
 				continue;
 			}
@@ -1249,7 +1267,7 @@ static void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &da
 	unique_ptr<ColumnDataCollection> src;
 	if (bind.source_collection) {
 		src = ReadSourceFromCollection(context, *bind.source_collection, key_names,
-		                               vector<string> {"symbol", "date"});
+		                               bind.source_col_names.empty() ? vector<string> {"symbol", "date"} : bind.source_col_names);
 	} else {
 		src = ReadSourceColumns(context, bind.source_path, key_names);
 	}

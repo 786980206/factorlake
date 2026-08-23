@@ -176,6 +176,7 @@ struct MutateBindData : public TableFunctionData {
 	};
 	vector<GroupMapping> group_mapping; // aligned with plan.groups
 	vector<string> needed_names;        // all needed source columns
+	vector<string> source_col_names;   // actual column names of source_collection (for ReadSourceFromCollection)
 	idx_t source_rows = 0;
 	// Primary key columns (empty table: derived from the index mapping).
 	string date_col;

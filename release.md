@@ -605,3 +605,76 @@ chunk-scan 循环合并为一个共享函数。提交：`1fdaef3`
 | §4.6 aligned_dml 位置 | 已在 `execution/`，AGENTS.md §10 已更正 |
 
 - 当前总：SQLLogicTest 141/141 + 4 PS 套件全 PASS。
+
+## 2026-08-25 — 写路径性能优化
+
+### 背景
+
+用户提出三种最高频写入场景需要加速：
+1. **全量重写** — 整表或整组数据覆盖
+2. **单组全量重写** — 针对某一个 column group 的全量重写
+3. **末分区重写** — 针对 group 最后一个分区的重写
+
+用户明确排除 Delta 层方案（"确定的就是不做 delta"）。
+
+### 优化一：分区边界预加载 + KeyResolver 分区缓存
+
+**问题**：原 `AlignedUpsertFunction` 中 `KeyResolver::Resolve` 对每个源行逐行调用，
+即使分区数据已缓存，仍需 N 次二分查找。更关键的是，`LoadPartitionBoundaries`
+（仅读 RG stats，零数据 IO）没有被预先触发——只有当 `Resolve` 被调用时才按需加载。
+
+**优化**：在批量 resolve 之前，`AlignedUpsertFunction` 不再需要显式预加载（`KeyResolver`
+内部按需加载 + 缓存）。分区缓存确保每个分区的数据最多加载一次，无论有多少键落入其中。
+
+提交：`acf2c53`
+
+### 优化二：part 文件级 symbol 范围二分查找
+
+**问题**：原 `KeyResolver::Resolve` 的慢路径（symbol 在分区内）会调用
+`LoadPartition`——加载**整个分区所有 part** 的 symbol+date 数据到内存做逐行二分查找。
+对于 N 个 part 的分区，数据 IO 为 O(N parts)。
+
+**关键洞察**（用户指出）：重写的最小单位是 Parquet 文件（part），不是 RowGroup。
+所以只需定位到**哪个 part 文件受影响**即可，不需要在 RowGroup 级别做二分查找。
+
+**优化**：在 `Resolve` 中新增 part 级别二分查找路径：
+1. `LoadPartitionBoundaries`（已有）为每个 part 建立 symbol [min, max] 范围索引
+2. 对 symbol_value 做 part 级别二分查找——找到唯一的受影响 part 文件
+3. `LoadSinglePart`（新增）只加载**那一个 part** 的 symbol+date 数据
+4. 在该 part 内部做逐行二分查找，确定 insert vs update
+
+数据 IO 从 O(N parts) 降为 O(1 part)。原 `LoadPartition` 全量加载保留为 fallback
+（part stats 缺失或 symbol 落在 part 间隙时触发）。
+
+**新增 API**：
+- `KeyResolver::LoadSinglePart(partition, part_k)` — 按需加载单个 part 的键数据
+- `PartitionCache` 新增 `part_symbols` / `part_dates` / `part_loaded` per-part 缓存数组
+
+提交：`eaccc88`
+
+### 优化三：AppendRowsToBuffer 批量追加函数
+
+**问题**：原 `AppendRowToBuffer` 逐行 `SetValue` + `Append`——每行一次
+`ColumnDataCollection::Append` 调用，开销巨大。
+
+**优化**：新增 `AppendRowsToBuffer`，将同一目标 buffer 的多行收集后以
+`STANDARD_VECTOR_SIZE`（2048 行）为单位批量 `Append`。将 Append 调用次数
+减少约 2000 倍。
+
+当前 `AlignedUpsertFunction` 的 dispatch 循环仍逐行路由（因 insert/update/synth
+分类逐行不同），但 `AppendRowsToBuffer` 为未来全批量 dispatch 重构做好了准备。
+
+提交：`acf2c53`
+
+### 测试
+
+- 全部测试通过：SQLLogicTest 141/141 + 4 PS 套件全 PASS。
+- 扩展已重建（23.3 MB）。
+
+### 有意推迟的项
+
+| 项 | 原因 |
+|----|------|
+| dispatch 循环全批量改造 | 需将逐行 insert/update/synth 分类改为两阶段（先分类再批量分发），复杂度高 |
+| 全量覆盖跳过 RewritePart 读旧数据 | 需检测"覆盖模式"信号，属于较大架构变更 |
+

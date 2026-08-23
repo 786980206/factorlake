@@ -380,6 +380,50 @@ PhysicalOperator &AlignedCatalog::PlanCreateTableAs(ClientContext &context, Phys
 PhysicalOperator &AlignedCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalInsert &op, optional_ptr<PhysicalOperator> plan) {
 	D_ASSERT(plan);
+	// Build an explicit group→column mapping from the INSERT column list.
+	// When the user specifies a subset of columns (e.g. INSERT INTO t (symbol,
+	// date, alpha001)), only the groups owning those columns need rewriting.
+	// Groups whose columns were all default-filled (not in the INSERT list)
+	// can be skipped entirely by the mutator — no RewritePart.
+	// column_index_map[physical_col] = position in the INSERT's value list,
+	// or INVALID_INDEX if the column was not specified (gets default/NULL).
+	string explicit_mapping;
+	if (!op.column_index_map.empty()) {
+		auto &entry_tbl = op.table.Cast<AlignedTableEntry>();
+		TablePlan tbl_plan;
+		BuildTablePlan(context, entry_tbl.GetRoot(), entry_tbl.name, tbl_plan);
+		// Build a map from physical column name → column_index_map value.
+		case_insensitive_map_t<idx_t> col_map;
+		for (auto &col : entry_tbl.GetColumns().Physical()) {
+			auto mapped = op.column_index_map[col.Physical()];
+			col_map[col.Name()] = mapped;
+		}
+		for (auto &group : tbl_plan.groups) {
+			vector<string> explicit_cols;
+			for (auto &col_name : group.column_order) {
+				auto it = col_map.find(col_name);
+				if (it == col_map.end()) {
+					continue;
+				}
+				if (it->second != DConstants::INVALID_INDEX) {
+					explicit_cols.push_back(col_name);
+				}
+			}
+			if (!explicit_cols.empty()) {
+				if (!explicit_mapping.empty()) {
+					explicit_mapping += ";";
+				}
+				explicit_mapping += group.manifest.group + ":";
+				for (idx_t i = 0; i < explicit_cols.size(); i++) {
+					if (i > 0) {
+						explicit_mapping += ",";
+					}
+					explicit_mapping += explicit_cols[i];
+				}
+			}
+		}
+	}
+
 	if (!op.column_index_map.empty()) {
 		plan = planner.ResolveDefaultsProjection(op, *plan);
 	}
@@ -390,7 +434,8 @@ PhysicalOperator &AlignedCatalog::PlanInsert(ClientContext &context, PhysicalPla
 	}
 	auto row_types = entry.GetTypes();
 	auto &insert = planner.Make<PhysicalAlignedInsert>(op.types, std::move(row_types), std::move(col_names),
-	                                                   entry.name, entry.GetRoot(), op.estimated_cardinality);
+	                                                   entry.name, entry.GetRoot(), op.estimated_cardinality,
+	                                                   std::move(explicit_mapping));
 	insert.children.push_back(*plan);
 	return insert;
 }

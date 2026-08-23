@@ -346,6 +346,11 @@ extension/aligned/src/
   全部收益。按 16 chunks 发 Range → 8 线程 4.2×。
 - **不要依赖 count(rowid)/count(\*) 诊断数据错误**：DuckDB 会用 Cardinality
   统计优化掉扫描。用 `sum(rowid)` + `row_number() OVER ()` 定位。
+- **KeyResolver 定位粒度 = part 文件，不是 RowGroup**：重写的最小单位是 Parquet
+  文件（part），所以用 part 级别的 symbol [min, max] 范围做二分查找即可定位受影响
+  文件。不需要加载 part 内部数据在 RowGroup 级别做二分查找——一旦确定某个 part
+  受影响，整个 part 就要被重写。`LoadSinglePart` 只在需要区分 insert vs update 时
+  加载单个 part 的键数据（O(1 part)），而非 `LoadPartition`（O(N parts)）。
 
 ### 工具链陷阱
 

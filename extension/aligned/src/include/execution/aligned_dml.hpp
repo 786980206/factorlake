@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
@@ -16,7 +16,8 @@ public:
 	//! types_p = operator output ({Count}); row_types/row_names = the table's
 	//! full row schema (what the child plan produces and what we stage).
 	PhysicalAlignedInsert(PhysicalPlan &plan, vector<LogicalType> types_p, vector<LogicalType> row_types_p,
-	                      vector<string> row_names_p, const string &table, const string &root, idx_t est_card);
+	                      vector<string> row_names_p, const string &table, const string &root, idx_t est_card,
+	                      string explicit_mapping = "");
 
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
@@ -45,6 +46,11 @@ private:
 	string root;
 	vector<LogicalType> row_types;
 	vector<string> row_names;
+	//! When non-empty, the INSERT specified a subset of columns. This mapping
+	//! string tells the mutator exactly which group+columns were set, so groups
+	//! whose columns were not in the INSERT column list can be skipped entirely
+	//! (no RewritePart). Format: "index:sym,date[,cols];group:cols".
+	string explicit_mapping;
 };
 //! Standard-UPDATE for aligned attached tables (upsert semantics: matched
 //! keys are rewritten in place; unmatched keys would be inserted by the
