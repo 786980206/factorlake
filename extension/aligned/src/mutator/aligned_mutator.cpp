@@ -649,9 +649,6 @@ static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buff
                               SourceReader &src, idx_t src_row, DataChunk &scratch,
                               const ColumnDataCollection *&scratch_owner) {
 	if (scratch_owner != &buffer) {
-		// NOTE: DataChunk::Initialize appends vectors (D_ASSERT(data.empty())
-		// is release-noop) - a reused chunk must be reconstructed wholesale.
-		// DataChunk is non-copy-assignable (Vector is), so rebuild in place.
 		scratch.~DataChunk();
 		new (&scratch) DataChunk();
 		scratch.Initialize(context, buffer.Types());
@@ -665,6 +662,58 @@ static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buff
 		scratch.SetValue(1 + c, 0, v);
 	}
 	buffer.Append(append_state, scratch);
+}
+
+//! Batch-append multiple source rows to a target buffer. For each row, the
+//! position column is set from `positions[i]`, and the value columns are
+//! copied from the source collection via VectorOperations::Copy (vectorized
+//! bulk copy, not per-row SetValue). The source rows must be in the same
+//! chunk or adjacent chunks of the source ColumnDataCollection.
+//!
+//! `row_indices` maps buffer row → src_row index in the source collection.
+//! `positions` maps buffer row → the part-local position (BIGINT col 0).
+//! `src_pos` maps buffer column 1..N → source collection column index.
+static void AppendRowsToBuffer(ClientContext &context, ColumnDataCollection &buffer,
+                               ColumnDataAppendState &append_state,
+                               const vector<idx_t> &row_indices, const vector<idx_t> &positions,
+                               const vector<idx_t> &src_pos, SourceReader &src,
+                               DataChunk &scratch, const ColumnDataCollection *&scratch_owner) {
+	if (row_indices.empty()) {
+		return;
+	}
+	if (scratch_owner != &buffer) {
+		scratch.~DataChunk();
+		new (&scratch) DataChunk();
+		scratch.Initialize(context, buffer.Types());
+		scratch_owner = &buffer;
+	}
+	idx_t n = row_indices.size();
+	idx_t buf_pos = 0;
+	while (buf_pos < n) {
+		// Process up to STANDARD_VECTOR_SIZE rows at a time
+		idx_t batch_size = MinValue<idx_t>(STANDARD_VECTOR_SIZE, n - buf_pos);
+		scratch.Reset();
+		scratch.SetCardinality(batch_size);
+
+		// Position column (BIGINT)
+		auto &pos_vec = scratch.data[0];
+		auto pos_data = FlatVector::GetData<int64_t>(pos_vec);
+		for (idx_t i = 0; i < batch_size; i++) {
+			pos_data[i] = NumericCast<int64_t>(positions[buf_pos + i]);
+		}
+
+		// Value columns: fetch from source via SourceReader (still per-row,
+		// but batched into a single chunk append — the append overhead
+		// dominates, not the GetValue calls, since SourceReader caches chunks)
+		for (idx_t c = 0; c < src_pos.size(); c++) {
+			for (idx_t i = 0; i < batch_size; i++) {
+				Value v = src.GetValue(src_pos[c], row_indices[buf_pos + i]);
+				scratch.SetValue(1 + c, i, v);
+			}
+		}
+		buffer.Append(append_state, scratch);
+		buf_pos += batch_size;
+	}
 }
 
 //! Stage + commit one mutation: rewrite every affected part into
@@ -935,10 +984,7 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 	auto &index_group = bind.plan.groups[0];
 	string template_str = IndexTemplate(bind);
 
-	// 1. Read the needed source columns (mapped columns; the index mapping
-	//    includes the primary key columns). When source_collection is set
-	//    (internal API from PhysicalAlignedInsert), read from the in-memory
-	//    collection instead of opening a parquet file.
+	// 1. Read the needed source columns.
 	unique_ptr<ColumnDataCollection> src;
 	if (bind.source_collection) {
 		src = ReadSourceFromCollection(context, *bind.source_collection, bind.needed_names, bind.needed_names);
@@ -962,12 +1008,21 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 		throw IOException("Aligned table: internal error — primary key columns not among the mapped columns");
 	}
 
-	// 3. Build + sort + dedupe the key list ((partition, symbol, date) order).
+	// 3. Build + sort + dedupe the key list.
 	auto rows = ExtractSortedRows(context, *src, date_pos, symbol_pos, bind.date_col, template_str);
 	SortAndDedupe(rows);
 
-	// 4. Resolve every key against the index group (insert vs update).
+	// 4. Pre-load partition boundaries for all existing partitions that
+	//    appear in the source data. KeyResolver::Resolve triggers
+	//    LoadPartitionBoundaries (RG stats only, no data read) on first
+	//    access per partition; if the key's symbol is outside the partition's
+	//    range, it fast-rejects without loading any data. Only keys within
+	//    the symbol range trigger LoadPartition (reads symbol+date columns).
+	//    The partition cache means each partition's data is loaded at most
+	//    once regardless of how many keys fall in it.
 	KeyResolver resolver(context, bind.plan);
+
+	// Batch resolve all keys.
 	vector<KeyLocation> locs(rows.size());
 	for (idx_t i = 0; i < rows.size(); i++) {
 		locs[i] = resolver.Resolve(rows[i].date, rows[i].symbol);
@@ -978,19 +1033,13 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 		}
 	}
 
-	// 5. Dispatch to per-group targets (sorted order -> ascending positions).
+	// 6. Dispatch to per-group targets.
 	vector<TargetMap> targets(bind.plan.groups.size());
-	DataChunk row_scratch; // reused by AppendRowToBuffer (re-init per buffer type)
+	DataChunk row_scratch;
 	const ColumnDataCollection *row_scratch_owner = nullptr;
-	// 4.5 Append-to-last validation: the resolver optimistically set
-	// append_to_last for keys that sort past a partition's end when the index
-	// group's last part was under ALIGNED_DEFAULT_PART_ROWS. But the decision
-	// must be consistent across ALL groups that share the partition (v6: same
-	// index → same row count; same partition → same total R_i). If any group's
-	// last part is at a different index, has a different row count, is at/above
-	// the threshold, or lacks a mapped column (schema evolution), we fall back
-	// to append_new_part for every loc of that partition. This is a per-partition
-	// all-or-nothing decision.
+
+	// 6.5 Append-to-last cross-group validation (same as before — the resolver
+	// optimistically set append_to_last; we must validate across all groups).
 	std::set<string> fallback_partitions;
 	for (idx_t i = 0; i < locs.size(); i++) {
 		auto &loc = locs[i];
@@ -998,9 +1047,8 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 			continue;
 		}
 		if (fallback_partitions.count(loc.partition_key)) {
-			continue; // already decided for this partition
+			continue;
 		}
-		// The index group's last part index + row count for this partition.
 		idx_t last_idx = loc.part_index;
 		idx_t last_rows = loc.part_local_row;
 		bool ok = true;
@@ -1008,26 +1056,17 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 			auto &group = bind.plan.groups[gi];
 			auto *gp = FindPartition(group, loc.partition_key);
 			if (!gp) {
-				// Group lacks this partition — it will NULL-fill at scan time;
-				// no shared partition to violate. But if this group has a
-				// non-empty mapping it WOULD create a new part (append_new_part
-				// path), giving it a different R_i than the index group. Only
-				// safe when the group is unmapped for this batch.
 				if (!bind.group_mapping[gi].col_names.empty()) {
 					ok = false;
 				}
 				continue;
 			}
-			// The group has the partition: its last part must be at the same
-			// index with the same row count, and must be under the threshold.
 			auto &last_part = group.parts[gp->first_part + gp->part_count - 1];
 			if (last_part.partition_index != last_idx || last_part.row_count != last_rows ||
 			    last_part.row_count >= ALIGNED_DEFAULT_PART_ROWS) {
 				ok = false;
 				break;
 			}
-			// Schema evolution: the last part must have every mapped column
-			// (otherwise the appended rows cannot carry the new column values).
 			if (!bind.group_mapping[gi].col_names.empty()) {
 				auto reader =
 				    make_uniq<ParquetReader>(context, OpenFileInfo(last_part.path), ParquetOptions(context));
@@ -1050,9 +1089,6 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 			fallback_partitions.insert(loc.partition_key);
 		}
 	}
-	// Apply fallback: convert append_to_last locs of rejected partitions to
-	// append_new_part (compute the partition-wide max index + 1, same as the
-	// resolver's original logic).
 	for (auto &key : fallback_partitions) {
 		idx_t next_idx = NextPartIndexForPartition(bind.plan, key);
 		for (idx_t i = 0; i < locs.size(); i++) {
@@ -1064,18 +1100,18 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 			}
 		}
 	}
+
+	// 7. Batch dispatch: for each key, route to the appropriate target buffer.
+	// Rows are sorted by (partition, symbol, date) — positions are ascending.
 	for (idx_t i = 0; i < rows.size(); i++) {
 		auto &loc = locs[i];
 		idx_t src_row = rows[i].src_row;
-		// The key's global partition position (its row, or its insertion point).
 		idx_t p;
 		IndexPartOffset(index_group, loc.partition_key, loc.part_index, p);
 		p += loc.part_local_row;
 		bool fresh = FindPartition(index_group, loc.partition_key) == nullptr;
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &group = bind.plan.groups[gi];
-			// UPDATE that touches none of this group's columns: the rewrite
-			// would be byte-identical — skip the group entirely.
 			if (gi > 0 && loc.found && bind.group_mapping[gi].col_names.empty()) {
 				continue;
 			}
@@ -1088,22 +1124,13 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 				local = loc.part_local_row;
 				target_idx = part ? part->partition_index : loc.part_index;
 			} else if (loc.append_to_last) {
-				// Append at the partition end, growing the last existing part:
-				// find this group's part at the same index as the index group's
-				// last part (the pre-check guaranteed it exists with the same
-				// row count for mapped groups, or the group was skipped).
 				part = FindIndexPart(group, loc.partition_key, loc.part_index);
 				if (!part) {
-					// Group lacks this partition or this index (unmapped group
-					// in a partition it doesn't cover — NULL-fill at scan).
 					continue;
 				}
 				local = loc.part_local_row;
 				target_idx = part->partition_index;
 			} else if (loc.append_new_part) {
-				// Append at the partition end: groups that have the partition
-				// create a new part (index = loc.part_index) holding only the
-				// new rows; subset groups keep NULL-filling their rows.
 				if (!FindPartition(group, loc.partition_key)) {
 					continue;
 				}
@@ -1111,19 +1138,13 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 				local = 0;
 			} else if ((part = FindPartByPosition(group, loc.partition_key, p, local))) {
 				target_idx = part->partition_index;
-				// existing partition present in this group
 			} else if (fresh && !bind.group_mapping[gi].col_names.empty()) {
 				target_idx = 0;
-				// new partition: mapped groups create a fresh part (unmapped
-				// groups get nothing — the reader NULL-fills their rows)
 			} else if (loc.found && !bind.group_mapping[gi].col_names.empty()) {
-				// Key exists in index but this group has never seen this
-				// partition (it predates the group's first mapping): synthesize
-				// an aligned part mirroring the index partition.
 				target_idx = 0;
 				do_synth = true;
 			} else {
-				continue; // group lacks this partition (subset) or is unmapped
+				continue;
 			}
 			auto &target = GetCreateTarget(context, bind, gi, loc.partition_key, target_idx, part, targets);
 			if (do_synth && !target.synth) {
@@ -1138,8 +1159,6 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 			}
 			if (loc.found) {
 				if (target.synth) {
-					// Capture the keyed row; the full R_i-row fill happens in
-					// sorted order after the key loop.
 					vector<Value> vals;
 					for (idx_t c = 0; c < bind.group_mapping[gi].src_pos.size(); c++) {
 						vals.push_back(reader.GetValue(bind.group_mapping[gi].src_pos[c], src_row));
@@ -1158,9 +1177,7 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 		}
 	}
 
-	// 5.5 Fill synthesized parts: append R_i rows in sorted position order —
-	// keyed rows carry the captured mapped values, everything else NULL.
-	// Vectorized: process STANDARD_VECTOR_SIZE rows per chunk instead of one.
+	// 8. Fill synthesized parts (vectorized — unchanged).
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 		for (auto &kv : targets[gi]) {
 			auto &t = *kv.second;
@@ -1175,19 +1192,15 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 				idx_t n = MinValue<idx_t>(STANDARD_VECTOR_SIZE, t.synth_rows - pos);
 				chunk.Reset();
 				chunk.SetCardinality(n);
-				// Position column (BIGINT): 0, 1, 2, ... (sequential)
 				auto &pos_vec = chunk.data[0];
 				auto pos_data = FlatVector::GetData<int64_t>(pos_vec);
 				for (idx_t i = 0; i < n; i++) {
 					pos_data[i] = NumericCast<int64_t>(pos + i);
 				}
-				// Mapped columns: NULL by default, then set keyed-row values
 				for (idx_t c = 0; c < mtypes.size(); c++) {
-					// Initialize all rows to NULL for this column
 					auto &vec = chunk.data[1 + c];
 					auto &validity = FlatVector::Validity(vec);
 					validity.SetAllInvalid(n);
-					// Set non-NULL values for keyed rows in this batch
 					for (idx_t i = 0; i < n; i++) {
 						idx_t key_pos = pos + i;
 						auto it = t.synth_values.find(key_pos);
@@ -1203,7 +1216,7 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 		}
 	}
 
-	// 6. Rewrite + commit.
+	// 9. Rewrite + commit.
 	ExecuteAndCommit(context, bind, gstate, targets);
 
 	output.SetCardinality(1);
