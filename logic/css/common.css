@@ -26,27 +26,25 @@ body{
 .hint{color:var(--mut);font-size:12px}
 .hint b{color:var(--teal)}
 
-/* ===== Slide navigation ===== */
-.slide-nav{display:flex;gap:2px;padding:0 2vw;height:38px;background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0;align-items:center}
-.slide-nav .nav-btn{
+/* ===== Mode selector ===== */
+.mode-nav{
+  display:flex;gap:2px;padding:0 2vw;height:38px;background:var(--panel);
+  border-bottom:1px solid var(--line);flex-shrink:0;align-items:center;
+}
+.mode-nav .nav-btn{
   padding:5px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;
   border:1px solid var(--line2);background:var(--panel);color:var(--mut);
   transition:all .2s;user-select:none;white-space:nowrap;
 }
-.slide-nav .nav-btn:hover{background:var(--panel2);color:var(--tx)}
-.slide-nav .nav-btn.active{background:var(--teal);color:#fff;border-color:var(--teal)}
-.slide-nav .nav-spacer{flex:1}
+.mode-nav .nav-btn:hover{background:var(--panel2);color:var(--tx)}
+.mode-nav .nav-btn.active{background:var(--teal);color:#fff;border-color:var(--teal)}
+.mode-nav .nav-spacer{flex:1}
 
-/* ===== Slide container ===== */
-.slide-container{flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative}
-.slide-page{display:none;flex:1;flex-direction:column;overflow:auto}
-.slide-page.active{display:flex}
-
-/* ===== Slide 0: Table box ===== */
-.slide{padding:2vh 3vw 3vh;display:flex;flex-direction:column}
+/* ===== Main slide — directory structure ===== */
+.slide{padding:1vh 2vw 2vh;height:calc(100vh - 80px);display:flex;flex-direction:column}
 .table-box{
   border:2px solid var(--org);border-radius:14px;
-  background:var(--panel);padding:2.5vh 2vw;flex:1;
+  background:var(--panel);padding:2vh 1.5vw;flex:1;
   display:flex;flex-direction:column;position:relative;
   box-shadow:0 4px 24px rgba(0,0,0,.06);min-height:0;
 }
@@ -55,7 +53,7 @@ body{
   background:var(--bg);padding:0 10px;font-size:1.8vh;
   font-family:Consolas,monospace;color:var(--org);letter-spacing:.5px;
 }
-.desc{font-size:1.5vh;color:var(--mut);margin-bottom:1.2vh}
+.desc{font-size:1.5vh;color:var(--mut);margin-bottom:1vh}
 .desc code{color:var(--teal);font-family:Consolas,monospace}
 .main-area{display:flex;flex:1;min-height:0}
 .row-axis{
@@ -220,3 +218,118 @@ body{
   font-family:Consolas,monospace;white-space:nowrap;font-weight:500;
 }
 .col-axis .col-more{flex:0 0 3vw;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:2vh}
+
+/* ===== Animation overlay states (applied directly on directory elements) ===== */
+/* When anim-mode is active, disable manual click spotlight to avoid conflicts */
+.table-box.anim-mode.has-sel .partition:not(.selected){opacity:1;filter:none}
+.table-box.anim-mode.has-sel-part .partition:not(.selected){opacity:1;filter:none}
+.table-box.anim-mode.has-sel-part .partition.selected .part:not(.selected){opacity:1;filter:none}
+.table-box.anim-mode.has-sel-rg .partition:not(.selected){opacity:1;filter:none}
+.table-box.anim-mode.has-sel-rg .partition.selected .part:not(.selected){opacity:1;filter:none}
+.table-box.anim-mode.has-sel-rg .part.selected .rg:not(.selected){opacity:1;filter:none}
+
+/* Animation highlight states — applied directly on directory elements */
+.partition.anim-hit{
+  border:2px solid var(--cyan)!important;background:rgba(9,105,218,.08)!important;
+  box-shadow:0 0 16px rgba(9,105,218,.3)!important;
+}
+.partition.anim-skip{
+  opacity:.25!important;filter:saturate(.2)!important;
+}
+.partition.anim-new{
+  animation:popIn .5s cubic-bezier(.34,1.56,.64,1);
+  border:2px solid var(--grn)!important;background:rgba(26,127,55,.1)!important;
+  box-shadow:0 0 16px rgba(26,127,55,.3)!important;
+}
+.partition.anim-deleting{
+  animation:shake .3s ease-in-out infinite;
+  border:2px solid var(--red)!important;background:rgba(207,34,46,.08)!important;
+  box-shadow:0 0 16px rgba(207,34,46,.3)!important;
+}
+.partition.anim-gone{
+  opacity:0!important;transform:scale(.8);pointer-events:none;
+}
+
+.part.anim-hit{
+  border:2px solid var(--cyan)!important;background:rgba(9,105,218,.06)!important;
+  box-shadow:0 0 14px rgba(9,105,218,.25)!important;
+}
+.part.anim-skip{opacity:.3!important;filter:saturate(.2)!important}
+.part.anim-new{
+  animation:popIn .5s cubic-bezier(.34,1.56,.64,1);
+  border:2px solid var(--grn)!important;background:rgba(26,127,55,.08)!important;
+  box-shadow:0 0 14px rgba(26,127,55,.25)!important;
+}
+.part.anim-writing{
+  animation:pulse .8s ease-in-out infinite;
+  border:2px solid var(--grn)!important;background:rgba(26,127,55,.08)!important;
+  box-shadow:0 0 14px rgba(26,127,55,.3)!important;
+}
+.part.anim-deleting{
+  animation:shake .3s ease-in-out infinite;
+  border:2px solid var(--red)!important;
+}
+.part.anim-gone{opacity:0!important;transform:scale(.8);pointer-events:none}
+
+.rg.anim-hit{
+  border:2px solid var(--cyan)!important;background:rgba(9,105,218,.05)!important;
+  box-shadow:0 0 12px rgba(9,105,218,.2)!important;
+}
+.rg.anim-skip{opacity:.35!important;filter:saturate(.3)!important}
+
+.group.anim-active{
+  box-shadow:0 0 20px rgba(9,105,218,.15);
+}
+.group.anim-deleting{
+  animation:pulse .8s ease-in-out infinite;
+}
+
+/* Col-chip highlight for projection pushdown */
+.col-chip.anim-proj{
+  background:rgba(9,105,218,.15)!important;color:var(--cyan)!important;
+  border-color:var(--cyan)!important;
+  animation:pulse 1s ease-in-out infinite;
+}
+
+/* Field highlight in col-axis */
+.col-axis .field.anim-proj{
+  background:rgba(9,105,218,.25)!important;color:var(--cyan)!important;
+  border-color:var(--cyan)!important;
+  animation:pulse 1s ease-in-out infinite;
+}
+
+@keyframes popIn{0%{opacity:0;transform:scale(.3)}100%{opacity:1;transform:scale(1)}}
+@keyframes pulse{0%,100%{box-shadow:0 0 8px rgba(9,105,218,.2)}50%{box-shadow:0 0 20px rgba(9,105,218,.5)}}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
+
+/* ===== Step narration bar ===== */
+.step-bar{
+  position:absolute;bottom:10px;left:12px;right:12px;
+  padding:10px 16px;border-radius:10px;
+  background:rgba(31,35,40,.93);color:#fff;font-size:13px;line-height:1.6;
+  font-family:"Segoe UI",sans-serif;z-index:100;
+  box-shadow:0 4px 16px rgba(0,0,0,.15);
+  transition:all .4s;opacity:0;transform:translateY(10px);
+  display:flex;align-items:center;gap:12px;
+}
+.step-bar.show{opacity:1;transform:translateY(0)}
+.step-bar code{color:#7ee787;font-family:Consolas,monospace;background:rgba(255,255,255,.1);padding:1px 5px;border-radius:4px}
+.step-bar .step-num{
+  flex-shrink:0;font-size:12px;font-weight:700;color:var(--teal);
+  background:rgba(10,123,131,.2);padding:3px 8px;border-radius:6px;
+  font-family:Consolas,monospace;
+}
+.step-bar .step-text{flex:1}
+
+/* ===== Anim controls ===== */
+.anim-controls{
+  display:flex;gap:8px;margin-left:auto;flex-shrink:0;
+}
+.anim-controls button{
+  padding:4px 12px;border-radius:6px;border:1px solid rgba(255,255,255,.2);cursor:pointer;
+  font-size:12px;font-weight:500;background:rgba(255,255,255,.1);color:#fff;
+  transition:all .2s;
+}
+.anim-controls button:hover{background:rgba(255,255,255,.2)}
+.anim-controls button.primary{background:var(--teal);border-color:var(--teal)}
+.anim-controls button.primary:hover{background:#089099}
