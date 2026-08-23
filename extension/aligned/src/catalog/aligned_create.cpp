@@ -11,6 +11,7 @@
 #include "parquet_writer.hpp"
 #include "io/parquet_io.hpp"
 
+
 #include <map>
 
 namespace duckdb {
@@ -119,149 +120,111 @@ static pair<idx_t, idx_t> ValidatePrimaryKey(const vector<ColumnDefinition> &col
 	return {date_idx, symbol_idx};
 }
 
+//! Helper: resolve a group's column names to (names, types) using a column
+//! name → index map. Throws on unknown column. Shared by both DDL operations.
+static void ResolveGroupColumns(const vector<ColumnDefinition> &columns,
+                                const case_insensitive_map_t<idx_t> &col_index,
+                                const vector<string> &group_cols,
+                                vector<string> &out_names,
+                                vector<LogicalType> &out_types,
+                                const string &group_name_for_error) {
+	for (auto &cn : group_cols) {
+		auto it = col_index.find(cn);
+		if (it == col_index.end()) {
+			throw BinderException("aligned CREATE TABLE: groups option references unknown "
+			                       "column '%s' in group '%s'", cn, group_name_for_error);
+		}
+		out_names.push_back(columns[it->second].Name());
+		out_types.push_back(columns[it->second].Type());
+	}
+}
+
 //===----------------------------------------------------------------------===//
-// AlignedCreateTable
+// ExtendTableWithGroup — add new column groups to an existing table
 //===----------------------------------------------------------------------===//
 
-void AlignedCreateTable(ClientContext &context, const string &root, const string &table_name,
-                        const vector<ColumnDefinition> &columns,
-                        const string &groups_option, const string &partition_template_option) {
-	auto &fs = FileSystem::GetFileSystem(context);
-	string table_dir = root + "/" + table_name;
-
-	// Check if the table already exists (has committed parquet files).
-	// We glob and filter out _tmp/ (crash leftover) to avoid mistaking staged
-	// files for a real table.
-	bool table_exists = false;
-	if (fs.DirectoryExists(table_dir)) {
-		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
-		for (auto &p : parts) {
-			// Skip _tmp/ paths (crash leftover staging dirs)
-			if (p.path.find("/_tmp/") == string::npos) {
-				table_exists = true;
-				break;
-			}
+static void ExtendTableWithGroup(ClientContext &context, FileSystem &fs, const string &root,
+                                 const string &table_name, const string &table_dir,
+                                 const vector<ColumnDefinition> &columns,
+                                 case_insensitive_map_t<vector<string>> &groups_map,
+                                 case_insensitive_map_t<idx_t> &col_index) {
+	// The groups option must specify at least one new group that is NOT "index".
+	bool has_non_index = false;
+	for (auto &kv : groups_map) {
+		if (!StringUtil::CIEquals(kv.first, "index")) {
+			has_non_index = true;
+			break;
 		}
 	}
-
-	// Parse groups option first — needed to determine if this is a new-table or
-	// an extend-table (add column group) operation.
-	case_insensitive_map_t<vector<string>> groups_map;
-	if (!groups_option.empty()) {
-		ParseGroupsOption(groups_option, groups_map);
+	if (!has_non_index) {
+		throw BinderException("aligned CREATE TABLE: table '%s' already exists at '%s'. "
+		                       "To add a column group, specify a non-index group in WITH (groups = '...').",
+		                       table_name, table_dir);
 	}
 
-	// Build a case-insensitive column name → index map for O(1) lookups.
-	// Shared by both extend mode and new-table mode.
-	case_insensitive_map_t<idx_t> col_index;
-	for (idx_t i = 0; i < columns.size(); i++) {
-		col_index[columns[i].Name()] = i;
+	// Discover the existing table's plan (groups + partitions).
+	TablePlan plan;
+	BuildTablePlan(context, root, table_name, plan);
+
+	// Collect existing group names (case-insensitive).
+	case_insensitive_set_t existing_groups;
+	for (auto &g : plan.groups) {
+		existing_groups.insert(g.manifest.group);
 	}
 
-	// Helper: resolve a group's column names to (names, types) using the map.
-	// Throws on unknown column.
-	auto resolve_cols = [&](const vector<string> &group_cols,
-	                        vector<string> &out_names,
-	                        vector<LogicalType> &out_types,
-	                        const string &group_name_for_error) {
-		for (auto &cn : group_cols) {
-			auto it = col_index.find(cn);
-			if (it == col_index.end()) {
-				throw BinderException("aligned CREATE TABLE: groups option references unknown "
-				                       "column '%s' in group '%s'", cn, group_name_for_error);
-			}
-			out_names.push_back(columns[it->second].Name());
-			out_types.push_back(columns[it->second].Type());
-		}
+	// Collect existing partitions with their row counts (from the index group).
+	struct ExtPartInfo {
+		string key;
+		idx_t row_count;
 	};
-
-	if (table_exists) {
-		// --- Extend mode: add new column groups to an existing table ---
-		// The groups option must specify at least one new group that is NOT "index"
-		// (the index group already exists). The column definitions in CREATE TABLE
-		// define the new group's columns; they do NOT need to include symbol/date.
-		bool has_non_index = false;
-		for (auto &kv : groups_map) {
-			if (!StringUtil::CIEquals(kv.first, "index")) {
-				has_non_index = true;
-				break;
-			}
-		}
-		if (!has_non_index) {
-			throw BinderException("aligned CREATE TABLE: table '%s' already exists at '%s'. "
-			                       "To add a column group, specify a non-index group in WITH (groups = '...').",
-			                       table_name, table_dir);
-		}
-
-		// Discover the existing table's plan (groups + partitions).
-		TablePlan plan;
-		BuildTablePlan(context, root, table_name, plan);
-
-		// Collect existing group names (case-insensitive).
-		case_insensitive_set_t existing_groups;
-		for (auto &g : plan.groups) {
-			existing_groups.insert(g.manifest.group);
-		}
-
-		// Collect existing partitions with their row counts (from the index group).
-		// The new group's placeholder must match the index partition's row count
-		// (partition-aligned contract: shared partitions must agree on total rows).
-		struct PartInfo {
-			string key;
-			idx_t row_count;
-		};
-		vector<PartInfo> existing_partitions;
-		for (auto &p : plan.groups[0].partitions) {
-			existing_partitions.push_back({p.key, p.row_count});
-		}
-
-		for (auto &kv : groups_map) {
-			const string &group_name = kv.first;
-			auto &group_cols = kv.second;
-
-			if (existing_groups.count(group_name)) {
-				throw BinderException("aligned CREATE TABLE: group '%s' already exists in table '%s'",
-				                       group_name, table_name);
-			}
-
-			// Build column types/names for this new group (validates columns exist).
-			vector<string> col_names;
-			vector<LogicalType> col_types;
-			resolve_cols(group_cols, col_names, col_types, group_name);
-
-			// Create the new group directory + a placeholder parquet in every
-			// existing partition. Each placeholder has the same row count as the
-			// index partition (all-NULL values) to satisfy the partition-aligned
-			// contract.
-			string group_dir = table_dir + "/" + group_name;
-			fs.CreateDirectoriesRecursive(group_dir);
-
-			for (auto &part : existing_partitions) {
-				string part_dir = group_dir + "/" + part.key;
-				fs.CreateDirectoriesRecursive(part_dir);
-				// File name: 0000-{rows:10d}.parquet (matches partition row count)
-				string part_name = FormatPartName(0, part.row_count);
-				string parquet_path = part_dir + "/" + part_name;
-				WriteNullParquet(context, fs, parquet_path, col_names, col_types, part.row_count);
-			}
-		}
-		return;
+	vector<ExtPartInfo> existing_partitions;
+	for (auto &p : plan.groups[0].partitions) {
+		existing_partitions.push_back({p.key, p.row_count});
 	}
 
-	// --- New table mode ---
-	// Validate primary key contract: first two columns must be
-	// (symbol VARCHAR, date DATE/TIMESTAMP) or (date DATE/TIMESTAMP, symbol VARCHAR).
+	for (auto &kv : groups_map) {
+		const string &group_name = kv.first;
+		auto &group_cols = kv.second;
+
+		if (existing_groups.count(group_name)) {
+			throw BinderException("aligned CREATE TABLE: group '%s' already exists in table '%s'",
+			                       group_name, table_name);
+		}
+
+		vector<string> col_names;
+		vector<LogicalType> col_types;
+		ResolveGroupColumns(columns, col_index, group_cols, col_names, col_types, group_name);
+
+		string group_dir = table_dir + "/" + group_name;
+		fs.CreateDirectoriesRecursive(group_dir);
+
+		for (auto &part : existing_partitions) {
+			string part_dir = group_dir + "/" + part.key;
+			fs.CreateDirectoriesRecursive(part_dir);
+			string parquet_path = part_dir + "/" + FormatPartName(0, part.row_count);
+			WriteNullParquet(context, fs, parquet_path, col_names, col_types, part.row_count);
+		}
+	}
+}
+
+//===----------------------------------------------------------------------===//
+// CreateNewTable — create a new table with column groups + default partition
+//===----------------------------------------------------------------------===//
+
+static void CreateNewTable(ClientContext &context, FileSystem &fs, const string &table_dir,
+                           const vector<ColumnDefinition> &columns,
+                           case_insensitive_map_t<vector<string>> &groups_map,
+                           case_insensitive_map_t<idx_t> &col_index,
+                           const string &partition_template_option) {
 	auto pk = ValidatePrimaryKey(columns);
 	idx_t date_idx = pk.first;
 	idx_t symbol_idx = pk.second;
 
-	// Determine partition template
 	string partition_template = partition_template_option;
 	if (partition_template.empty()) {
 		partition_template = "month=%Y-%m";
 	}
 
-	// Validate template format
 	if (!IsKnownTemplate(partition_template)) {
 		throw BinderException("aligned CREATE TABLE: invalid partition_template '%s' "
 		                       "(expected 'date=%%Y-%%m-%%d', 'month=%%Y-%%m', or 'year=%%Y')",
@@ -270,8 +233,6 @@ void AlignedCreateTable(ClientContext &context, const string &root, const string
 
 	// Ensure index group exists.
 	if (groups_map.find("index") == groups_map.end()) {
-		// Default: index group contains symbol + date + all unassigned columns.
-		// Build a set of all columns assigned to non-index groups.
 		case_insensitive_set_t assigned_cols;
 		for (auto &kv : groups_map) {
 			if (StringUtil::CIEquals(kv.first, "index")) {
@@ -289,7 +250,6 @@ void AlignedCreateTable(ClientContext &context, const string &root, const string
 		}
 		groups_map["index"] = std::move(index_cols);
 	} else {
-		// If index is specified, make sure symbol + date are included.
 		auto &index_cols = groups_map["index"];
 		auto has_col = [&](const string &name) {
 			for (auto &c : index_cols) {
@@ -305,10 +265,8 @@ void AlignedCreateTable(ClientContext &context, const string &root, const string
 		}
 	}
 
-	// Create table directory
 	fs.CreateDirectoriesRecursive(table_dir);
 
-	// For each group, create the directory + write placeholder parquet
 	string default_partition_key = DefaultPartitionKey(partition_template);
 	const string placeholder_name = FormatPartName(0, 0);
 
@@ -316,20 +274,58 @@ void AlignedCreateTable(ClientContext &context, const string &root, const string
 		const string &group_name = kv.first;
 		auto &group_cols = kv.second;
 
-		// Build column types/names for this group (validates columns exist)
 		vector<string> col_names;
 		vector<LogicalType> col_types;
-		resolve_cols(group_cols, col_names, col_types, group_name);
+		ResolveGroupColumns(columns, col_index, group_cols, col_names, col_types, group_name);
 
-		// Create group directory
 		string group_dir = table_dir + "/" + group_name;
-		// Create partition directory
 		string part_dir = group_dir + "/" + default_partition_key;
 		fs.CreateDirectoriesRecursive(part_dir);
 
-		// Write placeholder parquet
 		string parquet_path = part_dir + "/" + placeholder_name;
 		WriteEmptyParquet(context, fs, parquet_path, col_names, col_types);
+	}
+}
+
+//===----------------------------------------------------------------------===//
+// AlignedCreateTable — dispatches to CreateNewTable or ExtendTableWithGroup
+//===----------------------------------------------------------------------===//
+
+void AlignedCreateTable(ClientContext &context, const string &root, const string &table_name,
+                        const vector<ColumnDefinition> &columns,
+                        const string &groups_option, const string &partition_template_option) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	string table_dir = root + "/" + table_name;
+
+	// Check if the table already exists (has committed parquet files).
+	bool table_exists = false;
+	if (fs.DirectoryExists(table_dir)) {
+		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
+		for (auto &p : parts) {
+			if (p.path.find("/_tmp/") == string::npos) {
+				table_exists = true;
+				break;
+			}
+		}
+	}
+
+	// Parse groups option first — needed to determine if this is a new-table or
+	// an extend-table (add column group) operation.
+	case_insensitive_map_t<vector<string>> groups_map;
+	if (!groups_option.empty()) {
+		ParseGroupsOption(groups_option, groups_map);
+	}
+
+	// Build a case-insensitive column name → index map for O(1) lookups.
+	case_insensitive_map_t<idx_t> col_index;
+	for (idx_t i = 0; i < columns.size(); i++) {
+		col_index[columns[i].Name()] = i;
+	}
+
+	if (table_exists) {
+		ExtendTableWithGroup(context, fs, root, table_name, table_dir, columns, groups_map, col_index);
+	} else {
+		CreateNewTable(context, fs, table_dir, columns, groups_map, col_index, partition_template_option);
 	}
 }
 
