@@ -2,12 +2,13 @@
 // Animation engine: utilities for highlighting directory elements on the table
 
 function clearAllAnim(){
-  document.querySelectorAll(".anim-hit,.anim-skip,.anim-new,.anim-writing,.anim-deleting,.anim-gone,.anim-active,.anim-proj").forEach(function(el){
-    el.classList.remove("anim-hit","anim-skip","anim-new","anim-writing","anim-deleting","anim-gone","anim-active","anim-proj");
+  document.querySelectorAll(".anim-hit,.anim-skip,.anim-new,.anim-writing,.anim-deleting,.anim-gone,.anim-active,.anim-proj,.anim-dim").forEach(function(el){
+    el.classList.remove("anim-hit","anim-skip","anim-new","anim-writing","anim-deleting","anim-gone","anim-active","anim-proj","anim-dim");
   });
-  // Reset inline opacity
-  document.querySelectorAll(".partition,.part,.rg,.group").forEach(function(el){
+  // Reset inline opacity/filter on all elements (partitions, parts, rgs, groups, col-chips, fields)
+  document.querySelectorAll(".partition,.part,.rg,.group,.col-chip,.field").forEach(function(el){
     el.style.opacity="";
+    el.style.filter="";
   });
 }
 

@@ -228,9 +228,11 @@
     <!-- Step narration bar (overlay, shown during animation) -->
     <div class="step-bar" id="stepBar">
       <span class="step-num" id="stepNum">0</span>
-      <span class="step-text" id="stepText">选择一个模式后点击播放</span>
+      <span class="step-text" id="stepText">选择一个模式后点击下一步</span>
       <div class="anim-controls">
-        <button class="primary" id="playBtn" onclick="playAnim()">▶ 播放</button>
+        <button id="prevBtn" onclick="prevStep()">◀ 上一步</button>
+        <span class="step-indicator" id="stepIndicator">0 / 0</span>
+        <button class="primary" id="nextBtn" onclick="nextStep()">下一步 ▶</button>
         <button id="resetBtn" onclick="resetAnim()">↺ 重置</button>
       </div>
     </div>
