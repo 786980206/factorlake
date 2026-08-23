@@ -503,3 +503,105 @@ SELECT * FROM aligned_groups('cnstk_ixday');
   列组列表、显式 root、插入后分区数增长、错误案例。
 - 表函数数量从 4 个增加到 5 个。
 - 当前总：SQLLogicTest 127/127 + 4 PS 套件全 PASS。
+
+## 2026-08-24 — 架构重构：消除代码重复
+
+基于 `ARCHITECTURE_ANALYSIS.md` 的 20+ 条问题分析，一次性修复所有可操作项。
+分析文件已删除（所有问题已解决或标记为有意推迟）。
+
+### 共享 IO 模块 `io/parquet_io`（§2.1/§2.2/§2.3/§2.6/§3.1）
+
+提取到 `extension/aligned/src/io/parquet_io.cpp` + `src/include/io/parquet_io.hpp`：
+
+| 函数 | 替换的原散落代码 |
+|------|----------------|
+| `CreateParquetWriter` | aligned_create / part_rewriter / aligned_compactor 三处 14 参数构造 |
+| `FormatPartName` / `ParsePartName` | 5 处格式化 + 2 处解析 |
+| `WriteEmptyParquet` / `WriteNullParquet` | 从 aligned_create 移入 |
+| `OpenPartReaderAllColumns` | part_rewriter 内联 reader 初始化 |
+| `OpenPartReaderNamedColumns` | mutator `ReadSourceColumns` + key_resolver 列读取 |
+| `ReadPartToCollection` | part_rewriter 全列读取循环 |
+
+提交：`9d12c0c`、`c31cc2c`
+
+### 计划查询 helpers `catalog/manifest`（§1.6/§1.7/§2.5/§2.8/§3.4）
+
+| 函数 | 替换的原散落代码 |
+|------|----------------|
+| `ResolveDataRoot` | mutator / scan / compactor / create_fn / groups / drop 六处内联 |
+| `IndexGroup` | 6+ 处 `groups[0]` + `CIEquals(..., "index")` 硬编码假设 |
+| `NextPartIndexForPartition` | key_resolver 快/慢路径 + mutator fallback 三处 max_index 循环 |
+
+提交：`c31cc2c`
+
+### 分区模板共享 `resolver/partition_resolver`（§3.6）
+
+| 函数 | 来源 |
+|------|------|
+| `IsKnownTemplate` | 从 aligned_create 内联校验提取 |
+| `DefaultPartitionKey` | 从 aligned_create 静态函数移入 |
+| `ValidatePartitionKey` | 从 aligned_create 静态函数移入 |
+
+aligned_create 现在调用共享函数，不再持有静态副本。提交：`c4a37f8`
+
+### 暂存事务 RAII `StagedTransaction`（§1.5/§2.4/§3.3）
+
+提取到 `mutator/aligned_mutator.hpp`：
+
+```cpp
+class StagedTransaction {
+    FileSystem &fs;
+    const string table_path;
+    const idx_t txid;           // NextTransactionId() — 单一共享计数器
+    const string tmp_root;      // table_path/_tmp/transaction-<id>/
+    // 构造时创建目录，析构时清理（成功+异常路径均安全）
+};
+```
+
+- 替换 mutator `ExecuteAndCommit` 中的手动 try/catch 清理。
+- 替换 compactor `AlignedCompactFunction` 中的手动 try/catch 清理。
+- 统一两个独立的 `NextTransactionId` 计数器为一个。
+
+提交：`b5bc709`
+
+### 源键向量化读取 `ExtractSortedRows`（§2.9）
+
+`AlignedUpsertFunction` 和 `AlignedDeleteFunction` 中两份近乎相同的 ~60 行向量化
+chunk-scan 循环合并为一个共享函数。提交：`1fdaef3`
+
+### DML 键扫描统一（§1.4/§2.7）
+
+- `ResolveKeysForRowids` 从 DELETE 和 UPDATE 两份 ~80 行副本合并为一个。
+- 硬编码 `"date"`/`"symbol"` 名称匹配改为 `plan.groups[0].partition_source` /
+  `.symbol_column` 字段。
+
+### aligned_create 拆分（§4.4）
+
+`AlignedCreateTable` 从一个混合新表创建 + 列组扩展的大函数拆分为：
+- `ResolveGroupColumns` — 共享列名解析。
+- `CreateNewTable` — 新表创建路径。
+- `ExtendTableWithGroup` — 列组扩展路径。
+- `AlignedCreateTable` — 薄分发器。
+
+提交：`641a914`
+
+### 死代码清理（§1.2/§4.3）
+
+- 删除 `resolver/row_space.cpp` / `row_space.hpp`（`ValidateRowSpace` 无调用方）。
+- 删除 `ARCHITECTURE_ANALYSIS.md`（所有问题已解决）。
+
+### AGENTS.md 更新
+
+- §10 新增「共享工具函数」表，列出所有提取的共享函数及所属模块。
+- §11 测试计数更新为 141/141 + 4 PS 套件全 PASS。
+
+### 有意推迟的项
+
+| 项 | 原因 |
+|----|------|
+| §1.1/§4.1 manifest→plan 重命名 | 纯机械重命名，影响所有 include，收益低 |
+| §1.3 mutator 进一步拆分 | 已从 1768→1330 行，剩余为 bind 逻辑（§3.7），拆分收益不足 |
+| §4.5 compactor 复用 RewritePart | 合并逻辑不同（concat vs read-modify-write），不适用 |
+| §4.6 aligned_dml 位置 | 已在 `execution/`，AGENTS.md §10 已更正 |
+
+- 当前总：SQLLogicTest 141/141 + 4 PS 套件全 PASS。

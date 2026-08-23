@@ -242,6 +242,24 @@ extension/aligned/src/
 
 对应 `src/include/` 下头文件。
 
+### 共享工具函数
+
+| 模块 | 函数 | 说明 |
+|------|------|------|
+| `io/parquet_io` | `CreateParquetWriter` | 统一 ParquetWriter 构造参数（ZSTD/V1） |
+| | `FormatPartName` / `ParsePartName` | `{idx:04d}-{rows:10d}.parquet` 唯一格式化/解析 |
+| | `WriteEmptyParquet` / `WriteNullParquet` | 0 行占位 / N 行全 NULL 占位写入 |
+| | `OpenPartReaderAllColumns` / `OpenPartReaderNamedColumns` | 打开 ParquetReader + 初始化扫描 |
+| | `ReadPartToCollection` | 全列读入 ColumnDataCollection |
+| `catalog/manifest` | `ResolveDataRoot` | root 参数或 `aligned_data_root` 设置解析 |
+| | `IndexGroup` | 返回 `plan.groups[0]`（index 组不变量） |
+| | `NextPartIndexForPartition` | 跨组最大 partition_index + 1 |
+| `resolver/partition_resolver` | `EvaluatePartitionTemplate` / `IsKnownTemplate` | 三种模板求值/校验 |
+| | `DefaultPartitionKey` / `ValidatePartitionKey` | 默认分区键 / 分区键校验 |
+| `mutator/aligned_mutator` | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
+| | `NextTransactionId` | 共享事务号计数器 |
+| | `ExtractSortedRows` | 向量化提取 (symbol, date) 排序键 |
+
 ---
 
 ## 11. 环境与构建
@@ -260,7 +278,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 127/127 + 4 PS 套件全 PASS
+- 当前总：SQLLogicTest 141/141 + 4 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`
