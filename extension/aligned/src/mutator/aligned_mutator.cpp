@@ -559,18 +559,47 @@ struct SourceReader {
 	ColumnDataCollection &src;
 	DataChunk chunk;
 	idx_t chunk_idx = DConstants::INVALID_INDEX;
+	// Cached unified formats per column (recomputed when chunk changes).
+	vector<UnifiedVectorFormat> fmts;
+	bool fmts_valid = false;
 
 	SourceReader(ClientContext &context_p, ColumnDataCollection &src_p) : context(context_p), src(src_p) {
 		chunk.Initialize(context, src.Types());
+		fmts.resize(src.Types().size());
 	}
 
-	Value GetValue(idx_t column, idx_t row) {
+	void EnsureChunk(idx_t row) {
 		idx_t ci = row / STANDARD_VECTOR_SIZE;
 		if (ci != chunk_idx) {
 			chunk_idx = ci;
 			src.FetchChunk(chunk_idx, chunk);
+			fmts_valid = false;
 		}
-		return chunk.GetValue(column, row % STANDARD_VECTOR_SIZE);
+		if (!fmts_valid) {
+			for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
+				chunk.data[c].ToUnifiedFormat(chunk.size(), fmts[c]);
+			}
+			fmts_valid = true;
+		}
+	}
+
+	Value GetValue(idx_t column, idx_t row) {
+		EnsureChunk(row);
+		idx_t local = row % STANDARD_VECTOR_SIZE;
+		auto &fmt = fmts[column];
+		auto si = fmt.sel->get_index(local);
+		if (!fmt.validity.RowIsValid(si)) {
+			return Value(chunk.data[column].GetType());
+		}
+		auto &type = chunk.data[column].GetType();
+		if (type.id() == LogicalTypeId::DOUBLE) {
+			auto data = UnifiedVectorFormat::GetData<double>(fmt);
+			return Value(data[si]);
+		} else if (type.id() == LogicalTypeId::BIGINT) {
+			auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
+			return Value(data[si]);
+		}
+		return chunk.data[column].GetValue(local);
 	}
 };
 
@@ -1015,12 +1044,12 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 
 	// 4. Pre-load partition boundaries for all existing partitions that
 	//    appear in the source data. KeyResolver::Resolve triggers
-	//    LoadPartitionBoundaries (RG stats only, no data read) on first
-	//    access per partition; if the key's symbol is outside the partition's
-	//    range, it fast-rejects without loading any data. Only keys within
-	//    the symbol range trigger LoadPartition (reads symbol+date columns).
-	//    The partition cache means each partition's data is loaded at most
-	//    once regardless of how many keys fall in it.
+	// LoadPartitionBoundaries (RG stats only, no data read) on first
+	// access per partition; if the key's symbol is outside the partition's
+	// range, it fast-rejects without loading any data. Only keys within
+	// the symbol range trigger LoadPartition (reads symbol+date columns).
+	// The partition cache means each partition's data is loaded at most
+	// once regardless of how many keys fall in it.
 	KeyResolver resolver(context, bind.plan);
 
 	// Batch resolve all keys.
