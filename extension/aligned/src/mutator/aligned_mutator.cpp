@@ -371,7 +371,7 @@ DeleteResult AlignedDeleteFromCollection(ClientContext &context, const string &t
 struct SortedRow {
 	string partition_key; // full "name=value" segment ("" for unpartitioned)
 	Value symbol;
-	date_t date;          // v8: composite key (symbol, date) — date stored for Resolve
+	int64_t date;         // v8: composite key (symbol, date) — date_t or timestamp_t
 	idx_t src_row;         // row in the source collection
 };
 
@@ -1011,13 +1011,13 @@ static vector<SortedRow> ExtractSortedRows(ClientContext &context, const ColumnD
 				                  date_col_name, r);
 			}
 			SortedRow row;
-			date_t d;
+			int64_t d;
 			if (is_timestamp) {
 				auto tptr = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
-				d = Timestamp::GetDate(timestamp_t(tptr[di]));
+				d = tptr[di]; // full timestamp value (not truncated to date)
 			} else {
 				auto dptr = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
-				d = date_t(dptr[di]);
+				d = static_cast<int64_t>(dptr[di]);
 			}
 			if (!template_str.empty() && !EvaluatePartitionTemplate(template_str, d, row.partition_key)) {
 				throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);

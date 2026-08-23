@@ -745,6 +745,45 @@ mutator 走自动推导路径——从源 schema 推导列→组映射。但 DML
 | **末分区重写 100K** | **1784ms** | **1298ms** | **-27%** |
 | **大批量插入 100K** | **1989ms** | **1252ms** | **-37%** |
 
-提交：`17cf109`（SourceReader 缓存）、`<TBD>`（两阶段 dispatch + ExtractSortedRows）
+提交：`17cf109`（SourceReader 缓存）、`ac97b77`（两阶段 dispatch + ExtractSortedRows）
+
+## 2026-08-26 — TIMESTAMP 键支持 + 示例脚本
+
+### TIMESTAMP 键支持（分钟级数据）
+
+**问题**：KeyResolver 使用 `date_t`（32 位天数）作为键类型，当分区源列为
+TIMESTAMP 时，`Timestamp::GetDate()` 截断为日期，导致同一天内同一标的的不同
+分钟 K 线被视为相同键——只有最后一根 K 线被保留。
+
+**修复**：将键类型从 `date_t` 改为 `int64_t`，可容纳 `date_t`（DATE 列）或
+`timestamp_t`（TIMESTAMP 列）的完整值。对于 TIMESTAMP 列，不再调用
+`Timestamp::GetDate()` 截断，而是保留完整微秒级时间戳作为键。
+
+**改动文件**：
+- `key_resolver.hpp`：`Resolve(date_t)` → `Resolve(int64_t)`，
+  `PartitionCache::dates` 从 `vector<date_t>` → `vector<int64_t>`，
+  新增 `ToDate(int64_t)` 方法和 `is_timestamp` 标志
+- `key_resolver.cpp`：`LoadPartition`、`LoadSinglePart` 保留完整 timestamp 值
+- `partition_resolver.hpp/.cpp`：新增 `EvaluatePartitionTemplate(string, int64_t, string)`
+  重载，自动将 int64_t 转为 date_t 用于分区目录求值
+- `aligned_mutator.cpp`：`SortedRow::date` 从 `date_t` → `int64_t`，
+  `ExtractSortedRows` 保留完整 timestamp 值
+
+**兼容性**：DATE 列行为不变（date_t 值 0-200000 范围直接使用），TIMESTAMP 列
+现在支持同一天内多个时间戳作为不同键。
+
+**测试**：全量 141 SQLLogicTest + 4 PS 套件 PASS。新增 4 行 TIMESTAMP 键测试
+（同日同标的不同时间戳全部保留）。
+
+### 示例脚本 `example_setup.ps1`
+
+生成分钟级行情数据用于体验 FactorLake 功能：
+- 500 标的 × 22 交易日 × 240 K 线/天 = 2.64M 行
+- 5 个 column group：index(sym,dt) + quote/ohlc + indicator/ma + indicator/ema + indicator/kdj
+- 按日分区（`date=%Y-%m-%d`），23 个分区，115 个 parquet 文件
+- 运行时间约 4 分钟
+- 参数可调（`$NSYM` 改为 8000 可生成 42M 行全量数据）
+
+提交：`<TBD>`（TIMESTAMP 键 + example_setup.ps1）
 
 

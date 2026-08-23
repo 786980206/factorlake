@@ -97,6 +97,10 @@ Parquet footer 推导：
   主键 `(symbol, date)`——col0 = **symbol**（字符串），col1 = **DATE/TIMESTAMP**
   （分区源列）。col1 非 DATE/TIMESTAMP 即 fail-fast；分区目录只由该日期列求值；
   分区内按 `(symbol, date)` 升序排列。
+  **TIMESTAMP 键**（v9）：当 col1 为 TIMESTAMP 时，键为完整 timestamp 值
+  （微秒级），不截断为日期——同一天内同一标的的多个时间戳（如分钟 K 线）是不同
+  键。KeyResolver 内部键类型为 `int64_t`（兼容 date_t 和 timestamp_t），分区目录
+  求值时自动提取日期部分。
 - **不持久化的信息**：表名（←目录名）、schema（←Parquet footer）、
   行数/行区间（←part 文件名 `{idx:04d}-{rows:10d}`）、Row Group 大小（←编译常量
   131072）、事务号、Column Group 列表（←glob）、分区模板（←目录结构）。

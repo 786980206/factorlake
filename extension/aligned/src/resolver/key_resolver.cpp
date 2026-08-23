@@ -23,6 +23,24 @@ KeyResolver::KeyResolver(ClientContext &context_p, const TablePlan &plan_p) : co
 	} else if (index_group->parts.empty()) {
 		templates.push_back({"month=%Y-%m", ""});
 	}
+	// Determine if the partition source column is TIMESTAMP (vs DATE).
+	// When TIMESTAMP, the full timestamp value is used as the key so that
+	// intraday rows with the same date but different times are distinct.
+	if (!index_group->parts.empty()) {
+		vector<LogicalType> key_types;
+		ParquetReaderScanState scan_state;
+		auto reader = OpenPartReaderNamedColumns(context, index_group->parts[0].path,
+		                                          {index_group->symbol_column, index_group->partition_source},
+		                                          key_types, scan_state);
+		is_timestamp = key_types[1].id() == LogicalTypeId::TIMESTAMP;
+	}
+}
+
+date_t KeyResolver::ToDate(int64_t value) const {
+	if (is_timestamp) {
+		return Timestamp::GetDate(timestamp_t(value));
+	}
+	return date_t(static_cast<int32_t>(value));
 }
 
 void KeyResolver::LoadPartition(const GroupPartition &partition) {
@@ -33,7 +51,7 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 	entry.loaded = true;
 
 	Value prev_sym;
-	date_t prev_date {};
+	int64_t prev_date {};
 	bool has_prev = false;
 	for (idx_t k = 0; k < partition.part_count; k++) {
 		auto &part = index_group->parts[partition.first_part + k];
@@ -44,7 +62,7 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 		                                          key_types, scan_state);
 		DataChunk chunk;
 		chunk.Initialize(context, key_types);
-		bool is_timestamp = key_types[1].id() == LogicalTypeId::TIMESTAMP;
+		bool local_is_timestamp = key_types[1].id() == LogicalTypeId::TIMESTAMP;
 		while (true) {
 			auto res = reader->Scan(context, scan_state, chunk);
 			auto async_type = res.GetResultType();
@@ -58,13 +76,13 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 				auto si = sv.sel->get_index(r);
 				auto di = dv.sel->get_index(r);
 				Value sym_val = chunk.GetValue(0, r);
-				date_t date_val;
-				if (is_timestamp) {
+				int64_t date_val;
+				if (local_is_timestamp) {
 					auto tptr = UnifiedVectorFormat::GetData<int64_t>(dv);
-					date_val = Timestamp::GetDate(timestamp_t(tptr[di]));
+					date_val = tptr[di]; // full timestamp value
 				} else {
 					auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);
-					date_val = date_t(dptr[di]);
+					date_val = static_cast<int64_t>(dptr[di]);
 				}
 				if (has_prev) {
 					bool same_sym = (prev_sym == sym_val);
@@ -166,7 +184,7 @@ void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) 
 	                                          key_types, scan_state);
 	DataChunk chunk;
 	chunk.Initialize(context, key_types);
-	bool is_timestamp = key_types[1].id() == LogicalTypeId::TIMESTAMP;
+	bool local_is_timestamp = key_types[1].id() == LogicalTypeId::TIMESTAMP;
 	auto &syms = entry.part_symbols[part_k];
 	auto &dates = entry.part_dates[part_k];
 	while (true) {
@@ -182,13 +200,13 @@ void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) 
 			auto si = sv.sel->get_index(r);
 			auto di = dv.sel->get_index(r);
 			Value sym_val = chunk.GetValue(0, r);
-			date_t date_val;
-			if (is_timestamp) {
+			int64_t date_val;
+			if (local_is_timestamp) {
 				auto tptr = UnifiedVectorFormat::GetData<int64_t>(dv);
-				date_val = Timestamp::GetDate(timestamp_t(tptr[di]));
+				date_val = tptr[di]; // full timestamp value
 			} else {
 				auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);
-				date_val = date_t(dptr[di]);
+				date_val = static_cast<int64_t>(dptr[di]);
 			}
 			syms.push_back(std::move(sym_val));
 			dates.push_back(date_val);
@@ -196,7 +214,7 @@ void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) 
 	}
 }
 
-KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
+KeyLocation KeyResolver::Resolve(int64_t date_value, const Value &symbol_value) {
 	KeyLocation loc;
 	string key;
 	if (!templates.empty()) {

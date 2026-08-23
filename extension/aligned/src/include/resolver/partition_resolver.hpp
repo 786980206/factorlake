@@ -11,6 +11,9 @@ namespace duckdb {
 //! Supports %Y, %m, %d (zero-padded). Returns false when the template uses
 //! unsupported specifiers or has no specifiers.
 bool EvaluatePartitionTemplate(const string &template_str, date_t value, string &result);
+//! Overload that accepts a raw int64_t key value (date_t or timestamp_t).
+//! For timestamp_t values, extracts the date part before evaluation.
+bool EvaluatePartitionTemplate(const string &template_str, int64_t value, string &result);
 
 //! True when `template_str` is one of the three supported kinds:
 //! "date=%Y-%m-%d", "month=%Y-%m", "year=%Y".
