@@ -677,14 +677,13 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 	// Acquire the table-level write lock (file-based mutual exclusion across
 	// concurrent aligned_upsert/aligned_delete/aligned_compact invocations).
 	TableWriteLock write_lock(fs, bind.plan.table_path);
-	idx_t txid = NextTransactionId();
-	gstate.txid = txid;
-	string tmp_root = bind.plan.table_path + "/_tmp/transaction-" + to_string(txid);
+	StagedTransaction txn(fs, bind.plan.table_path);
+	gstate.txid = txn.txid;
+	const string &tmp_root = txn.tmp_root;
 	std::set<string> removed_partitions;
 
-	try {
-		// Pass A: stage every rewrite (visible to readers only after the move).
-		// Collect all targets that need rewriting (independent of each other).
+	// Pass A: stage every rewrite (visible to readers only after the move).
+	// Collect all targets that need rewriting (independent of each other).
 		struct RewriteTask {
 			MutateTarget *target;
 			PartMergeInput input;
@@ -840,23 +839,8 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				gstate.parts_removed++;
 			}
 		}
-	} catch (...) {
-		if (fs.DirectoryExists(tmp_root)) {
-			fs.RemoveDirectory(tmp_root);
-		}
-		throw;
-	}
-	// Best-effort cleanup of the staging tree (the empty _tmp parent stays).
-	if (fs.DirectoryExists(tmp_root)) {
-		fs.RemoveDirectory(tmp_root);
-	}
-	string tmp_parent = bind.plan.table_path + "/_tmp";
-	try {
-		if (fs.DirectoryExists(tmp_parent)) {
-			fs.RemoveDirectory(tmp_parent);
-		}
-	} catch (...) {
-	}
+	// RAII StagedTransaction destructor cleans up _tmp/transaction-<id>/ and
+	// the _tmp/ parent directory.
 }
 
 //! Vectorized extraction of SortedRow entries from a source ColumnDataCollection.

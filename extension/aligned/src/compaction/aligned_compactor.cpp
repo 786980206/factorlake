@@ -193,14 +193,11 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 	// Acquire the table-level write lock (file-based mutual exclusion across
 	// concurrent mutator / compactor invocations).
 	TableWriteLock write_lock(fs, bind.plan.table_path);
+	StagedTransaction txn(fs, bind.plan.table_path);
+	const string &tmp_root = txn.tmp_root;
 
-	// txid for the staging directory name (in-process counter, not persisted)
-	idx_t txid = NextTransactionId();
-	string tmp_root = bind.plan.table_path + "/_tmp/transaction-" + to_string(txid);
-
-	try {
-		idx_t dirs_compacted = 0;
-		idx_t parts_before = 0;
+	idx_t dirs_compacted = 0;
+	idx_t parts_before = 0;
 		idx_t parts_after = 0;
 
 		// === Phase 1: Stage all normalized parts in _tmp ===
@@ -478,17 +475,8 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 			fs.RemoveFile(old);
 		}
 
-		// Cleanup the staging tree
-		if (fs.DirectoryExists(tmp_root)) {
-			fs.RemoveDirectory(tmp_root);
-		}
-		string tmp_parent = bind.plan.table_path + "/_tmp";
-		try {
-			if (fs.DirectoryExists(tmp_parent)) {
-				fs.RemoveDirectory(tmp_parent);
-			}
-		} catch (...) {
-		}
+		// RAII StagedTransaction destructor cleans up _tmp/transaction-<id>/
+		// and the _tmp/ parent directory.
 
 		gstate.dirs_compacted = dirs_compacted;
 		gstate.parts_before = parts_before;
@@ -497,19 +485,6 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 		output.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(gstate.dirs_compacted)));
 		output.SetValue(1, 0, Value::BIGINT(NumericCast<int64_t>(gstate.parts_before)));
 		output.SetValue(2, 0, Value::BIGINT(NumericCast<int64_t>(gstate.parts_after)));
-	} catch (...) {
-		try {
-			if (fs.DirectoryExists(tmp_root)) {
-				fs.RemoveDirectory(tmp_root);
-			}
-			string tmp_parent = bind.plan.table_path + "/_tmp";
-			if (fs.DirectoryExists(tmp_parent)) {
-				fs.RemoveDirectory(tmp_parent);
-			}
-		} catch (...) {
-		}
-		throw;
-	}
 }
 
 } // namespace duckdb
