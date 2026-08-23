@@ -56,6 +56,60 @@ bool EvaluatePartitionTemplate(const string &template_str, date_t value, string 
 	return true;
 }
 
+bool IsKnownTemplate(const string &template_str) {
+	return template_str == "date=%Y-%m-%d" || template_str == "month=%Y-%m" ||
+	       template_str == "year=%Y";
+}
+
+string DefaultPartitionKey(const string &template_str) {
+	if (template_str.rfind("date=", 0) == 0) {
+		return "date=1970-01-01";
+	} else if (template_str.rfind("month=", 0) == 0) {
+		return "month=1970-01";
+	} else if (template_str.rfind("year=", 0) == 0) {
+		return "year=1970";
+	}
+	throw BinderException("aligned CREATE TABLE: invalid partition_template '%s' "
+	                       "(expected 'date=%%Y-%%m-%%d', 'month=%%Y-%%m', or 'year=%%Y')",
+	                       template_str);
+}
+
+void ValidatePartitionKey(const string &key, const string &template_str) {
+	auto validate_date = [&](const string &date_str) {
+		date_t result;
+		idx_t pos = 0;
+		bool special = false;
+		auto rc = Date::TryConvertDate(date_str.c_str(), date_str.size(), pos, result,
+		                                special, true /* strict */);
+		if (rc != DateCastResult::SUCCESS) {
+			throw BinderException("aligned CREATE TABLE: partition key '%s' contains "
+			                       "an invalid date '%s'", key, date_str);
+		}
+	};
+
+	if (template_str.rfind("date=", 0) == 0) {
+		if (key.rfind("date=", 0) != 0 || key.size() != 15) {
+			throw BinderException("aligned CREATE TABLE: partition key '%s' does not match "
+			                       "template 'date=%%Y-%%m-%%d' (expected 'date=YYYY-MM-DD')", key);
+		}
+		validate_date(key.substr(5));
+	} else if (template_str.rfind("month=", 0) == 0) {
+		if (key.rfind("month=", 0) != 0 || key.size() != 13) {
+			throw BinderException("aligned CREATE TABLE: partition key '%s' does not match "
+			                       "template 'month=%%Y-%%m' (expected 'month=YYYY-MM')", key);
+		}
+		validate_date(key.substr(6) + "-01");
+	} else if (template_str.rfind("year=", 0) == 0) {
+		if (key.rfind("year=", 0) != 0 || key.size() != 9) {
+			throw BinderException("aligned CREATE TABLE: partition key '%s' does not match "
+			                       "template 'year=%%Y' (expected 'year=YYYY')", key);
+		}
+		validate_date(key.substr(5) + "-01-01");
+	} else {
+		throw BinderException("aligned CREATE TABLE: invalid partition_template '%s'", template_str);
+	}
+}
+
 namespace {
 
 //! True when the range [from, to) of s contains only ASCII digits.

@@ -12,6 +12,20 @@ namespace duckdb {
 //! unsupported specifiers or has no specifiers.
 bool EvaluatePartitionTemplate(const string &template_str, date_t value, string &result);
 
+//! True when `template_str` is one of the three supported kinds:
+//! "date=%Y-%m-%d", "month=%Y-%m", "year=%Y".
+bool IsKnownTemplate(const string &template_str);
+
+//! Computes the default partition key from a template. For "month=%Y-%m" the
+//! default is "month=1970-01" (epoch); for "date=%Y-%m-%d" it's "date=1970-01-01";
+//! for "year=%Y" it's "year=1970". Throws BinderException on unknown templates.
+string DefaultPartitionKey(const string &template_str);
+
+//! Validates that a partition key matches the given template kind, including
+//! that the date portion is a real calendar date. Throws BinderException on
+//! mismatch.
+void ValidatePartitionKey(const string &key, const string &template_str);
+
 //! Derives the partition schema of a group from its part file paths. Only the
 //! fixed segment kinds are recognized: year=YYYY, month=YYYY-MM and
 //! date=YYYY-MM-DD (segment name -> template). Other name=value segments are
