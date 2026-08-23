@@ -666,6 +666,41 @@ chunk-scan 循环合并为一个共享函数。提交：`1fdaef3`
 
 提交：`acf2c53`
 
+### 优化四：显式 INSERT 列映射 + 跳过仅含键列的组重写
+
+**问题**：INSERT 路径（`PhysicalAlignedInsert::Finalize`）传空映射给 mutator，导致
+mutator 走自动推导路径——从源 schema 推导列→组映射。但 DML 层的 `ResolveDefaultsProjection`
+已经用默认值（NULL）填充了未指定的列，所以源 schema 包含全部列。结果是：即使用户只
+指定了 `INSERT INTO t (symbol, date, alpha001, alpha002)`，index 组（含 close, volume）
+也会被重写——尽管这些列的值全是 NULL（默认填充）。
+
+**优化**：
+1. `AlignedCatalog::PlanInsert` 中，利用 `op.column_index_map` 判断哪些列是用户显式指定的
+   （`!= INVALID_INDEX`），构建只包含显式列的映射字符串。通过 `BuildTablePlan` 获取组结构，
+   为每个组收集被指定的列。映射传给 `PhysicalAlignedInsert` → `AlignedUpsertFromCollection`。
+
+2. `AlignedUpsertFunction` dispatch 循环中新增 `only_keys` 检查：当某个组的映射列**仅**
+   包含键列（symbol, date）且该键为更新（`found=true`）时，跳过该组重写。键值在更新时
+   不变，重写是纯浪费。
+
+**效果**：`INSERT INTO t (symbol, date, alpha001, alpha002)` 更新现有行时，index 组的映射
+变为 `[symbol, date]`（仅键列）→ 被跳过 → 只重写 `factor/alpha` 组。
+
+**基准测试结果**（200K 行，2 分区，2 组）：
+
+| 场景 | 优化前 | 优化后 | 改善 |
+|------|--------|--------|------|
+| 全量重写 200K | 3070ms | 3277ms | ~0% |
+| **单组重写 200K** | **3092ms** | **2212ms** | **-28%** |
+| 末分区重写 100K | 1784ms | 1894ms | ~0% |
+| 大批量插入 100K（新分区） | 1989ms | 1885ms | -5% |
+
+**Bug 修复**：`ReadSourceFromCollection` 原先用 `bind.needed_names` 作为源列名，仅在
+`needed_names == source columns`（空映射时）正确。新增 `bind.source_col_names` 存储实际
+源 collection 列名，修复了显式映射时的列查找。
+
+提交：`35b0be0`
+
 ### 测试
 
 - 全部测试通过：SQLLogicTest 141/141 + 4 PS 套件全 PASS。
@@ -677,4 +712,5 @@ chunk-scan 循环合并为一个共享函数。提交：`1fdaef3`
 |----|------|
 | dispatch 循环全批量改造 | 需将逐行 insert/update/synth 分类改为两阶段（先分类再批量分发），复杂度高 |
 | 全量覆盖跳过 RewritePart 读旧数据 | 需检测"覆盖模式"信号，属于较大架构变更 |
+
 
