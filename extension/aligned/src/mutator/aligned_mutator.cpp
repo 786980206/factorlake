@@ -694,6 +694,45 @@ static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buff
 	buffer.Append(append_state, scratch);
 }
 
+//! Batch appender: accumulates rows in a scratch chunk and flushes to the
+//! ColumnDataCollection every STANDARD_VECTOR_SIZE rows. This reduces the
+//! number of Append calls by ~2048x compared to per-row append.
+//! Each target's insert/update buffer gets its own BatchAppender.
+struct BatchAppender {
+	ColumnDataCollection *buffer = nullptr;
+	ColumnDataAppendState *append_state = nullptr;
+	DataChunk scratch;
+	bool initialized = false;
+
+	void Init(ClientContext &context, ColumnDataCollection &buf, ColumnDataAppendState &state) {
+		buffer = &buf;
+		append_state = &state;
+		scratch.Initialize(context, buf.Types());
+		initialized = true;
+	}
+
+	void AppendRow(ClientContext &context, idx_t pos, const vector<idx_t> &src_pos,
+	               SourceReader &src, idx_t src_row) {
+		idx_t row_idx = scratch.size();
+		scratch.SetCardinality(row_idx + 1);
+		scratch.SetValue(0, row_idx, Value::BIGINT(NumericCast<int64_t>(pos)));
+		for (idx_t c = 0; c < src_pos.size(); c++) {
+			Value v = src.GetValue(src_pos[c], src_row);
+			scratch.SetValue(1 + c, row_idx, v);
+		}
+		if (scratch.size() >= STANDARD_VECTOR_SIZE) {
+			Flush();
+		}
+	}
+
+	void Flush() {
+		if (scratch.size() > 0) {
+			buffer->Append(*append_state, scratch);
+			scratch.Reset();
+		}
+	}
+};
+
 //! Batch-append multiple source rows to a target buffer. For each row, the
 //! position column is set from `positions[i]`, and the value columns are
 //! copied from the source collection via VectorOperations::Copy (vectorized
@@ -956,6 +995,13 @@ static vector<SortedRow> ExtractSortedRows(ClientContext &context, const ColumnD
 		UnifiedVectorFormat sym_fmt;
 		sym_vec.ToUnifiedFormat(n, sym_fmt);
 		auto sym_sel = sym_fmt.sel;
+		// For VARCHAR symbols, extract string_t directly (avoids Value
+		// construction + string copy overhead on every row).
+		auto sym_type = sym_vec.GetType().id();
+		string_t const *sym_str_data = nullptr;
+		if (sym_type == LogicalTypeId::VARCHAR) {
+			sym_str_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
+		}
 		for (idx_t i = 0; i < n; i++) {
 			idx_t r = row_offset + i;
 			auto di = date_sel->get_index(i);
@@ -977,7 +1023,13 @@ static vector<SortedRow> ExtractSortedRows(ClientContext &context, const ColumnD
 				throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
 			}
 			auto si = sym_sel->get_index(i);
-			row.symbol = sym_vec.GetValue(si);
+			if (sym_str_data && sym_fmt.validity.RowIsValid(si)) {
+				// Fast path: construct Value from string_t (zero-copy for
+				// inline strings, one alloc for long strings).
+				row.symbol = Value(sym_str_data[si].GetString());
+			} else {
+				row.symbol = sym_vec.GetValue(si);
+			}
 			row.date = d;
 			row.src_row = r;
 			rows.push_back(std::move(row));
@@ -1065,8 +1117,6 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 
 	// 6. Dispatch to per-group targets.
 	vector<TargetMap> targets(bind.plan.groups.size());
-	DataChunk row_scratch;
-	const ColumnDataCollection *row_scratch_owner = nullptr;
 
 	// 6.5 Append-to-last cross-group validation (same as before — the resolver
 	// optimistically set append_to_last; we must validate across all groups).
@@ -1132,7 +1182,23 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 	}
 
 	// 7. Batch dispatch: for each key, route to the appropriate target buffer.
-	// Rows are sorted by (partition, symbol, date) — positions are ascending.
+	// Uses BatchAppender to accumulate up to STANDARD_VECTOR_SIZE rows per
+	// target before flushing to the ColumnDataCollection — reducing Append
+	// calls by ~2048x vs per-row append.
+	// First pass: classify each (row, group) → (target, mode, position).
+	// Second pass: append via BatchAppender.
+	struct DispatchEntry {
+		idx_t row_idx;      // index into rows[]
+		idx_t gi;           // group index
+		MutateTarget *target;
+		bool is_update;     // true=update_buffer, false=insert_buffer
+		idx_t pos;          // part-local position
+		bool is_synth;      // synth path
+		idx_t global_pos;   // for synth_values key
+	};
+	vector<DispatchEntry> dispatches;
+	dispatches.reserve(rows.size() * bind.plan.groups.size());
+
 	for (idx_t i = 0; i < rows.size(); i++) {
 		auto &loc = locs[i];
 		idx_t src_row = rows[i].src_row;
@@ -1142,9 +1208,6 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 		bool fresh = FindPartition(index_group, loc.partition_key) == nullptr;
 		for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 			auto &group = bind.plan.groups[gi];
-			// Skip groups whose mapped columns are ONLY the key columns (symbol,
-			// date) when this is an update (found=true). The key values don't
-			// change on update, so rewriting those parts is pure waste.
 			if (loc.found) {
 				bool only_keys = !bind.group_mapping[gi].col_names.empty();
 				for (auto &col : bind.group_mapping[gi].col_names) {
@@ -1203,24 +1266,55 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 				target.synth = true;
 				target.synth_rows = ri;
 			}
-			if (loc.found) {
-				if (target.synth) {
-					vector<Value> vals;
-					for (idx_t c = 0; c < bind.group_mapping[gi].src_pos.size(); c++) {
-						vals.push_back(reader.GetValue(bind.group_mapping[gi].src_pos[c], src_row));
-					}
-					target.synth_values[p] = std::move(vals);
-					continue;
+			if (loc.found && target.synth) {
+				// Synth path: capture values immediately (needs reader).
+				vector<Value> vals;
+				for (idx_t c = 0; c < bind.group_mapping[gi].src_pos.size(); c++) {
+					vals.push_back(reader.GetValue(bind.group_mapping[gi].src_pos[c], src_row));
 				}
-				AppendRowToBuffer(context, *target.update_buffer, target.update_append, local,
-				                  bind.group_mapping[gi].src_pos, reader, src_row, row_scratch, row_scratch_owner);
+				target.synth_values[p] = std::move(vals);
 			} else {
-				idx_t pos = part ? local : target.insert_next++;
-				AppendRowToBuffer(context, *target.insert_buffer, target.insert_append, pos,
-				                  bind.group_mapping[gi].src_pos, reader, src_row, row_scratch, row_scratch_owner);
-				target.inserts_count++;
+				dispatches.push_back({i, gi, &target, loc.found, loc.found ? local : (part ? local : 0),
+				                      false, p});
+				if (!loc.found) {
+					dispatches.back().pos = part ? local : target.insert_next++;
+				}
 			}
 		}
+	}
+
+	// Second pass: batch-append each dispatch entry via BatchAppender.
+	// Group dispatches by (target, is_update) to reuse the BatchAppender.
+	// Since rows are sorted by (partition, symbol, date), dispatches to the
+	// same target tend to be contiguous — maximizing batch efficiency.
+	struct AppenderKey {
+		MutateTarget *target;
+		bool is_update;
+		bool operator<(const AppenderKey &o) const {
+			if (target != o.target) return target < o.target;
+			return is_update < o.is_update;
+		}
+	};
+	std::map<AppenderKey, BatchAppender> appenders;
+	for (auto &d : dispatches) {
+		AppenderKey key{d.target, d.is_update};
+		auto it = appenders.find(key);
+		if (it == appenders.end()) {
+			auto &ap = appenders[key];
+			auto &buf = d.is_update ? *d.target->update_buffer : *d.target->insert_buffer;
+			auto &state = d.is_update ? d.target->update_append : d.target->insert_append;
+			ap.Init(context, buf, state);
+			it = appenders.find(key);
+		}
+		it->second.AppendRow(context, d.pos, bind.group_mapping[d.gi].src_pos,
+		                     reader, rows[d.row_idx].src_row);
+		if (!d.is_update) {
+			d.target->inserts_count++;
+		}
+	}
+	// Flush all appenders.
+	for (auto &kv : appenders) {
+		kv.second.Flush();
 	}
 
 	// 8. Fill synthesized parts (vectorized — unchanged).

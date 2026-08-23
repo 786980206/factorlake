@@ -706,11 +706,45 @@ mutator 走自动推导路径——从源 schema 推导列→组映射。但 DML
 - 全部测试通过：SQLLogicTest 141/141 + 4 PS 套件全 PASS。
 - 扩展已重建（23.3 MB）。
 
-### 有意推迟的项
+### 优化五：两阶段批量 dispatch + SourceReader UnifiedVectorFormat 缓存
 
-| 项 | 原因 |
-|----|------|
-| dispatch 循环全批量改造 | 需将逐行 insert/update/synth 分类改为两阶段（先分类再批量分发），复杂度高 |
-| 全量覆盖跳过 RewritePart 读旧数据 | 需检测"覆盖模式"信号，属于较大架构变更 |
+**问题**：timing 分析显示 dispatch 循环占全量重写耗时的 64%（1879ms / 3236ms）。
+瓶颈在于逐行调用 `AppendRowToBuffer`：每行一次 `reader.GetValue` + 一次 `buffer.Append`。
+对 100K 唯一键 × 2 组 = 200K 次 Append 调用。
+
+**优化**：
+1. **SourceReader 缓存 UnifiedVectorFormat**：每列的 `UnifiedVectorFormat` 在 chunk 变化时
+   计算一次，所有该 chunk 内的行复用。标量类型（DOUBLE/BIGINT）直接从缓存提取，
+   避免 `chunk.GetValue` 的 Value 构造开销。VARCHAR 回退到 `chunk.GetValue`。
+
+2. **两阶段批量 dispatch**：
+   - **第一阶段（分类）**：遍历所有行，确定每行的路由目标 `(target, is_update, pos)`，
+     收集到 `DispatchEntry` 数组。不读取源值——只做路由判断。
+   - **第二阶段（批量追加）**：按 `(target, is_update)` 分组，用 `BatchAppender` 累积
+     行到 scratch chunk，每 `STANDARD_VECTOR_SIZE`（2048）行 flush 一次到
+     `ColumnDataCollection`。将 Append 调用次数减少 ~2048 倍。
+
+3. **ExtractSortedRows 快速路径**：VARCHAR symbol 列直接用 `string_t::GetString()` 构造
+   `Value`，避免逐行 `sym_vec.GetValue(si)` 的通用路径开销。
+
+**效果**：
+
+| 场景 | 优化前 | 优化后 | 改善 |
+|------|--------|--------|------|
+| 全量重写 200K | 3236ms | 2452ms | -24% |
+| 单组重写 200K | 2193ms | 2056ms | -6% |
+| 末分区重写 100K | 1879ms | 1298ms | -31% |
+| 大批量插入 100K | 2017ms | 1252ms | -38% |
+
+**与初始值对比**（所有优化累计）：
+
+| 场景 | 初始 | 最终 | 累计改善 |
+|------|------|------|----------|
+| 全量重写 200K | 3070ms | 2452ms | -20% |
+| **单组重写 200K** | **3092ms** | **2056ms** | **-33%** |
+| **末分区重写 100K** | **1784ms** | **1298ms** | **-27%** |
+| **大批量插入 100K** | **1989ms** | **1252ms** | **-37%** |
+
+提交：`17cf109`（SourceReader 缓存）、`<TBD>`（两阶段 dispatch + ExtractSortedRows）
 
 

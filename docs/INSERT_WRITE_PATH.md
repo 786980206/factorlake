@@ -202,40 +202,45 @@ ReadSourceFromCollection(context, source_collection, needed_names, source_col_na
 
 如果任一条件不满足，该分区的所有 `append_to_last` 被改为 `append_new_part`。
 
-### 4f. Dispatch — 路由到 MutateTarget 缓冲区
+### 4f. Dispatch — 两阶段批量路由
 
-对每个源行，遍历所有 group，决定该行是否需要写入该 group：
+**优化**：dispatch 分为两阶段执行，消除逐行 Append 开销。
+
+**第一阶段（分类）**：遍历所有排序后的行，确定每行的路由目标：
+- 哪个 group 需要写入
+- 哪个 MutateTarget（按 partition_key + part_index 定位）
+- update_buffer 还是 insert_buffer
+- part-local position
+
+结果存入 `DispatchEntry` 数组，不读取源值——只做路由判断。
+
+**第二阶段（批量追加）**：按 `(target, is_update)` 分组，用 `BatchAppender` 累积行：
+- 每个 `(target, is_update)` 对有一个 `BatchAppender`
+- BatchAppender 内部维护一个 `DataChunk scratch`，累积到 `STANDARD_VECTOR_SIZE`（2048）行后 flush 到 `ColumnDataCollection`
+- 将 `buffer.Append` 调用次数从 N 次减少到 N/2048 次
 
 ```
-对每个 group gi:
-  ┌─ 跳过条件 ─────────────────────────────────────┐
-  │ 1. loc.found=true (更新) 且该组映射列仅含键列     │
-  │    (symbol, date) → 跳过（键值不变，重写无意义）  │
-  │ 2. gi>0 且 loc.found=true 且该组无映射列          │
-  │    → 跳过（该组无列被修改）                        │
-  └─────────────────────────────────────────────────┘
-  
-  根据 loc 的类型路由：
-  ┌─ 更新 (found=true) ──────────────────────────────┐
-  │ → update_buffer：记录 [position, ...新值]         │
-  │ → RewritePart 会用新值覆盖旧行                    │
-  └───────────────────────────────────────────────────┘
-  ┌─ 插入到已有 part (found=false, 非 append) ────────┐
-  │ → insert_buffer：记录 [position, ...新值]         │
-  │ → RewritePart 会在指定位置插入新行                │
-  └───────────────────────────────────────────────────┘
-  ┌─ 追加到末 part (append_to_last=true) ─────────────┐
-  │ → insert_buffer：追加到末 part 末尾               │
-  │ → RewritePart 会合并旧行+新行                     │
-  └───────────────────────────────────────────────────┘
-  ┌─ 新 part (append_new_part=true) ──────────────────┐
-  │ → insert_buffer：全是新行，无旧行                 │
-  │ → RewritePart 不读旧 part，直接写新 part          │
-  └───────────────────────────────────────────────────┘
-  ┌─ Synth part (键在 index 但 group 没见过该分区) ──┐
-  │ → 合成一个全 NULL part，只在键位置写入新值        │
-  │ → 用于 schema evolution 场景                       │
-  └───────────────────────────────────────────────────┘
+对每个行 (已排序) → 分类到 DispatchEntry
+    │
+    ├── 跳过条件检查：
+    │   1. loc.found=true 且该组映射列仅含键列 (symbol, date) → 跳过
+    │   2. gi>0 且 loc.found=true 且该组无映射列 → 跳过
+    │
+    ├── 路由决策：
+    │   ├── gi==0 → index 组：FindIndexPart
+    │   ├── append_to_last → 追加末 part
+    │   ├── append_new_part → 新建 part
+    │   ├── FindPartByPosition → 按 position 定位 part
+    │   ├── fresh + 有映射列 → 新分区
+    │   └── found + 有映射列 + 无该分区 → synth
+    │
+    └── 结果 → DispatchEntry {row_idx, gi, target, is_update, pos}
+
+第二阶段：按 (target, is_update) 分组
+    │
+    └── BatchAppender.AppendRow(pos, src_pos, reader, src_row)
+        → 累积到 scratch chunk (最多 2048 行)
+        → 达到 2048 行时 flush 到 ColumnDataCollection
 ```
 
 ### 4g. ExecuteAndCommit — 并行重写 + 原子提交
