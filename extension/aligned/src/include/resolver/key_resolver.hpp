@@ -7,58 +7,18 @@
 
 namespace duckdb {
 
-//! The resolved location of one primary key (symbol, date) within the index
-//! group's row space (v8 primary-key contract).
 struct KeyLocation {
-	bool found = false; // key exists in the table (-> update/delete instead of insert)
-	string partition_key; // "date=2026-08-17"; "" for unpartitioned tables; for a
-	                      // key whose date lies outside all partitions this is the
-	                      // NEW partition's key (a fresh part will be created)
-	idx_t part_index = 0; // partition-local part index (PartInfo.partition_index);
-	                      // 0 for a new partition (fresh part "0000-..."); for an
-	                      // append at the partition end this is the NEW part's index
-	idx_t part_local_row = 0; // row within the part (0-based). found: the key's
-	                          // row; not found: the insertion position — the first
-	                          // row whose (symbol, date) is >= the key
-	                          // (== part row count when appending at the part end)
-	bool append_new_part = false; // not found and the key sorts after every
-	                              // (symbol, date) of the partition: append at the
-	                              // partition end creates a NEW part (index =
-	                              // part_index) instead of growing the last part
-	                              // (keeps part sizes bounded and allows schema
-	                              // evolution on appends)
-	bool append_to_last = false;  // not found and the key sorts after every
-	                               // (symbol, date) of the partition, AND the
-	                               // partition's last existing part is below
-	                               // ALIGNED_DEFAULT_PART_ROWS: instead of creating
-	                               // a new part, grow the last existing part
-	                               // in-place (the rewriter merges its old data
-	                               // with the appended rows). part_index =
-	                               // last part's index; part_local_row = its row
-	                               // count. The mutator re-validates this across
-	                               // all groups (schema evolution + threshold
-	                               // guard) before committing; if any group's last
-	                               // part can't accept the append, it falls back to
-	                               // append_new_part.
+	bool found = false;
+	string partition_key;
+	idx_t part_index = 0;
+	idx_t part_local_row = 0;
+	bool append_new_part = false;
+	bool append_to_last = false;
 };
 
-//! Resolves primary keys (symbol, date) against the index group of a table.
-//! Preconditions (fail-fast on violation):
-//!  - within a partition, rows are ordered by (symbol, date) strictly ascending
-//!    (v8 writer-side sort contract; same symbol may appear on multiple dates)
-//! The symbol column is compared with Value ordering (VARCHAR: byte order);
-//! the date column is compared as date_t (int32 days since epoch).
-//! Partitions are identified by evaluating the group's partition template
-//! against the key's date (date part for TIMESTAMP sources). A key whose date
-//! maps to no existing partition resolves to a new-partition location
-//! (found=false, part_index=0, part_local_row=0).
 class KeyResolver {
 public:
 	KeyResolver(ClientContext &context, const TablePlan &plan);
-
-	//! Resolves one key. `date_value` is the raw DATE value (callers with a
-	//! TIMESTAMP source pass Timestamp::GetDate first); `symbol_value` is the
-	//! key's symbol column value. The composite key is (symbol, date).
 	KeyLocation Resolve(date_t date_value, const Value &symbol_value);
 
 private:
@@ -67,33 +27,22 @@ private:
 	const GroupPlan *index_group = nullptr;
 	vector<PartitionTemplate> templates;
 
-	// Per-partition cached (symbol, date) columns (lazy, whole partition in
-	// memory: the index group is small; the cache makes batch resolution read
-	// each partition's key columns only once).
-	// Optimization: a lightweight symbol boundary index (min/max per Row Group)
-	// is built first; if the key's symbol falls outside the partition's symbol
-	// range, the full data is never loaded (fast rejection / append-at-end).
 	struct PartitionCache {
 		vector<Value> symbols;
 		vector<date_t> dates;
 		bool loaded = false;
-		// Symbol boundary index: min/max symbol per part (from RG stats).
-		// Built from Parquet Row Group min/max statistics without reading data.
-		vector<Value> part_sym_min;  // first (smallest) symbol in each part
-		vector<Value> part_sym_max;  // last (largest) symbol in each part
+		vector<Value> part_sym_min;
+		vector<Value> part_sym_max;
 		bool boundary_loaded = false;
+		vector<vector<Value>> part_symbols;
+		vector<vector<date_t>> part_dates;
+		vector<bool> part_loaded;
 	};
 	std::map<string, PartitionCache> cache;
 
-	//! Reads + validates the (symbol, date) columns of every part of a
-	//! partition into the cache (strictly ascending, fail-fast on violation).
 	void LoadPartition(const GroupPartition &partition);
-
-	//! Builds the lightweight symbol boundary index (min/max per part) from
-	//! Parquet Row Group statistics, without reading the full data. This allows
-	//! fast rejection of keys whose symbol falls outside the partition's range
-	//! (a common case for append-at-end upserts).
 	void LoadPartitionBoundaries(const GroupPartition &partition);
+	void LoadSinglePart(const GroupPartition &partition, idx_t part_k);
 };
 
 } // namespace duckdb
