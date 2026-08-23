@@ -644,8 +644,7 @@ static MutateTarget &GetCreateTarget(ClientContext &context, const MutateBindDat
 }
 
 //! Appends one [pos, ...mapped values] row to a buffer. `scratch` is a
-//! caller-owned reusable chunk (initialized on first use) — allocating a
-//! fresh DataChunk per row dominated batch-insert profiles.
+//! caller-owned reusable chunk (initialized on first use).
 static void AppendRowToBuffer(ClientContext &context, ColumnDataCollection &buffer,
                               ColumnDataAppendState &append_state, idx_t pos, const vector<idx_t> &src_pos,
                               SourceReader &src, idx_t src_row, DataChunk &scratch,

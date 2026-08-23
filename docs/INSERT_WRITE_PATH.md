@@ -249,6 +249,12 @@ ReadSourceFromCollection(context, source_collection, needed_names, source_col_na
    线程数 = min(tasks, hardware_concurrency)。
 
 3. **RewritePart 逻辑**：
+
+   **快速路径（全量覆盖）**：如果 `input.part` 存在且 `updates->Count() == old_count`
+   且无 inserts/deletes，直接从 update buffer 写新 part，**完全不读旧数据**。
+   → `RewritePartFullOverwrite`：向量化批量拷贝 mapped 列，未映射列写 NULL。
+
+   **常规路径（读-改-写合并）**：
    ```
    打开旧 part（如果存在）→ 读全列
    创建新 ParquetWriter → 写到 _tmp/transaction-<id>/
