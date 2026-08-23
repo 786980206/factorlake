@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# run_multi_bench.sh — multi-scenario benchmark harness (Phase 6+).
+# run_multi_bench.sh 鈥?multi-scenario benchmark harness (Phase 6+).
 #
-# Reads the standardized Group Settings from scripts/multi_bench_config.sh and
+# Reads the standardized Group Settings from test/multi_bench_config.sh and
 # executes a Tier (A smoke / B main / C stress) or an explicit selection across
 # the engine groups, measuring COLD + WARM per test point.
 #
@@ -10,18 +10,18 @@
 # assembly + intersection pruning), not a hash key-join.
 #
 # Usage:
-#   bash scripts/run_multi_bench.sh --tier A [--rows N] [--width N]
+#   bash test/run_multi_bench.sh --tier A [--rows N] [--width N]
 #                                   [--sparsity dense|90|99]
 #                                   [--out DIR] [--threads 1,4,8]
 #                                   [--engines D-WIDE,D-JOIN,A-ALIGNED]
 #                                   [--no-regen]
 # env: DUCKDB (default build/duckdb), ALIGNED_DATA_ROOT,
-#      REPEATS (int, default 5) executions per warm measurement —
+#      REPEATS (int, default 5) executions per warm measurement 鈥?
 #      pass as env prefix, NOT a positional arg:
-#      REPEATS=5 bash scripts/run_multi_bench.sh --tier A ...
+#      REPEATS=5 bash test/run_multi_bench.sh --tier A ...
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="$ROOT/scripts/multi_bench_config.sh"
+CONFIG="$ROOT/test/multi_bench_config.sh"
 source "$CONFIG"
 
 DUCKDB="${DUCKDB:-$ROOT/duckdb/build/duckdb_aligned.exe}"
@@ -91,7 +91,7 @@ GEN_FLAGS=(--rows "$ROWS" --width "$WIDTH" --sparsity "$SPARSITY" --aligned true
 need_gen=0
 if [ ! -d "$OUT/$ALIGNED_TABLE/index" ]; then need_gen=1; fi
 if [ "$need_gen" = 1 ] && [ "$FLAG_NOREGEN" = 0 ]; then
-  bash "$ROOT/scripts/gen_multi_bench.sh" "${GEN_FLAGS[@]}"
+  bash "$ROOT/test/gen_multi_bench.sh" "${GEN_FLAGS[@]}"
 fi
 if [ ! -d "$OUT/$ALIGNED_TABLE/index" ]; then echo "aligned table missing (use --no-regen only if data exists): $OUT/$ALIGNED_TABLE"; exit 1; fi
 
@@ -151,7 +151,7 @@ engine_sql() { # e q f sel rows -> sql
 }
 
 # baselines for D-JOIN share join_index (already written by generator as
-# bench_baseline_<tag>/join_alpha, join_fs, wide — index baseline is in wide's
+# bench_baseline_<tag>/join_alpha, join_fs, wide 鈥?index baseline is in wide's
 # first columns but we need a standalone join_index.parquet; generate it.)
 if ! [ -f "$BASE/join_index.parquet" ]; then
   "$DUCKDB" -light-mode -c "COPY (SELECT date,symbol,close,volume,rowid,$(range_cols ix 1 15) FROM read_parquet('$WIDE')) TO '$BASE/join_index.parquet' (FORMAT PARQUET, COMPRESSION ZSTD);" >/dev/null
@@ -165,7 +165,7 @@ elapsed(){ echo "scale=9; ($2 - $1)/1000000000" | bc -l; }
 # process startup cost (~0.02s) that otherwise dominates tiny/cached datasets.
 # warm_s = mean per query.
 REPEATS=${REPEATS:-5}
-# ddb_run <th> <pre> <sql...> — run DuckDB, feeding the SQL through a temp file
+# ddb_run <th> <pre> <sql...> 鈥?run DuckDB, feeding the SQL through a temp file
 # on stdin so very wide queries (W3, thousands of columns) that overflow ARG_MAX
 # with `-c` still execute. All measurement/consistency calls go through here.
 DDB_SQL_TMP="${TMPDIR:-/tmp}/rmb_$$.sql"
@@ -189,7 +189,7 @@ run_one(){ # e q f sel th -> prints "cold warm"
     read -r _ pe pq pf psel palpha pfs pbase prows <<< "$sql"
     if [ -z "$PYTHON_POLARS" ]; then printf '0.000000 0.000000'; return; fi
     local out
-    out=$("$PYTHON_POLARS" "$ROOT/scripts/bench_polars_multi.py" "$pe" "$pq" "$pf" "$psel" "$palpha" "$pfs" "$pbase" "$prows" "$th" 2>/dev/null | grep -E '^TIMES')
+    out=$("$PYTHON_POLARS" "$ROOT/test/bench_polars_multi.py" "$pe" "$pq" "$pf" "$psel" "$palpha" "$pfs" "$pbase" "$prows" "$th" 2>/dev/null | grep -E '^TIMES')
     printf '%s' "$out" | sed 's/TIMES //'
     return
   fi
@@ -209,7 +209,7 @@ echo "SELF-CHECK OK: A-ALIGNED prunes to $expected rows on non-first partition."
 
 # cross-engine row-count consistency: every engine must return ROWS/4 rows for
 # Q2+F2+S0 (date partition point). This proves all engines observe the SAME
-# logical table (same key, order, NULL distribution) — timing is only meaningful
+# logical table (same key, order, NULL distribution) 鈥?timing is only meaningful
 # if the outputs agree.
 check_count(){ # engine -> rows after (date='2026-09-02')
   local e="$1"
@@ -219,7 +219,7 @@ check_count(){ # engine -> rows after (date='2026-09-02')
     D-JOIN)    "$DUCKDB" -light-mode -csv -noheader -c "SELECT count(*) FROM (SELECT i.date,i.symbol,i.close FROM read_parquet('$BASE/join_index.parquet') i JOIN read_parquet('$JOINAL') a ON i.rowid=a.rowid_alpha WHERE i.date=DATE '2026-09-02');" 2>/dev/null | tail -1;;
     P-CONCAT|P-JOIN)
       if [ -n "$PYTHON_POLARS" ]; then
-        "$PYTHON_POLARS" "$ROOT/scripts/bench_polars_multi.py" "$e" Q2 F2 S0 "$ALPHA" "$FIELDSET" "$BASE" "$ROWS" 1 2>/dev/null | grep '^ROWS' | awk '{print $2}'
+        "$PYTHON_POLARS" "$ROOT/test/bench_polars_multi.py" "$e" Q2 F2 S0 "$ALPHA" "$FIELDSET" "$BASE" "$ROWS" 1 2>/dev/null | grep '^ROWS' | awk '{print $2}'
       else echo "0"; fi;;
     *) echo "0";;
   esac

@@ -1,9 +1,9 @@
-# test_compaction.ps1
+﻿# test_compaction.ps1
 # Phase 7 acceptance: aligned_compact merges a group's parts per partition
 # directory (atomic switch), preserving the row space.
 # Pre-seeds 2 parts per group (index + alpha) in one partition dir, compacts
 # all groups, verifies the merged part.
-# Usage: powershell -ExecutionPolicy Bypass -File scripts\test_compaction.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File test\test_compaction.ps1
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

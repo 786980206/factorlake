@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench_aligned.sh — Linux equivalent of bench_aligned.ps1
+# bench_aligned.sh 鈥?Linux equivalent of bench_aligned.ps1
 # Phase 6 benchmark: aligned_scan vs plain-parquet JOIN vs single wide parquet.
 # Dataset: bench_ixday (configurable rows, default 1M) x 127 cols, 4 daily
 # partitions, sparse factors. Dimensions: projection 5/25/120 cols,
@@ -8,9 +8,9 @@
 # This script also runs a partition-pruning SELF-CHECK before measuring:
 # it asserts that a date='2026-09-02' scan (a NON-first partition) returns
 # exactly rowsPerDay rows. This guards the pruning/cursor logic that previously
-# crashed on any non-first partition (see AGENTS.md "Linux 迁移 + Bug 修复").
+# crashed on any non-first partition (see AGENTS.md "Linux 杩佺Щ + Bug 淇").
 #
-# Usage: bash scripts/bench_aligned.sh [TOTAL_ROWS] [DATA_ROOT]
+# Usage: bash test/bench_aligned.sh [TOTAL_ROWS] [DATA_ROOT]
 #   TOTAL_ROWS default 1000000 (must be divisible by 4)
 #   DATA_ROOT  default $ROOT/testdata
 set -euo pipefail
@@ -31,7 +31,7 @@ fi
 BENCH="$DATA_ROOT/bench_ixday"
 if [ ! -d "$BENCH/index" ]; then
   echo "Generating aligned bench data ($TOTAL rows)..."
-  DUCKDB="$DUCKDB" DATA_ROOT="$DATA_ROOT" bash "$ROOT/scripts/gen_bench.sh" "$TOTAL"
+  DUCKDB="$DUCKDB" DATA_ROOT="$DATA_ROOT" bash "$ROOT/test/gen_bench.sh" "$TOTAL"
 fi
 
 ROWS_PER_DAY=$((TOTAL / 4))
@@ -192,7 +192,7 @@ REPORT="$ROOT/docs/BENCHMARK.md"
 {
   echo "# AlignedTable Benchmark (Phase 6)"
   echo ""
-  echo "Date: $(date +%Y-%m-%d)  Machine: local Linux (see AGENTS.md §16.2);"
+  echo "Date: $(date +%Y-%m-%d)  Machine: local Linux (see AGENTS.md 搂16.2);"
   echo "aligned engine: $DUCKDB"
   echo "Dataset: **bench_ixday** - $TOTAL rows x 127 columns (index 5 + alpha101 101 + ma 21),"
   echo "4 daily partitions, factors sparse (non-null 1/7). Aligned layout: 3 independent Parquet column groups."

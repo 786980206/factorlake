@@ -1,11 +1,11 @@
-# gen_bench.ps1
+﻿# gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
 # and Phase 6 (benchmark). v5 contract: index mandatory, two-level
-# non-index groups, single-level partition (year= / month= / date= — the SAME
+# non-index groups, single-level partition (year= / month= / date= 鈥?the SAME
 # kind for every group), only the footer is authoritative (no sidecars, no
 # commit markers, no _group.json), _tmp ignored.
 #
-#   Layout (partition-aligned — index, alpha and ma share the date= kind; each
+#   Layout (partition-aligned 鈥?index, alpha and ma share the date= kind; each
 #   partition holds 1 part per group (v6 self-describing name "0000-{rows:10d}"),
 #   so partition rows == part rows and every group has full coverage):
 #   bench_ixday/
@@ -13,7 +13,7 @@
 #     factor/alpha101/ date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
 #     fieldset/ma/     date=2026-09-01..04/   1 part per day, RGS 65536, 20 cols
 #
-# Usage: powershell -ExecutionPolicy Bypass -File scripts\gen_bench.ps1 [-TotalRows 1000000]
+# Usage: powershell -ExecutionPolicy Bypass -File test\gen_bench.ps1 [-TotalRows 1000000]
 
 param([long]$TotalRows = 1000000)
 

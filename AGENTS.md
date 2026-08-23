@@ -266,23 +266,28 @@ extension/aligned/src/
 
 ### Windows（scoop + MSVC）
 - DuckDB v1.5.4 源码 vendored 在 `duckdb/`（gitignored）
-- 构建：`cmd /c "D:\proj\factorlake\duckdb\build3\build_al3.bat"`（vcvars64 + ninja）
-- 产物：`duckdb/build3/duckdb_al3.exe`
-- 测试：`python test/run_sqllogictest.py` + `scripts\test_*.ps1`
+- 构建整体：`.\scripts\build.ps1`（vcvars64 + ninja）
+- 构建插件：`.\scripts\build_extension.ps1 -Copy`（Release + `-DEXTENSION_STATIC_BUILD=1`）
+- 运行测试：`.\scripts\run_tests.ps1`
+- 产物：`duckdb/build3/duckdb_al3.exe`、`release/aligned.duckdb_extension`
 
 ### Linux（brew + gcc + Ninja）
 - DuckDB v1.5.4 源码在 `duckdb/`（gitignored）
 - 构建：`cmake -G Ninja + ninja`（通过 `scripts/aligned_extension_config.cmake` 注册）
 - 产物：`duckdb/build/duckdb`
 
+### 目录职责
+- `scripts/`：构建入口（`build.ps1`、`build_extension.ps1`、`run_tests.ps1`）+ cmake 配置
+- `test/`：SQLLogicTest（`run_sqllogictest.py` + `aligned/*.test`）、PS 验收脚本（`test_*.ps1`）、测试数据生成（`gen_*.ps1/.sh`）、基准测试（`bench_*.ps1/.sh/.py`）
+
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
-- PS 脚本：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
+- PS 脚本（位于 `test/`）：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
 - 当前总：SQLLogicTest 141/141 + 4 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`
-- 发布构建：`-DEXTENSION_STATIC_BUILD=1`，产物 24MB 自包含
+- 发布构建：`-DEXTENSION_STATIC_BUILD=1`，产物 23MB 自包含
 - 无签名扩展需 `duckdb -unsigned`；`INSTALL '<url>'` + `LOAD aligned`
 - 详见 `docs/EXTENSION_RELEASE.md`
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# bench_scenarios.sh — ONE-COMMAND, RESOURCE-MONITORED, STAGED benchmark driver.
+# bench_scenarios.sh 鈥?ONE-COMMAND, RESOURCE-MONITORED, STAGED benchmark driver.
 #
-# Runs the standardized multi-scenario benchmarks from scripts/multi_bench_config.sh
+# Runs the standardized multi-scenario benchmarks from test/multi_bench_config.sh
 # in INCREASING data scale (so any resource issue surfaces early and never
 # surprises you), monitoring memory before/after each stage and saving every
 # stage's CSV to a unique path (never clobbered).
 #
-#   bash scripts/bench_scenarios.sh [--only <stage>] [--skip-regen] [--repeats N]
+#   bash test/bench_scenarios.sh [--only <stage>] [--skip-regen] [--repeats N]
 #
 # Stages (each = 6 engines unless noted; threads grid):
 #   g-250k  : 250K x W1(128)  x SPARSE-90  -> warmup, fast full 6-engine run
@@ -21,7 +21,7 @@
 # Env: DUCKDB, ALIGNED_DATA_ROOT, BENCH_OUT (default bench/out)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT/scripts/multi_bench_config.sh"
+source "$ROOT/test/multi_bench_config.sh"
 DUCKDB="${DUCKDB:-$ROOT/duckdb/build/duckdb}"
 OUT="${ALIGNED_DATA_ROOT:-$ROOT/testdata}"
 BENCH_OUT="${BENCH_OUT:-$ROOT/bench/out}"
@@ -43,7 +43,7 @@ ENG3="D-WIDE,D-JOIN,A-ALIGNED"
 
 avail(){ echo "N/A"; }
 
-# gen_data <rows> <width> <sparsity> — regenerate bench_mb.
+# gen_data <rows> <width> <sparsity> 鈥?regenerate bench_mb.
 # gen_multi_bench.sh writes a .gen-meta marker (rows/width/sparsity). With
 # --skip-regen we regenerate only if the marker matches ALL of rows/width/sparsity;
 # a stale or foreign dataset otherwise triggers a confusing self-check FAIL.
@@ -63,7 +63,7 @@ gen_data(){ local rows="$1" width="$2" sp="$3" meta
   if [ "$need_regen" = 1 ]; then
     rm -rf "$OUT/bench_mb" "$OUT/bench_baseline_mb"
     echo "  gen: rows=$rows width=$width sparse=$sp ..."
-    bash "$ROOT/scripts/gen_multi_bench.sh" --rows "$rows" --width "$width" --sparsity "$sp" \
+    bash "$ROOT/test/gen_multi_bench.sh" --rows "$rows" --width "$width" --sparsity "$sp" \
          --aligned true --out "$OUT" --tag mb >/dev/null
   fi
 }
@@ -76,7 +76,7 @@ run_stage(){ local label="$1" rows="$2" width="$3" sp="$4" eng="$5" th="$6" qs="
   echo "  MEM before: $(avail) available"
   gen_data "$rows" "$width" "$sp"
   QS_OVERRIDE="$qs" FS_OVERRIDE="$fs" SS_OVERRIDE="$ss" \
-    bash "$ROOT/scripts/run_multi_bench.sh" --tier A --rows "$rows" --width "$width" \
+    bash "$ROOT/test/run_multi_bench.sh" --tier A --rows "$rows" --width "$width" \
       --sparsity "$sp" --threads "$th" --engines "$eng" --no-regen
   cp "$ROOT/bench/out/mb-results.csv" "$BENCH_OUT/$label.csv"
   echo "  MEM after:  $(avail) available  -> saved $BENCH_OUT/$label.csv"
@@ -88,7 +88,7 @@ thread_stage(){ [ -n "$ONLY" ] && [ "$ONLY" != "g-thread" ] && return 0
   echo "  MEM before: $(avail)"
   gen_data 1000000 128 90
   QS_OVERRIDE="Q2" FS_OVERRIDE="F1" SS_OVERRIDE="S0" \
-    bash "$ROOT/scripts/run_multi_bench.sh" --tier A --rows 1000000 --width 128 \
+    bash "$ROOT/test/run_multi_bench.sh" --tier A --rows 1000000 --width 128 \
       --sparsity 90 --threads 1,2,4,8 --engines "A-ALIGNED" --no-regen
   cp "$ROOT/bench/out/mb-results.csv" "$BENCH_OUT/g-thread.csv"
   echo "  MEM after:  $(avail)  -> saved $BENCH_OUT/g-thread.csv"
@@ -99,10 +99,10 @@ run_stage g-250k 250000 128 90   "$ENG5" "1,4" "Q2,Q5" "F1,F2" "S0"
 # so the slow polars P-JOIN baseline stays tractable at 1M.
 run_stage g-1m   1000000 128 90  "$ENG5" "1" "Q2" "F2" "S0"
 run_stage g-1m-q 1000000 128 90  "$ENG3" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S0,S1"
-# g-10m: next scale step — 10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
+# g-10m: next scale step 鈥?10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
 # expensive D-JOIN / P-JOIN baselines stay tractable (they are ~40-150x slower).
 run_stage g-10m 10000000 128 90 "$ENG5" "1" "Q2" "F1,F2" "S0"
-# g-w2: width direction — 500K x 1024 (W2) x 90%, heavy projections Q3/Q5, 4 DDB
+# g-w2: width direction 鈥?500K x 1024 (W2) x 90%, heavy projections Q3/Q5, 4 DDB
 # engines, t=1. Verifies aligned's gap to D-WIDE narrows as columns/row-groups grow.
 run_stage g-w2 500000 1024 90 "$ENG3" "1" "Q3,Q5" "F1,F2" "S0"
 # sparsity sweep (reuse 1M x 128)

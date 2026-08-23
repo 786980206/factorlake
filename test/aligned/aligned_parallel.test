@@ -1,7 +1,7 @@
 # name: test/aligned/aligned_parallel.test
 # description: Parallel scan correctness + metadata cache (requires bench_ixday 1M rows)
 # Covers: test_parallel.ps1 (8 assertions)
-# Requires: scripts/gen_bench.ps1 has been run (bench_ixday, 1M rows)
+# Requires: test/gen_bench.ps1 has been run (bench_ixday, 1M rows)
 
 # --- correctness: identical results at any thread count ---
 query IIIII

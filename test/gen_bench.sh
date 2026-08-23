@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
-# gen_bench.sh — Linux equivalent of gen_bench.ps1
+﻿#!/usr/bin/env bash
+# gen_bench.sh 鈥?Linux equivalent of gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
 # and Phase 6 (benchmark). v5 contract: index mandatory, two-level
-# non-index groups, single-level partition (year= / month= / date= — the SAME
+# non-index groups, single-level partition (year= / month= / date= 鈥?the SAME
 # kind for every group), only the footer is authoritative (no sidecars, no
 # commit markers, no _group.json), _tmp ignored.
 #
@@ -12,7 +12,7 @@
 #     factor/alpha101/ date=2026-09-01..04/   1 part per day, RGS 65536, 100 sparse cols
 #     fieldset/ma/     date=2026-09-01..04/   1 part per day, RGS 65536, 20 cols
 #
-# Usage: bash scripts/gen_bench.sh [TOTAL_ROWS]
+# Usage: bash test/gen_bench.sh [TOTAL_ROWS]
 #   TOTAL_ROWS  default 1000000; must be divisible by 4 (one quarter per day).
 set -euo pipefail
 

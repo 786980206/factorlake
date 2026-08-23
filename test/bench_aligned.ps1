@@ -5,8 +5,8 @@
 # Dimensions: projection 5/25/100+ cols, scan 25%/100%, threads 1/4/8.
 # Output: bench/out/bench_output.csv (stdout for human reading).
 # Note: docs/BENCHMARK.md is hand-maintained; this script only emits the CSV.
-# Usage: powershell -ExecutionPolicy Bypass -File scripts\bench_aligned.ps1
-# Requires: scripts\gen_bench.ps1 has been run; python + polars available.
+# Usage: powershell -ExecutionPolicy Bypass -File test\bench_aligned.ps1
+# Requires: test\gen_bench.ps1 has been run; python + polars available.
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -103,7 +103,7 @@ function Measure-Sql([string]$sql, [int]$threads, [string]$prelude = '') {
     return @{ cold = $warm; warm = $warm }
 }
 function Measure-Polars([string]$workload, [int]$threads) {
-    $raw = & $python (Join-Path $root 'scripts\bench_polars.py') $workload $threads 2>&1 | Out-String
+    $raw = & $python (Join-Path $root 'test\bench_polars.py') $workload $threads 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "polars failed: $raw" }
     $t = [regex]::Match($raw, 'TIMES ([\d.]+) ([\d.]+)')
     return @{ cold = [double]$t.Groups[1].Value; warm = [double]$t.Groups[2].Value }
@@ -139,7 +139,7 @@ function Result-P5([string]$e) {
     if ($e -eq 'aligned') { return Measure-P5-Sql $alignedQ['p5'] $alignedPrelude }
     if ($e -eq 'wide') { return Measure-P5-Sql $wideQ['p5'] '' }
     if ($e -eq 'join') { return Measure-P5-Sql $joinQ['p5'] '' }
-    $raw = & $python (Join-Path $root 'scripts\bench_polars.py') 'p5' 1 2>&1 | Out-String
+    $raw = & $python (Join-Path $root 'test\bench_polars.py') 'p5' 1 2>&1 | Out-String
     return ([regex]::Match($raw, 'COUNTS ([\d,]+)').Groups[1].Value)
 }
 function Measure-P5-Sql([string]$sql, [string]$prelude) {

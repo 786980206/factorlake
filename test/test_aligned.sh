@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
-# test_aligned.sh — Linux equivalent of test_aligned.ps1 (v5 partition-aligned).
-# Requires: scripts/gen_testdata.sh has been run, $ROOT/duckdb/build/duckdb built.
-# Usage: bash scripts/test_aligned.sh   (env: DUCKDB, ALIGNED_DATA_ROOT)
+﻿#!/usr/bin/env bash
+# test_aligned.sh 鈥?Linux equivalent of test_aligned.ps1 (v5 partition-aligned).
+# Requires: test/gen_testdata.sh has been run, $ROOT/duckdb/build/duckdb built.
+# Usage: bash test/test_aligned.sh   (env: DUCKDB, ALIGNED_DATA_ROOT)
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib_aligned.sh"
@@ -21,9 +21,9 @@ first_val() { printf '%s\n' "$1" | grep -E '^[0-9]' | head -n1; }
 
 # --- counts + cross-group alignment -----------------------------------------
 # Layout: index month=2026-07 (1 part x 2000) + month=2026-08 (2 parts x 2000);
-# alpha same months (07: 1 part 2000, 08: 1 part 4000 — last-part row count
+# alpha same months (07: 1 part 2000, 08: 1 part 4000 鈥?last-part row count
 # differs from index, only the partition total is contractual); ma only
-# month=2026-08 (4000) — rows [0,2000) read as NULL for ma columns.
+# month=2026-08 (4000) 鈥?rows [0,2000) read as NULL for ma columns.
 out=$(run_duckdb "SET aligned_data_root='$DATA_ROOT'; WITH t AS (SELECT * FROM aligned_scan('cnstk_ixday')) SELECT count(*) AS c, count(alpha001) AS a1, count(alpha099) AS a99, count(rowid_ma) AS ma, sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) AS mis FROM t;")
 vals=$(first_val "$out" | tr ',' ' ')
 expect_equal 'total rows' "$(echo "$vals" | awk '{print $1}')" "6000"
@@ -111,7 +111,7 @@ if printf '%s' "$out8" | grep -qE '^4000,666$'; then echo 'PASS: parallel projec
 out=$(run_duckdb "SET aligned_data_root='$DATA_ROOT'; SELECT current_setting('parquet_metadata_cache');")
 if printf '%s' "$out" | grep -qE '^true$'; then echo 'PASS: parquet metadata cache default on'; else echo "FAIL: metadata cache default ($out)"; failures=$((failures+1)); fi
 
-# --- column-name rules (contract 搂2.2e) --------------------------------------
+# --- column-name rules (contract 鎼?.2e) --------------------------------------
 # e1: columns duplicated with index resolve to the index copy (authoritative)
 out=$(run_duckdb "SET aligned_data_root='$DATA_ROOT'; SELECT close FROM aligned_scan('cnstk_ixday') WHERE rowid = 100;")
 if printf '%s' "$out" | grep -qE '^50\.5$'; then echo 'PASS: e1 bare close = index (authoritative)'; else echo "FAIL: e1 bare close ($out)"; failures=$((failures+1)); fi
@@ -130,18 +130,18 @@ if printf '%s' "$out" | grep -qE '^250\.125,62\.53125$'; then echo 'PASS: e2 qua
 out=$(run_duckdb "SET aligned_data_root='$DATA_ROOT'; SELECT rowid_alpha, ma5 FROM aligned_scan('cnstk_ixday') WHERE rowid = 2000;")
 if printf '%s' "$out" | grep -qE '^2000,0\.0$'; then echo 'PASS: e3 bare non-duplicated columns'; else echo "FAIL: e3 bare columns ($out)"; failures=$((failures+1)); fi
 
-# --- directory rules (contract 搂2.1b/c) --------------------------------------
-# 搂2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above)
-# 搂2.1b: a table without the mandatory index group must fail (has alpha parts
+# --- directory rules (contract 鎼?.1b/c) --------------------------------------
+# 鎼?.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above)
+# 鎼?.1b: a table without the mandatory index group must fail (has alpha parts
 # but no index parts at all)
 BADIDX="$DATA_ROOT/badidx"
 mkdir -p "$BADIDX/factor/alpha101/month=2026-07"
 cp "$DATA_ROOT/cnstk_ixday/factor/alpha101/month=2026-07/0000-0000002000.parquet" "$BADIDX/factor/alpha101/month=2026-07/0000-0000002000.parquet"
 if run_duckdb_expect_error "SET aligned_data_root='$DATA_ROOT'; SELECT * FROM aligned_scan('badidx');" "mandatory group 'index'"; then
-  echo 'PASS: 搂2.1b missing index group rejected'
-else echo 'FAIL: 搂2.1b missing index'; failures=$((failures+1)); fi
+  echo 'PASS: 鎼?.1b missing index group rejected'
+else echo 'FAIL: 鎼?.1b missing index'; failures=$((failures+1)); fi
 rm -rf "$DATA_ROOT/badidx"
-# 搂2.1c: a one-level non-index group must fail (a real part file in group 'single')
+# 鎼?.1c: a one-level non-index group must fail (a real part file in group 'single')
 BADLVL="$DATA_ROOT/badlvl"
 mkdir -p "$BADLVL/index/month=2026-07" "$BADLVL/index/month=2026-08" "$BADLVL/single/month=2026-07"
 cp "$DATA_ROOT/cnstk_ixday/index/month=2026-07/0000-0000002000.parquet" "$BADLVL/index/month=2026-07/0000-0000002000.parquet"
@@ -154,7 +154,7 @@ else echo 'FAIL: 2.1c one-level group'; failures=$((failures+1)); fi
 rm -rf "$DATA_ROOT/badlvl"
 
 # v6: a non-conforming part file name (not "{idx:04d}-{rows:10d}.parquet") must
-# fail fast — the file-name row counts are the contract.
+# fail fast 鈥?the file-name row counts are the contract.
 BADNAME="$DATA_ROOT/badname"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADNAME"
 mv "$BADNAME/index/month=2026-08/0001-0000002000.parquet" "$BADNAME/index/month=2026-08/part-000001.parquet"
@@ -164,7 +164,7 @@ else echo 'FAIL: v6 non-conforming part name'; failures=$((failures+1)); fi
 rm -rf "$BADNAME"
 
 # v6: the index group's indexes must be consecutive from 0000 (a gap in the
-# index is a contract violation — the index defines the row space).
+# index is a contract violation 鈥?the index defines the row space).
 BADIDX="$DATA_ROOT/badidx"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADIDX"
 rm -f "$BADIDX/index/month=2026-08/0000-0000002000.parquet"
@@ -205,7 +205,7 @@ if printf '%s' "$out" | grep -qE '^100,14950$'; then echo 'PASS: TIMESTAMP-prune
 rm -rf "$TSTABLE"
 
 
-# --- error cases (expected failures 鈥?must not terminate the script) ---------
+# --- error cases (expected failures 閳?must not terminate the script) ---------
 if run_duckdb_expect_error "SELECT * FROM aligned_scan('no_such_table');" "no data root configured"; then
   echo 'PASS: missing root error'
 else echo 'FAIL: missing root error'; failures=$((failures+1)); fi

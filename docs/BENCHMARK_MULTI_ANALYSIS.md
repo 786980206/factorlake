@@ -2,7 +2,7 @@
 
 > 本文档是 **AlignedTable 多场景基准的权威结论文档**（长期维护）。
 > 它汇总 `bench/out/summary` 里每一次真实运行的结果与结论，以及如何用
-> `scripts/bench_scenarios.sh` 一键复现。
+> `test/bench_scenarios.sh` 一键复现。
 >
 > 相关文档：
 > - `AGENTS.md` — 项目权威记忆（环境/构建/当前进度）
@@ -14,7 +14,7 @@
 
 ## 1. 评测矩阵（Group Settings）
 
-见 `scripts/multi_bench_config.sh`（唯一事实来源），六大类：
+见 `test/multi_bench_config.sh`（唯一事实来源），六大类：
 
 | 类 | 内容 |
 |----|------|
@@ -107,17 +107,17 @@ Q2/F2/S1 三档下各引擎差异 <10%（都在 0.005-0.011s）。投影只扫�
 
 ```bash
 # ① 生成指定规模数据（可选，脚本也会自动生成）
-bash scripts/gen_multi_bench.sh --rows 1000000 --width 128 --sparsity 90 \
+bash test/gen_multi_bench.sh --rows 1000000 --width 128 --sparsity 90 \
      --aligned true --out testdata --tag mb
 
 # ② 一键跑全部阶段（逐级递增 + 资源监控），或只跑一个 stage
-bash scripts/bench_scenarios.sh                 # g-250k→g-1m→g-1m-q→g-10m→g-thread...  
-bash scripts/bench_scenarios.sh --only g-10m     # 只复现 10M 阶段
-bash scripts/bench_scenarios.sh --only g-1m --skip-regen   # 数据已匹配则跳过重生成
+bash test/bench_scenarios.sh                 # g-250k→g-1m→g-1m-q→g-10m→g-thread...  
+bash test/bench_scenarios.sh --only g-10m     # 只复现 10M 阶段
+bash test/bench_scenarios.sh --only g-1m --skip-regen   # 数据已匹配则跳过重生成
 
 # ③ 低层 runner（单引擎组合 + 环境变量覆盖查询/过滤/选择率 + REPEATS）
 REPEATS=5 QS_OVERRIDE=Q2 FS_OVERRIDE=F2 SS_OVERRIDE=S0 \
-  bash scripts/run_multi_bench.sh --tier A --rows 1000000 --width 128 \
+  bash test/run_multi_bench.sh --tier A --rows 1000000 --width 128 \
        --sparsity 90 --threads 1 --engines D-WIDE,D-JOIN,A-ALIGNED \
        --no-regen
 

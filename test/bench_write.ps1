@@ -8,7 +8,7 @@
 # Workloads: append B new rows; update M existing rows. B/M in {1k, 10k, 100k}.
 # Timing: fresh-process Stopwatch, single measured run per point (warm FS).
 #
-# Usage: powershell -ExecutionPolicy Bypass -File scripts\bench_write.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File test\bench_write.ps1
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot

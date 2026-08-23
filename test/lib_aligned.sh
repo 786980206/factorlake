@@ -1,5 +1,5 @@
 # lib_aligned.sh — shared helpers for the Linux (bash) acceptance tests.
-# Sources the build/binary + data-root conventions used by all scripts/*.sh.
+# Sources the build/binary + data-root conventions used by all test/*.sh.
 #
 # Environment overrides:
 #   DUCKDB            path to the aligned-enabled duckdb binary (default: $ROOT/duckdb/build/duckdb)

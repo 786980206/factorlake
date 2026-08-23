@@ -1,8 +1,8 @@
-# bench_polars.py — Phase 6 baseline: read each Column Group's parquet
-# separately, then horizontal concat (hstack) on the row index — the
+﻿# bench_polars.py 鈥?Phase 6 baseline: read each Column Group's parquet
+# separately, then horizontal concat (hstack) on the row index 鈥?the
 # "traditional" wide-table assembly cost the aligned engine eliminates.
 #
-# Usage: python scripts/bench_polars.py <workload> <threads>
+# Usage: python test/bench_polars.py <workload> <threads>
 #   workload: p5 | p25 | p100 | s25 | s100
 # Prints:
 #   COUNTS <csv of non-null counts>
@@ -28,7 +28,7 @@ M20 = [f"ma{i:03d}" for i in range(20)]
 
 
 def run(workload):
-    # Position-aligned HORIZONTAL concat of the per-group parquet frames — this
+    # Position-aligned HORIZONTAL concat of the per-group parquet frames 鈥?this
     # is exactly the wide-table assembly path the aligned engine eliminates
     # (the groups share the same physical row order).
     if workload == "p5":

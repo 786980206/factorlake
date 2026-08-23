@@ -123,7 +123,7 @@ join p100 goes 1→4 = 1.93×, 4→8 = 1.07× (similar pattern). Both scale comp
 
 ## Write Benchmark (aligned DML vs native parquet rewrite)
 
-Date: 2026-08-22  Script: `scripts/bench_write.ps1`
+Date: 2026-08-22  Script: `test/bench_write.ps1`
 Dataset: 600,000 base rows in a single `month=2026-05` partition (worst case: one large
 part to rewrite on any update). Aligned uses standard DML via `ATTACH ... TYPE ALIGNED`
 (reads affected part, merges, rewrites only that part + atomic commit). Native = DuckDB
