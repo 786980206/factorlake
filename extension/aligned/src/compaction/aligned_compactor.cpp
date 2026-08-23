@@ -2,6 +2,7 @@
 
 #include "catalog/manifest.hpp"
 #include "mutator/aligned_mutator.hpp"
+#include "io/parquet_io.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -46,17 +47,9 @@ unique_ptr<FunctionData> AlignedCompactBind(ClientContext &context, TableFunctio
 	string table = StringValue::Get(input.inputs[0]);
 	string group_name = StringValue::Get(input.inputs[1]);
 
-	string root;
-	auto entry = input.named_parameters.find("root");
-	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
-		root = StringValue::Get(entry->second);
-	} else {
-		Value setting_value;
-		if (!context.TryGetCurrentSetting("aligned_data_root", setting_value)) {
-			throw BinderException("aligned_compact: no data root configured. Pass root='...' or SET aligned_data_root");
-		}
-		root = StringValue::Get(setting_value);
-	}
+	auto root_it = input.named_parameters.find("root");
+	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
+	string root = ResolveDataRoot(context, root_param, "aligned_compact");
 
 	BuildTablePlan(context, root, table, result->plan);
 	// Group argument: 'all' or any existing group name. Compaction ALWAYS
@@ -309,8 +302,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 
 				if (num_parts == 1) {
 					// Single output part — merge all source parts into one file
-					string part_name = StringUtil::Format("0000-%010llu", (unsigned long long)total_rows);
-					string staged_path = staged_dir + "/" + part_name + ".parquet";
+					string staged_path = staged_dir + "/" + FormatPartName(0, total_rows);
 					MergePartsToWriter(context, fs, parts, columns, col_types, staged_path);
 					staged_paths.push_back(staged_path);
 					part_row_counts.push_back(total_rows);
@@ -383,10 +375,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 										idx_t this_part_rows = (current_part == num_parts - 1)
 										                           ? (total_rows - current_part * ALIGNED_DEFAULT_PART_ROWS)
 										                           : ALIGNED_DEFAULT_PART_ROWS;
-										string part_name = StringUtil::Format("%04llu-%010llu",
-										                                       (unsigned long long)current_part,
-										                                       (unsigned long long)this_part_rows);
-										string staged_path = staged_dir + "/" + part_name + ".parquet";
+										string staged_path = staged_dir + "/" + FormatPartName(current_part, this_part_rows);
 										writer = CreateParquetWriter(context, fs, staged_path, columns, col_types);
 										staged_paths.push_back(staged_path);
 										part_row_counts.push_back(this_part_rows);
@@ -432,9 +421,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 				for (idx_t pi = 0; pi < staged_paths.size(); pi++) {
 					PendingMove pm;
 					pm.staged_path = staged_paths[pi];
-					string part_name = StringUtil::Format("%04llu-%010llu.parquet",
-					                                       (unsigned long long)pi,
-					                                       (unsigned long long)part_row_counts[pi]);
+					string part_name = FormatPartName(pi, part_row_counts[pi]);
 					pm.target_path = dir + "/" + part_name;
 					pending_moves.push_back(std::move(pm));
 				}

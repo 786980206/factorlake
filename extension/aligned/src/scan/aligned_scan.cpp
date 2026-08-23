@@ -185,14 +185,9 @@ unique_ptr<ParquetReader> OpenPartReader(ClientContext &context, const PartInfo 
 //!   - other non-index columns: bare names.
 static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<string> &names,
                                vector<LogicalType> &types) {
-	// Find the mandatory 'index' group (validated in BuildTablePlan)
-	idx_t index_group = DConstants::INVALID_INDEX;
-	for (idx_t gi = 0; gi < plan.groups.size(); gi++) {
-		if (StringUtil::CIEquals(plan.groups[gi].manifest.group, "index")) {
-			index_group = gi;
-			break;
-		}
-	}
+	// The index group is always at position 0 (BuildTablePlan guarantees this).
+	const idx_t index_group = 0;
+	(void)IndexGroup(plan); // validates non-empty
 	// Pass 1: which groups contain each bare column name
 	case_insensitive_set_t index_columns;
 	case_insensitive_map_t<vector<idx_t>> col_groups; // bare name -> non-index groups
@@ -287,19 +282,9 @@ unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindIn
 	}
 	string table = StringValue::Get(input.inputs[0]);
 
-	string root;
-	auto entry = input.named_parameters.find("root");
-	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
-		root = StringValue::Get(entry->second);
-	} else {
-		Value setting_value;
-		if (!context.TryGetCurrentSetting("aligned_data_root", setting_value)) {
-			throw BinderException(
-			    "aligned_scan: no data root configured. Use aligned_scan('name', root='...') or "
-			    "SET aligned_data_root = '...'");
-		}
-		root = StringValue::Get(setting_value);
-	}
+	auto root_it = input.named_parameters.find("root");
+	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
+	string root = ResolveDataRoot(context, root_param, "aligned_scan");
 	return AlignedBindInternal(context, root, table, return_types, names);
 }
 

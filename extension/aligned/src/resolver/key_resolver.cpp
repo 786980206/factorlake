@@ -19,10 +19,7 @@ KeyResolver::KeyResolver(ClientContext &context_p, const TablePlan &plan_p) : co
 	if (plan.groups.empty()) {
 		throw IOException("Aligned table: no column groups to resolve keys against");
 	}
-	index_group = &plan.groups[0];
-	if (!StringUtil::CIEquals(index_group->manifest.group, "index")) {
-		throw IOException("Aligned table: internal error — the index group is not the first plan group");
-	}
+	index_group = &IndexGroup(plan);
 	// The partition template of the index group: exactly one single-level
 	// template (or none for an unpartitioned table). For an empty table (first
 	// write), default to "month=%Y-%m" — the mutator uses the same default.
@@ -241,22 +238,7 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 					loc.part_local_row = last_part.row_count;
 					loc.append_to_last = true;
 				} else {
-					idx_t max_index = 0;
-					for (auto &group : plan.groups) {
-						for (auto &gp : group.partitions) {
-							if (gp.key != key) {
-								continue;
-							}
-							for (idx_t k = 0; k < gp.part_count; k++) {
-								auto &pk = group.parts[gp.first_part + k];
-								if (pk.partition_index > max_index) {
-									max_index = pk.partition_index;
-								}
-							}
-							break;
-						}
-					}
-					loc.part_index = max_index + 1;
+					loc.part_index = NextPartIndexForPartition(plan, key);
 					loc.part_local_row = 0;
 					loc.append_new_part = true;
 				}
@@ -327,22 +309,7 @@ KeyLocation KeyResolver::Resolve(date_t date_value, const Value &symbol_value) {
 				loc.part_local_row = part.row_count;
 				loc.append_to_last = true;
 			} else {
-				idx_t max_index = 0;
-				for (auto &group : plan.groups) {
-					for (auto &gp : group.partitions) {
-						if (gp.key != key) {
-							continue;
-						}
-						for (idx_t k = 0; k < gp.part_count; k++) {
-							auto &pk = group.parts[gp.first_part + k];
-							if (pk.partition_index > max_index) {
-								max_index = pk.partition_index;
-							}
-						}
-						break;
-					}
-				}
-				loc.part_index = max_index + 1;
+				loc.part_index = NextPartIndexForPartition(plan, key);
 				loc.part_local_row = 0;
 				loc.append_new_part = true;
 			}

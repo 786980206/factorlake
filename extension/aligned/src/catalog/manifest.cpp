@@ -1,5 +1,6 @@
 #include "catalog/manifest.hpp"
 #include "resolver/partition_resolver.hpp"
+#include "io/parquet_io.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -153,27 +154,6 @@ static bool ExtractPartitionKey(const string &rel_path, string &key, string &err
 //! Parses a self-describing part file name ("0002-0000002048.parquet") into its
 //! partition-local index (4 digits) and total row count (10 digits). Any other
 //! name is a v6 contract violation.
-static bool ParsePartFileName(const string &name, idx_t &index, idx_t &rows) {
-	if (!StringUtil::EndsWith(name, ".parquet")) {
-		return false;
-	}
-	string base = name.substr(0, name.size() - 8); // strip ".parquet"
-	if (base.size() != 15 || base[4] != '-') {
-		return false; // 4 digits + '-' + 10 digits
-	}
-	for (idx_t i = 0; i < 15; i++) {
-		if (i == 4) {
-			continue;
-		}
-		if (base[i] < '0' || base[i] > '9') {
-			return false;
-		}
-	}
-	index = (idx_t)std::stoull(base.substr(0, 4));
-	rows = (idx_t)std::stoull(base.substr(5));
-	return true;
-}
-
 //! Appends one partition's parts (a contiguous, key-sorted run) to a group's
 //! part list. Row counts come from the FILE NAMES (no footer reads); part j's
 //! start_row = partition_start + sum of the lower-index parts' row counts. The
@@ -194,7 +174,7 @@ static void AppendPartitionParts(GroupPlan &group, const string &key, const vect
 		string file_name = slash == string::npos ? part.path : part.path.substr(slash + 1);
 		part.part_name = file_name.substr(0, file_name.size() - 8); // strip ".parquet"
 		idx_t index = 0;
-		if (!ParsePartFileName(file_name, index, part.row_count)) {
+		if (!ParsePartName(file_name, index, part.row_count)) {
 			throw IOException("Aligned table '%s' group '%s': part file '%s' does not match the self-describing "
 			                  "v6 name '{idx:04d}-{rows:10d}.parquet'",
 			                  table_name, group.manifest.group, file_name);
@@ -501,6 +481,40 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 		plan.groups.push_back(std::move(group));
 	}
 	plan.groups.insert(plan.groups.begin(), std::move(index_group));
+}
+
+string ResolveDataRoot(ClientContext &context, const Value *root_param, const string &fn_name) {
+	if (root_param && !root_param->IsNull()) {
+		return StringValue::Get(*root_param);
+	}
+	Value setting_value;
+	if (!context.TryGetCurrentSetting("aligned_data_root", setting_value)) {
+		throw BinderException(
+		    "%s: no data root configured. Pass root='...' or SET aligned_data_root = '...'", fn_name);
+	}
+	return StringValue::Get(setting_value);
+}
+
+const GroupPlan &IndexGroup(const TablePlan &plan) {
+	D_ASSERT(!plan.groups.empty());
+	return plan.groups[0];
+}
+
+idx_t NextPartIndexForPartition(const TablePlan &plan, const string &partition_key) {
+	idx_t max_index = 0;
+	for (auto &group : plan.groups) {
+		for (auto &pk : group.partitions) {
+			if (pk.key != partition_key) {
+				continue;
+			}
+			for (idx_t i = pk.first_part; i < pk.first_part + pk.part_count; i++) {
+				if (i < group.parts.size() && group.parts[i].partition_index > max_index) {
+					max_index = group.parts[i].partition_index;
+				}
+			}
+		}
+	}
+	return max_index + 1;
 }
 
 } // namespace duckdb

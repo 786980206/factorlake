@@ -342,8 +342,7 @@ void AlignedCreateTable(ClientContext &context, const string &root, const string
 				string part_dir = group_dir + "/" + part.key;
 				fs.CreateDirectoriesRecursive(part_dir);
 				// File name: 0000-{rows:10d}.parquet (matches partition row count)
-				string part_name = StringUtil::Format("0000-%010llu.parquet",
-				                                      (unsigned long long)part.row_count);
+				string part_name = FormatPartName(0, part.row_count);
 				string parquet_path = part_dir + "/" + part_name;
 				WriteNullParquet(context, fs, parquet_path, col_names, col_types, part.row_count);
 			}
@@ -415,7 +414,7 @@ void AlignedCreateTable(ClientContext &context, const string &root, const string
 
 	// For each group, create the directory + write placeholder parquet
 	string default_partition_key = DefaultPartitionKey(partition_template);
-	const string placeholder_name = "0000-0000000000.parquet";
+	const string placeholder_name = FormatPartName(0, 0);
 
 	for (auto &kv : groups_map) {
 		const string &group_name = kv.first;
@@ -494,7 +493,7 @@ void AlignedCreatePartition(ClientContext &context, const string &root, const st
 	// For each group, write a placeholder parquet in the new partition.
 	// Skip groups that somehow already have this partition (defensive — should
 	// not happen if the partition-aligned contract holds).
-	const string placeholder_name = "0000-0000000000.parquet";
+	const string placeholder_name = FormatPartName(0, 0);
 	for (auto &group : plan.groups) {
 		bool group_has_partition = false;
 		for (auto &part : group.parts) {

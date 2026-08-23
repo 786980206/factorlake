@@ -117,4 +117,23 @@ struct TablePlan {
 //! valid table — the index group is mandatory and discovered via glob.
 void BuildTablePlan(ClientContext &context, const string &root_path, const string &table_name, TablePlan &plan);
 
+//! Resolves the data root: uses the `root` named parameter if non-null,
+//! otherwise falls back to the `aligned_data_root` setting. Throws
+//! BinderException if neither is available. Shared by aligned_scan,
+//! aligned_create, aligned_compact, aligned_drop, aligned_groups, and the
+//! mutator.
+string ResolveDataRoot(ClientContext &context, const Value *root_param, const string &fn_name);
+
+//! Returns the index group (plan.groups[0]) of a table plan. The index group
+//! is always at position 0 (BuildTablePlan inserts it there). This helper
+//! centralizes the "groups[0] == index" invariant so callers don't re-discover
+//! it by name match.
+const GroupPlan &IndexGroup(const TablePlan &plan);
+
+//! Computes the next part index for a partition key across ALL groups —
+//! the maximum partition_index among all groups' partitions with that key,
+//! plus 1. Shared by key_resolver (fast/slow append paths) and the mutator
+//! (fallback when append_to_last is rejected).
+idx_t NextPartIndexForPartition(const TablePlan &plan, const string &partition_key);
+
 } // namespace duckdb

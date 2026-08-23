@@ -4,6 +4,7 @@
 #include "resolver/key_resolver.hpp"
 #include "resolver/partition_resolver.hpp"
 #include "rewriter/part_rewriter.hpp"
+#include "io/parquet_io.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -728,7 +729,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				}
 				string staged_dir = tmp_root + "/" + group.manifest.group + "/" + t.partition_key;
 				fs.CreateDirectoriesRecursive(staged_dir);
-				t.staged_path = staged_dir + "/" + StringUtil::Format("%04llu-0000000000.parquet", t.part_index);
+				t.staged_path = staged_dir + "/" + FormatPartName(t.part_index, 0);
 				PartMergeInput in;
 				in.part = t.part;
 				in.staged_path = t.staged_path;
@@ -824,7 +825,7 @@ static void ExecuteAndCommit(ClientContext &context, const MutateBindData &bind,
 				if (t.removed || t.staged_path.empty() || (t.new_row_count == 0 && !t.empty_part)) {
 					continue;
 				}
-				string final_name = StringUtil::Format("%04llu-%010llu.parquet", t.part_index, t.new_row_count);
+				string final_name = FormatPartName(t.part_index, t.new_row_count);
 				string final_path = group.group_path + "/" + t.partition_key + "/" + final_name;
 				auto slash = final_path.find_last_of("/\\");
 				fs.CreateDirectoriesRecursive(final_path.substr(0, slash));
@@ -1084,26 +1085,12 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 	// append_new_part (compute the partition-wide max index + 1, same as the
 	// resolver's original logic).
 	for (auto &key : fallback_partitions) {
-		idx_t max_index = 0;
-		for (auto &group : bind.plan.groups) {
-			for (auto &gp : group.partitions) {
-				if (gp.key != key) {
-					continue;
-				}
-				for (idx_t k = 0; k < gp.part_count; k++) {
-					auto &pk = group.parts[gp.first_part + k];
-					if (pk.partition_index > max_index) {
-						max_index = pk.partition_index;
-					}
-				}
-				break;
-			}
-		}
+		idx_t next_idx = NextPartIndexForPartition(bind.plan, key);
 		for (idx_t i = 0; i < locs.size(); i++) {
 			if (locs[i].partition_key == key && locs[i].append_to_last) {
 				locs[i].append_to_last = false;
 				locs[i].append_new_part = true;
-				locs[i].part_index = max_index + 1;
+				locs[i].part_index = next_idx;
 				locs[i].part_local_row = 0;
 			}
 		}

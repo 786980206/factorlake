@@ -77,16 +77,9 @@ unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunction
 		result->partition_template = StringValue::Get(pt->second);
 	}
 
-	auto root_entry = input.named_parameters.find("root");
-	if (root_entry != input.named_parameters.end() && !root_entry->second.IsNull()) {
-		result->root = StringValue::Get(root_entry->second);
-	} else {
-		Value setting_value;
-		if (!context.TryGetCurrentSetting("aligned_data_root", setting_value)) {
-			throw BinderException("aligned_create: no data root configured. Pass root='...' or SET aligned_data_root");
-		}
-		result->root = StringValue::Get(setting_value);
-	}
+	auto root_it = input.named_parameters.find("root");
+	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
+	result->root = ResolveDataRoot(context, root_param, "aligned_create");
 
 	result->types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
 	result->names = {"dirs_created", "files_created", "txid"};

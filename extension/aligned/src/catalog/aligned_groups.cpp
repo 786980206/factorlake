@@ -36,17 +36,9 @@ unique_ptr<FunctionData> AlignedGroupsBind(ClientContext &context, TableFunction
 	}
 	string table = StringValue::Get(input.inputs[0]);
 
-	string root;
-	auto entry = input.named_parameters.find("root");
-	if (entry != input.named_parameters.end() && !entry->second.IsNull()) {
-		root = StringValue::Get(entry->second);
-	} else {
-		Value setting_value;
-		if (!context.TryGetCurrentSetting("aligned_data_root", setting_value)) {
-			throw BinderException("aligned_groups: no data root configured. Pass root='...' or SET aligned_data_root");
-		}
-		root = StringValue::Get(setting_value);
-	}
+	auto root_it = input.named_parameters.find("root");
+	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
+	string root = ResolveDataRoot(context, root_param, "aligned_groups");
 
 	BuildTablePlan(context, root, table, result->plan);
 
