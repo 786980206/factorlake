@@ -3,794 +3,297 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlignedTable · 目录结构</title>
-<style>
-:root{
-  --bg:#f6f8fa; --panel:#ffffff; --panel2:#eef1f4; --line:#d0d7de; --line2:#e1e4e8;
-  --tx:#1f2328; --mut:#656d76; --dim:#8c959f;
-  --cyan:#0969da; --teal:#0a7b83; --org:#bc4c00; --grn:#1a7f37;
-  --prp:#8250df; --red:#cf222e; --yel:#9a6700;
-  /* per-level accent colors */
-  --l1:#0a7b83; --l1bg:rgba(10,123,131,.08); --l1bd:rgba(10,123,131,.45);  /* partition: teal */
-  --l2:#9a6700; --l2bg:rgba(154,103,0,.08); --l2bd:rgba(154,103,0,.45);  /* part: amber */
-  --l3:#8250df; --l3bg:rgba(130,80,223,.08); --l3bd:rgba(130,80,223,.45);  /* rg: purple */
-  --l4:#bc4c00; --l4bg:rgba(188,76,0,.08); --l4bd:rgba(188,76,0,.4);  /* fields: orange */
-}
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;overflow:hidden}
-body{
-  background:var(--bg);color:var(--tx);
-  font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
-}
-
-/* ===== Top bar ===== */
-.topbar{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:0 2vw;height:42px;border-bottom:1px solid var(--line);
-  background:var(--panel);flex-shrink:0;
-}
-.topbar .logo{font-size:15px;font-weight:600;color:var(--teal)}
-.topbar .logo span{color:var(--mut);font-weight:400;margin-left:8px;font-size:12px}
-.hint{color:var(--mut);font-size:12px}
-.hint b{color:var(--teal)}
-
-/* ===== Slide ===== */
-.slide{padding:2vh 3vw 3vh;height:calc(100vh - 42px);display:flex;flex-direction:column}
-
-/* ===== Table box ===== */
-.table-box{
-  border:2px solid var(--org);border-radius:14px;
-  background:var(--panel);padding:2.5vh 2vw;flex:1;
-  display:flex;flex-direction:column;position:relative;
-  box-shadow:0 4px 24px rgba(0,0,0,.06);min-height:0;
-}
-.table-box::before{
-  content:attr(data-name);position:absolute;top:-13px;left:20px;
-  background:var(--bg);padding:0 10px;font-size:1.8vh;
-  font-family:Consolas,monospace;color:var(--org);letter-spacing:.5px;
-}
-.desc{font-size:1.5vh;color:var(--mut);margin-bottom:1.2vh}
-.desc code{color:var(--teal);font-family:Consolas,monospace}
-
-/* ===== Main area ===== */
-.main-area{display:flex;flex:1;min-height:0}
-
-/* ===== Row axis ===== */
-.row-axis{
-  display:flex;flex-direction:column;align-items:center;
-  width:3.5vw;flex-shrink:0;justify-content:space-between;
-  color:var(--teal);font-size:1.3vh;font-family:Consolas,monospace;
-  padding-top:1vh;padding-bottom:1vh;
-}
-.row-axis .arrow{
-  flex:1;width:2px;background:repeating-linear-gradient(180deg,
-    var(--teal) 0,var(--teal) 6px,transparent 6px,transparent 12px);
-  margin:4px 0;
-}
-
-/* ===== Groups row ===== */
-.groups{display:flex;gap:1vw;flex:1;align-items:stretch;min-width:0}
-
-/* ===== L0: Column Group — always shows its partitions ===== */
-.group{
-  flex:1;min-width:0;border-radius:10px;
-  display:flex;flex-direction:column;
-  transition:all .3s;overflow:hidden;
-}
-.group-header{
-  padding:1.2vh 1vw;display:flex;align-items:center;justify-content:space-between;
-  font-family:Consolas,monospace;font-size:1.8vh;font-weight:600;
-  user-select:none;
-}
-.group-body{
-  display:flex;flex-direction:column;gap:.6vh;padding:0 1vw 1vh;
-  flex:1;min-height:0;overflow:auto;
-}
-
-.g-index{background:rgba(188,76,0,.06);border:1.5px solid rgba(188,76,0,.3)}
-.g-index .group-header{color:var(--org)}
-.g-factor{background:rgba(130,80,223,.05);border:1.5px solid rgba(130,80,223,.25)}
-.g-factor .group-header{color:var(--prp)}
-.g-fieldset{background:rgba(26,127,55,.05);border:1.5px solid rgba(26,127,55,.25)}
-.g-fieldset .group-header{color:var(--grn)}
-
-.group-more{
-  flex:0 0 3vw;border:1.5px dashed var(--line);background:transparent;
-  align-items:center;justify-content:center;
-}
-.group-more span{font-size:2.5vh;color:var(--dim)}
-
-/* ===== Spotlight: dim only unselected peers at the SAME level ===== */
-/* Partition selected → dim other partitions, but NOT their child parts */
-.table-box.has-sel .partition:not(.selected){opacity:.4;filter:saturate(.4)}
-/* Part selected → dim other partitions + other parts in selected partition */
-.table-box.has-sel-part .partition:not(.selected){opacity:.3;filter:saturate(.3)}
-.table-box.has-sel-part .partition.selected .part:not(.selected){opacity:.4;filter:saturate(.4)}
-/* RG selected → dim other partitions, other parts, other RGs */
-.table-box.has-sel-rg .partition:not(.selected){opacity:.25;filter:saturate(.2)}
-.table-box.has-sel-rg .partition.selected .part:not(.selected){opacity:.3;filter:saturate(.2)}
-.table-box.has-sel-rg .part.selected .rg:not(.selected){opacity:.35;filter:saturate(.3)}
-
-/* ===== L1: Partition — teal accent ===== */
-.partition{
-  border:1px solid var(--line);border-radius:8px;
-  background:rgba(0,0,0,.012);overflow:hidden;
-  transition:all .25s;
-  display:flex;flex-direction:column;min-height:0;flex-shrink:1;
-}
-.partition:not(.selected){flex:0 0 auto}
-.partition.selected{flex:1 1 0;min-height:0}
-.partition-header{cursor:pointer}
-.partition:hover{border-color:var(--mut);background:rgba(0,0,0,.025)}
-.partition.selected{
-  border:2px solid var(--l1bd);background:var(--l1bg);
-  box-shadow:0 0 12px rgba(10,123,131,.15);
-}
-.partition.selected .partition-header{color:var(--l1)}
-.partition-header{
-  padding:.7vh .8vw;display:flex;align-items:center;justify-content:space-between;
-  font-family:Consolas,monospace;font-size:1.4vh;color:var(--mut);
-  user-select:none;flex-shrink:0;
-}
-.partition-header .tag{color:var(--dim);font-size:1.2vh}
-.partition-body{display:none;flex-direction:column;gap:.6vh;padding:0 .6vw .8vh;flex:1;min-height:0;overflow:auto}
-.partition.selected .partition-body{display:flex}
-
-/* ===== L2: Part file — amber accent ===== */
-.part{
-  border:1px solid var(--line2);border-radius:6px;background:var(--panel);
-  overflow:hidden;transition:all .25s;
-  display:flex;flex-direction:column;min-height:0;flex-shrink:1;
-}
-.part:not(.selected){flex:0 0 auto}
-.part.selected{flex:1 1 0;min-height:0}
-.part:hover{border-color:var(--mut)}
-.part.selected{
-  border:2px solid var(--l2bd);background:var(--l2bg);
-  box-shadow:0 0 10px rgba(154,103,0,.15);
-}
-.part.selected .part-header{color:var(--l2)}
-.part-header{cursor:pointer}
-.part-header{
-  padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
-  font-family:Consolas,monospace;font-size:1.3vh;color:var(--tx);user-select:none;
-  flex-shrink:0;
-}
-.part-header .rows{color:var(--mut);font-size:1.1vh}
-.part-body{display:none;padding:.6vh .6vw .7vh;flex-direction:column;gap:.5vh;flex:1;min-height:0}
-.part.selected .part-body{display:flex}
-
-/* ===== L3: Row Group blocks — purple accent ===== */
-.rgs{display:flex;flex-direction:column;gap:5px;align-items:stretch;flex:1}
-.rg{
-  border:1px solid var(--line2);border-radius:6px;background:var(--panel);
-  overflow:hidden;transition:all .25s;
-  display:flex;flex-direction:column;min-height:0;flex-shrink:1;
-}
-.rg:not(.selected){flex:0 0 auto}
-.rg.selected{flex:1 1 0;min-height:0}
-.rg-label{cursor:pointer}
-.rg:hover{border-color:var(--mut)}
-.rg.selected{
-  border:2px solid var(--l3bd);background:var(--l3bg);
-  box-shadow:0 0 10px rgba(130,80,223,.15);
-}
-.rg.selected .rg-label{color:var(--l3)}
-.rg-label{
-  padding:.5vh .6vw;display:flex;align-items:center;justify-content:space-between;
-  font-family:Consolas,monospace;font-size:1.2vh;font-weight:500;
-  user-select:none;flex-shrink:0;
-}
-.rg-label .rg-meta{color:var(--dim);font-size:1vh;font-weight:400}
-.rg-A .rg-label{color:var(--cyan)}
-.rg-B .rg-label{color:var(--org)}
-.rg-C .rg-label{color:var(--grn)}
-.rg-D .rg-label{color:var(--prp)}
-.rg.selected.rg-A .rg-label,
-.rg.selected.rg-B .rg-label,
-.rg.selected.rg-C .rg-label,
-.rg.selected.rg-D .rg-label{color:var(--l3)}
-.rg-A{border-left:3px solid rgba(9,105,218,.4)}
-.rg-B{border-left:3px solid rgba(188,76,0,.4)}
-.rg-C{border-left:3px solid rgba(26,127,55,.4)}
-.rg-D{border-left:3px solid rgba(130,80,223,.4)}
-
-/* L4: Column list inside RG — horizontal row of field bars */
-.rg-body{
-  display:none;flex-direction:row;gap:4px;
-  padding:.5vh .5vw .6vh;flex:1;min-height:0;overflow-x:auto;align-items:stretch;
-}
-.rg.selected .rg-body{display:flex;flex-direction:row}
-.rg-body .col-chip{
-  flex:1 1 0;min-width:0;
-  font-family:Consolas,monospace;font-size:1.1vh;font-weight:600;
-  padding:4px 4px;border-radius:4px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  display:flex;align-items:center;justify-content:center;
-  background:var(--panel);border:1px solid var(--line2);color:var(--tx);
-  border-bottom:3px solid transparent;
-}
-.rg-body .col-chip:nth-child(6n+1){border-bottom-color:var(--cyan)}
-.rg-body .col-chip:nth-child(6n+2){border-bottom-color:var(--org)}
-.rg-body .col-chip:nth-child(6n+3){border-bottom-color:var(--grn)}
-.rg-body .col-chip:nth-child(6n+4){border-bottom-color:var(--prp)}
-.rg-body .col-chip:nth-child(6n+5){border-bottom-color:var(--yel)}
-.rg-body .col-chip:nth-child(6n+6){border-bottom-color:var(--teal)}
-
-/* ===== Empty partition ===== */
-.partition-empty{
-  padding:.5vh .8vw;text-align:center;font-size:1.2vh;
-  color:var(--dim);font-style:italic;
-}
-
-/* ===== Column axis (bottom) ===== */
-.col-axis{display:flex;gap:0;margin-top:.6vh}
-.col-axis .col-spacer{width:3.5vw;flex-shrink:0}
-.col-axis .col-block{
-  flex:1;display:flex;flex-wrap:wrap;gap:4px;align-items:center;justify-content:center;
-  padding:.8vh .5vw;border-radius:0 0 8px 8px;
-}
-.col-axis .col-block .field{
-  border-radius:4px;padding:3px 8px;font-size:1.3vh;
-  font-family:Consolas,monospace;white-space:nowrap;font-weight:500;
-}
-.col-axis .col-more{flex:0 0 3vw;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:2vh}
-</style>
+<title>AlignedTable · 目录结构与增删改查</title>
+<link rel="stylesheet" href="logic/css/common.css">
+<link rel="stylesheet" href="logic/css/crud.css">
 </head>
 <body>
 
 <div class="topbar">
-  <div class="logo">AlignedTable<span>目录结构</span></div>
-  <div class="hint">点击分区 → 文件 → Row Group → 字段 · <b>所有列组同步展开</b></div>
+  <div class="logo">AlignedTable<span>目录结构 & 增删改查全流程</span></div>
+  <div class="hint">点击导航切换页面 · <b>自动播放动画</b></div>
 </div>
 
-<div class="slide">
-  <div class="table-box" data-name="cnstk_ixday/  ·  逻辑表">
-    <div class="desc">
-      <code>_table.json</code> · last_txid: <span style="color:var(--grn)">42</span> · 仅存元数据（无 schema/无行数/无列信息）· 所有列信息从 Parquet footer 读取
-    </div>
+<div class="slide-nav">
+  <div class="nav-btn active" data-slide="0">📁 目录结构</div>
+  <div class="nav-btn" data-slide="1">✨ Create 建表</div>
+  <div class="nav-btn" data-slide="2">🔍 Read 查询</div>
+  <div class="nav-btn" data-slide="3">📝 Update 更新</div>
+  <div class="nav-btn" data-slide="4">🗑️ Delete 删除</div>
+  <div class="nav-spacer"></div>
+  <div class="hint" style="padding-right:10px">共 5 页</div>
+</div>
 
-    <div class="main-area">
-      <div class="row-axis">
-        <span>row 0</span>
-        <div class="arrow"></div>
-        <span>row N</span>
+<div class="slide-container">
+
+<!-- ===== Slide 0: Original directory structure ===== -->
+<div class="slide-page active" data-page="0">
+  <div class="slide">
+    <div class="table-box" data-name="cnstk_ixday/  ·  逻辑表">
+      <div class="desc">
+        <code>无 Manifest</code> · 所有元数据从目录结构和 Parquet footer 推导 · 所有列信息从 Parquet footer 读取
       </div>
-
-      <div class="groups">
-
-        <!-- ===== index group ===== -->
-        <div class="group g-index" data-g="index">
-          <div class="group-header"><span>🔑 index</span></div>
-          <div class="group-body">
-
-            <div class="partition" data-p="2026-07">
-              <div class="partition-header">
-                <span>month=2026-07</span>
-                <span class="tag">2 parts · 5998 行</span>
-              </div>
-              <div class="partition-body">
-                <div class="part" data-part="0000">
-                  <div class="part-header">
-                    <span>0000-0000002998.parquet</span>
-                    <span class="rows">2998 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · rows 0–16383"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B · rows 16384–2997"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div class="part" data-part="0001">
-                  <div class="part-header">
-                    <span>0001-0000003000.parquet</span>
-                    <span class="rows">3000 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B · rows 2998–4997"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-C" data-rg="C" data-tip="RG-C · rows 4998–5997"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="partition" data-p="2026-09">
-              <div class="partition-header">
-                <span>month=2026-09</span>
-                <span class="tag">1 part · 5998 行</span>
-              </div>
-              <div class="partition-body">
-                <div class="part" data-part="0000">
-                  <div class="part-header">
-                    <span>0000-0000005998.parquet</span>
-                    <span class="rows">5998 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · rows 0–16383"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B · rows 16384–32767"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-C" data-rg="C" data-tip="RG-C · rows 32768–5997"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="partition" data-p="2026-10">
-              <div class="partition-header">
-                <span style="color:var(--grn)">month=2026-10</span>
-                <span class="tag" style="color:var(--grn)">新分区 · 1 行</span>
-              </div>
-              <div class="partition-body">
-                <div class="part" data-part="0000">
-                  <div class="part-header">
-                    <span>0000-0000000001.parquet</span>
-                    <span class="rows">1 row</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-D" data-rg="D" data-tip="RG-D · 1 行（INSERT 追加）"><div class="rg-label">RG-D<span class="rg-meta">1 row · ZSTD · 5 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">date</div>
-                          <div class="col-chip">symbol</div>
-                          <div class="col-chip">close</div>
-                          <div class="col-chip">volume</div>
-                          <div class="col-chip">amount</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-          </div>
+      <div class="main-area">
+        <div class="row-axis">
+          <span>row 0</span>
+          <div class="arrow"></div>
+          <span>row N</span>
         </div>
-
-        <!-- ===== alpha101 group ===== -->
-        <div class="group g-factor" data-g="alpha101">
-          <div class="group-header"><span>🧮 alpha101</span></div>
-          <div class="group-body">
-
-            <div class="partition" data-p="2026-07">
-              <div class="partition-header">
-                <span>month=2026-07</span>
-                <span class="tag">2 parts · 5998 行</span>
-              </div>
-              <div class="partition-body">
-                <div class="part" data-part="0000">
-                  <div class="part-header">
-                    <span>0000-0000002998.parquet</span>
-                    <span class="rows">2998 rows</span>
+        <div class="groups">
+          <div class="group g-index" data-g="index">
+            <div class="group-header"><span>🔑 index</span></div>
+            <div class="group-body">
+              <div class="partition" data-p="2026-07">
+                <div class="partition-header"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
+                <div class="partition-body">
+                  <div class="part" data-part="0000">
+                    <div class="part-header"><span>0000-0000002998.parquet</span><span class="rows">2998 rows</span></div>
+                    <div class="part-body"><div class="rgs">
+                      <div class="rg rg-A" data-rg="A"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 5 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">date</div><div class="col-chip">symbol</div><div class="col-chip">close</div><div class="col-chip">volume</div><div class="col-chip">amount</div></div></div>
+                      <div class="rg rg-B" data-rg="B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 5 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">date</div><div class="col-chip">symbol</div><div class="col-chip">close</div><div class="col-chip">volume</div><div class="col-chip">amount</div></div></div>
+                    </div></div>
                   </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index part 0000 同行区间"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 101 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">alpha001</div>
-                          <div class="col-chip">alpha002</div>
-                          <div class="col-chip">…</div>
-                          <div class="col-chip">alpha101</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 101 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">alpha001</div>
-                          <div class="col-chip">alpha002</div>
-                          <div class="col-chip">…</div>
-                          <div class="col-chip">alpha101</div>
-                        </div>
-                      </div>
-                    </div>
+                  <div class="part" data-part="0001">
+                    <div class="part-header"><span>0001-0000003000.parquet</span><span class="rows">3000 rows</span></div>
+                    <div class="part-body"><div class="rgs">
+                      <div class="rg rg-B" data-rg="B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 5 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">date</div><div class="col-chip">symbol</div><div class="col-chip">close</div><div class="col-chip">volume</div><div class="col-chip">amount</div></div></div>
+                      <div class="rg rg-C" data-rg="C"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 5 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">date</div><div class="col-chip">symbol</div><div class="col-chip">close</div><div class="col-chip">volume</div><div class="col-chip">amount</div></div></div>
+                    </div></div>
                   </div>
                 </div>
-                <div class="part" data-part="0001">
-                  <div class="part-header">
-                    <span>0001-0000003000.parquet</span>
-                    <span class="rows">3000 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 101 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">alpha001</div>
-                          <div class="col-chip">alpha002</div>
-                          <div class="col-chip">…</div>
-                          <div class="col-chip">alpha101</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-C" data-rg="C" data-tip="RG-C"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 101 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">alpha001</div>
-                          <div class="col-chip">alpha002</div>
-                          <div class="col-chip">…</div>
-                          <div class="col-chip">alpha101</div>
-                        </div>
-                      </div>
-                    </div>
+              </div>
+              <div class="partition" data-p="2026-09">
+                <div class="partition-header"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
+                <div class="partition-body">
+                  <div class="part" data-part="0000">
+                    <div class="part-header"><span>0000-0000005998.parquet</span><span class="rows">5998 rows</span></div>
+                    <div class="part-body"><div class="rgs">
+                      <div class="rg rg-A" data-rg="A"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 5 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">date</div><div class="col-chip">symbol</div><div class="col-chip">close</div><div class="col-chip">volume</div><div class="col-chip">amount</div></div></div>
+                      <div class="rg rg-B" data-rg="B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 5 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">date</div><div class="col-chip">symbol</div><div class="col-chip">close</div><div class="col-chip">volume</div><div class="col-chip">amount</div></div></div>
+                      <div class="rg rg-C" data-rg="C"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 5 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">date</div><div class="col-chip">symbol</div><div class="col-chip">close</div><div class="col-chip">volume</div><div class="col-chip">amount</div></div></div>
+                    </div></div>
                   </div>
                 </div>
               </div>
             </div>
-
-            <div class="partition" data-p="2026-09">
-              <div class="partition-header">
-                <span>month=2026-09</span>
-                <span class="tag">1 part · 5998 行</span>
-              </div>
-              <div class="partition-body">
-                <div class="part" data-part="0000">
-                  <div class="part-header">
-                    <span>0000-0000005998.parquet</span>
-                    <span class="rows">5998 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index 同行区间"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 101 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">alpha001</div>
-                          <div class="col-chip">alpha002</div>
-                          <div class="col-chip">…</div>
-                          <div class="col-chip">alpha101</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 101 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">alpha001</div>
-                          <div class="col-chip">alpha002</div>
-                          <div class="col-chip">…</div>
-                          <div class="col-chip">alpha101</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-C" data-rg="C" data-tip="RG-C"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 101 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">alpha001</div>
-                          <div class="col-chip">alpha002</div>
-                          <div class="col-chip">…</div>
-                          <div class="col-chip">alpha101</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="partition" data-p="2026-10">
-              <div class="partition-header">
-                <span>month=2026-10</span>
-                <span class="tag">无 part · NULL</span>
-              </div>
-              <div class="partition-body">
-                <div class="partition-empty">— 该组未写入此分区 —</div>
-              </div>
-            </div>
-
           </div>
-        </div>
-
-        <!-- ===== ma group ===== -->
-        <div class="group g-fieldset" data-g="ma">
-          <div class="group-header"><span>📐 ma</span></div>
-          <div class="group-body">
-
-            <div class="partition" data-p="2026-07">
-              <div class="partition-header">
-                <span>month=2026-07</span>
-                <span class="tag">2 parts · 5998 行</span>
-              </div>
-              <div class="partition-body">
-                <div class="part" data-part="0000">
-                  <div class="part-header">
-                    <span>0000-0000002998.parquet</span>
-                    <span class="rows">2998 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index 同行区间"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 6 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">ma5</div>
-                          <div class="col-chip">ma10</div>
-                          <div class="col-chip">ma20</div>
-                          <div class="col-chip">ma60</div>
-                          <div class="col-chip">ma120</div>
-                          <div class="col-chip">ma250</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 6 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">ma5</div>
-                          <div class="col-chip">ma10</div>
-                          <div class="col-chip">ma20</div>
-                          <div class="col-chip">ma60</div>
-                          <div class="col-chip">ma120</div>
-                          <div class="col-chip">ma250</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div class="part" data-part="0001">
-                  <div class="part-header">
-                    <span>0001-0000003000.parquet</span>
-                    <span class="rows">3000 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 6 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">ma5</div>
-                          <div class="col-chip">ma10</div>
-                          <div class="col-chip">ma20</div>
-                          <div class="col-chip">ma60</div>
-                          <div class="col-chip">ma120</div>
-                          <div class="col-chip">ma250</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-C" data-rg="C" data-tip="RG-C"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 6 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">ma5</div>
-                          <div class="col-chip">ma10</div>
-                          <div class="col-chip">ma20</div>
-                          <div class="col-chip">ma60</div>
-                          <div class="col-chip">ma120</div>
-                          <div class="col-chip">ma250</div>
-                        </div>
-                      </div>
-                    </div>
+          <div class="group g-factor" data-g="alpha101">
+            <div class="group-header"><span>🧮 alpha101</span></div>
+            <div class="group-body">
+              <div class="partition" data-p="2026-07">
+                <div class="partition-header"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
+                <div class="partition-body">
+                  <div class="part" data-part="0000">
+                    <div class="part-header"><span>0000-0000002998.parquet</span><span class="rows">2998 rows</span></div>
+                    <div class="part-body"><div class="rgs">
+                      <div class="rg rg-A" data-rg="A"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · 101 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">alpha001</div><div class="col-chip">alpha002</div><div class="col-chip">…</div><div class="col-chip">alpha101</div></div></div>
+                      <div class="rg rg-B" data-rg="B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · 101 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">alpha001</div><div class="col-chip">alpha002</div><div class="col-chip">…</div><div class="col-chip">alpha101</div></div></div>
+                    </div></div>
                   </div>
                 </div>
               </div>
-            </div>
-
-            <div class="partition" data-p="2026-09">
-              <div class="partition-header">
-                <span>month=2026-09</span>
-                <span class="tag">1 part · 5998 行</span>
-              </div>
-              <div class="partition-body">
-                <div class="part" data-part="0000">
-                  <div class="part-header">
-                    <span>0000-0000005998.parquet</span>
-                    <span class="rows">5998 rows</span>
-                  </div>
-                  <div class="part-body">
-                    <div class="rgs">
-                      <div class="rg rg-A" data-rg="A" data-tip="RG-A · 与 index 同行区间"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · ZSTD · 6 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">ma5</div>
-                          <div class="col-chip">ma10</div>
-                          <div class="col-chip">ma20</div>
-                          <div class="col-chip">ma60</div>
-                          <div class="col-chip">ma120</div>
-                          <div class="col-chip">ma250</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-B" data-rg="B" data-tip="RG-B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · ZSTD · 6 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">ma5</div>
-                          <div class="col-chip">ma10</div>
-                          <div class="col-chip">ma20</div>
-                          <div class="col-chip">ma60</div>
-                          <div class="col-chip">ma120</div>
-                          <div class="col-chip">ma250</div>
-                        </div>
-                      </div>
-                      <div class="rg rg-C" data-rg="C" data-tip="RG-C"><div class="rg-label">RG-C<span class="rg-meta">1000 rows · ZSTD · 6 cols</span></div>
-                        <div class="rg-body">
-                          <div class="col-chip">ma5</div>
-                          <div class="col-chip">ma10</div>
-                          <div class="col-chip">ma20</div>
-                          <div class="col-chip">ma60</div>
-                          <div class="col-chip">ma120</div>
-                          <div class="col-chip">ma250</div>
-                        </div>
-                      </div>
-                    </div>
+              <div class="partition" data-p="2026-09">
+                <div class="partition-header"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
+                <div class="partition-body">
+                  <div class="part" data-part="0000">
+                    <div class="part-header"><span>0000-0000005998.parquet</span><span class="rows">5998 rows</span></div>
+                    <div class="part-body"><div class="rgs">
+                      <div class="rg rg-A" data-rg="A"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · 101 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">alpha001</div><div class="col-chip">alpha002</div><div class="col-chip">…</div><div class="col-chip">alpha101</div></div></div>
+                      <div class="rg rg-B" data-rg="B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · 101 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">alpha001</div><div class="col-chip">alpha002</div><div class="col-chip">…</div><div class="col-chip">alpha101</div></div></div>
+                    </div></div>
                   </div>
                 </div>
               </div>
-            </div>
-
-            <div class="partition" data-p="2026-10">
-              <div class="partition-header">
-                <span>month=2026-10</span>
-                <span class="tag">无 part · NULL</span>
-              </div>
-              <div class="partition-body">
-                <div class="partition-empty">— 未写入 —</div>
+              <div class="partition" data-p="2026-10">
+                <div class="partition-header"><span>month=2026-10</span><span class="tag">无 part · NULL</span></div>
+                <div class="partition-body"><div class="partition-empty">— 该组未写入此分区 —</div></div>
               </div>
             </div>
-
           </div>
+          <div class="group g-fieldset" data-g="ma">
+            <div class="group-header"><span>📐 ma</span></div>
+            <div class="group-body">
+              <div class="partition" data-p="2026-07">
+                <div class="partition-header"><span>month=2026-07</span><span class="tag">2 parts · 5998 行</span></div>
+                <div class="partition-body">
+                  <div class="part" data-part="0000">
+                    <div class="part-header"><span>0000-0000002998.parquet</span><span class="rows">2998 rows</span></div>
+                    <div class="part-body"><div class="rgs">
+                      <div class="rg rg-A" data-rg="A"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · 6 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">ma5</div><div class="col-chip">ma10</div><div class="col-chip">ma20</div><div class="col-chip">ma60</div><div class="col-chip">ma120</div><div class="col-chip">ma250</div></div></div>
+                      <div class="rg rg-B" data-rg="B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · 6 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">ma5</div><div class="col-chip">ma10</div><div class="col-chip">ma20</div><div class="col-chip">ma60</div><div class="col-chip">ma120</div><div class="col-chip">ma250</div></div></div>
+                    </div></div>
+                  </div>
+                </div>
+              </div>
+              <div class="partition" data-p="2026-09">
+                <div class="partition-header"><span>month=2026-09</span><span class="tag">1 part · 5998 行</span></div>
+                <div class="partition-body">
+                  <div class="part" data-part="0000">
+                    <div class="part-header"><span>0000-0000005998.parquet</span><span class="rows">5998 rows</span></div>
+                    <div class="part-body"><div class="rgs">
+                      <div class="rg rg-A" data-rg="A"><div class="rg-label">RG-A<span class="rg-meta">16384 rows · 6 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">ma5</div><div class="col-chip">ma10</div><div class="col-chip">ma20</div><div class="col-chip">ma60</div><div class="col-chip">ma120</div><div class="col-chip">ma250</div></div></div>
+                      <div class="rg rg-B" data-rg="B"><div class="rg-label">RG-B<span class="rg-meta">13614 rows · 6 cols</span></div>
+                        <div class="rg-body"><div class="col-chip">ma5</div><div class="col-chip">ma10</div><div class="col-chip">ma20</div><div class="col-chip">ma60</div><div class="col-chip">ma120</div><div class="col-chip">ma250</div></div></div>
+                    </div></div>
+                  </div>
+                </div>
+              </div>
+              <div class="partition" data-p="2026-10">
+                <div class="partition-header"><span>month=2026-10</span><span class="tag">无 part · NULL</span></div>
+                <div class="partition-body"><div class="partition-empty">— 未写入 —</div></div>
+              </div>
+            </div>
+          </div>
+          <div class="group group-more"><span>⋯</span></div>
         </div>
-
-        <!-- ===== more groups ===== -->
-        <div class="group group-more"><span>⋯</span></div>
-
+      </div>
+      <div class="col-axis">
+        <div class="col-spacer"></div>
+        <div class="col-block" style="background:rgba(188,76,0,.05);border-top:2px solid var(--org)">
+          <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">date</span>
+          <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">symbol</span>
+          <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">close</span>
+          <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">volume</span>
+          <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">amount</span>
+        </div>
+        <div class="col-block" style="background:rgba(130,80,223,.04);border-top:2px solid var(--prp)">
+          <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha001</span>
+          <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha002</span>
+          <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">…</span>
+          <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha101</span>
+        </div>
+        <div class="col-block" style="background:rgba(26,127,55,.04);border-top:2px solid var(--grn)">
+          <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma5</span>
+          <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma10</span>
+          <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma20</span>
+          <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma60</span>
+          <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma120</span>
+          <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma250</span>
+        </div>
+        <div class="col-more">⋯</div>
       </div>
     </div>
-
-    <!-- ===== Column axis (bottom) ===== -->
-    <div class="col-axis">
-      <div class="col-spacer"></div>
-      <div class="col-block" style="background:rgba(188,76,0,.05);border-top:2px solid var(--org)">
-        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">date</span>
-        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">symbol</span>
-        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">close</span>
-        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">volume</span>
-        <span class="field" style="background:rgba(188,76,0,.12);color:var(--org);border:1px solid rgba(188,76,0,.3)">amount</span>
-      </div>
-      <div class="col-block" style="background:rgba(130,80,223,.04);border-top:2px solid var(--prp)">
-        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha001</span>
-        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha002</span>
-        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">…</span>
-        <span class="field" style="background:rgba(130,80,223,.1);color:var(--prp);border:1px solid rgba(130,80,223,.25)">alpha101</span>
-      </div>
-      <div class="col-block" style="background:rgba(26,127,55,.04);border-top:2px solid var(--grn)">
-        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma5</span>
-        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma10</span>
-        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma20</span>
-        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma60</span>
-        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma120</span>
-        <span class="field" style="background:rgba(26,127,55,.1);color:var(--grn);border:1px solid rgba(26,127,55,.25)">ma250</span>
-      </div>
-      <div class="col-more">⋯</div>
-    </div>
-
   </div>
 </div>
 
-<script>
-"use strict";
-(function(){
-  var tableBox = document.querySelector(".table-box");
+<!-- ===== Slide 1: CREATE ===== -->
+<div class="slide-page" data-page="1">
+  <div class="crud-slide">
+    <div class="crud-title"><span class="badge create">CREATE</span> aligned_create — 建表 / 扩展列组</div>
+    <div class="crud-desc">
+      <code>aligned_create(table, group, columns, root=..., partition_template=...)</code> — 建表时创建 index 列组 + 默认分区占位 parquet（0 行，footer 携带 schema）。
+      扩展列组时为每个已有分区写 N 行全 NULL 占位 parquet，满足分区对齐契约。分区模板默认 <code>month=%Y-%m</code>。
+    </div>
+    <div class="anim-legend">
+      <div class="lg-item"><div class="lg-dot index"></div>index 列组（Key 列）</div>
+      <div class="lg-item"><div class="lg-dot factor"></div>factor 列组</div>
+      <div class="lg-item"><div class="lg-dot ma"></div>fieldset 列组</div>
+      <div class="lg-item"><div class="lg-dot new"></div>新建</div>
+      <div class="lg-item"><div class="lg-dot partition"></div>分区目录</div>
+    </div>
+    <div class="anim-controls">
+      <button class="primary" onclick="playCRUD('create')">▶ 播放</button>
+      <button onclick="resetCRUD('create')">↺ 重置</button>
+      <span class="step-display" id="create-step">步骤 0 / 5</span>
+    </div>
+    <div class="anim-canvas" id="create-canvas"></div>
+  </div>
+</div>
 
-  // Click partition HEADER → toggle independently (multi-select)
-  document.querySelectorAll(".partition-header").forEach(function(h){
-    h.addEventListener("click", function(e){
-      e.stopPropagation();
-      var p = h.closest(".partition");
-      var key = p.getAttribute("data-p");
+<!-- ===== Slide 2: READ ===== -->
+<div class="slide-page" data-page="2">
+  <div class="crud-slide">
+    <div class="crud-title"><span class="badge read">READ</span> aligned_scan — 多列组并行扫描</div>
+    <div class="crud-desc">
+      <code>SELECT date, symbol, close, alpha001, ma20 FROM aligned_scan('cnstk_ixday') WHERE date = '2026-09-01'</code> —
+      只打开被选中的列组，Parquet 内只读被选中的列。多个 Parquet Reader 的 Vector 直接组装进同一个 DataChunk，不做 JOIN。
+      分区裁剪跳过不匹配的分区，Row Group 裁剪跳过不匹配的 RG。
+    </div>
+    <div class="anim-legend">
+      <div class="lg-item"><div class="lg-dot index"></div>index 列组</div>
+      <div class="lg-item"><div class="lg-dot factor"></div>factor 列组</div>
+      <div class="lg-item"><div class="lg-dot ma"></div>fieldset 列组</div>
+      <div class="lg-item"><div class="lg-dot" style="background:rgba(9,105,218,.15);border-color:var(--cyan)"></div>命中</div>
+      <div class="lg-item"><div class="lg-dot" style="background:var(--panel2);border-color:var(--line2)"></div>裁剪跳过</div>
+    </div>
+    <div class="anim-controls">
+      <button class="primary" onclick="playCRUD('read')">▶ 播放</button>
+      <button onclick="resetCRUD('read')">↺ 重置</button>
+      <span class="step-display" id="read-step">步骤 0 / 6</span>
+    </div>
+    <div class="anim-canvas" id="read-canvas"></div>
+  </div>
+</div>
 
-      // Toggle all groups' same-data-p partitions together
-      var isOn = p.classList.contains("selected");
-      document.querySelectorAll('.partition[data-p="'+key+'"]').forEach(function(x){
-        if (isOn) x.classList.remove("selected");
-        else x.classList.add("selected");
-      });
-      // When collapsing a partition, also collapse its child parts/RGs
-      if (isOn) {
-        document.querySelectorAll('.partition[data-p="'+key+'"] .part.selected').forEach(function(x){
-          x.classList.remove("selected");
-        });
-        document.querySelectorAll('.partition[data-p="'+key+'"] .rg.selected').forEach(function(x){
-          x.classList.remove("selected");
-        });
-      }
-      updateSpotlight();
-    });
-  });
+<!-- ===== Slide 3: UPDATE ===== -->
+<div class="slide-page" data-page="3">
+  <div class="crud-slide">
+    <div class="crud-title"><span class="badge update">UPDATE</span> INSERT / UPDATE — 按 (symbol, date) 主键写入</div>
+    <div class="crud-desc">
+      <code>INSERT INTO al.cnstk_ixday VALUES ('600000', DATE '2026-10-15', 12.5, ...)</code> —
+      按 (symbol, date) 主键定位：新行追加到对应分区的末 part（若末 part &lt; 1M 行则原地追加重写，否则新建 part）；
+      已有行则原地更新。只重写受影响的 part，其他 part 不动。两阶段提交：先写 _tmp/ 再原子 move。
+    </div>
+    <div class="anim-legend">
+      <div class="lg-item"><div class="lg-dot index"></div>index 列组</div>
+      <div class="lg-item"><div class="lg-dot update"></div>正在重写</div>
+      <div class="lg-item"><div class="lg-dot new"></div>新建 part</div>
+      <div class="lg-item"><div class="lg-dot" style="background:rgba(26,127,55,.12);border-color:var(--grn)"></div>提交完成</div>
+    </div>
+    <div class="anim-controls">
+      <button class="primary" onclick="playCRUD('update')">▶ 播放</button>
+      <button onclick="resetCRUD('update')">↺ 重置</button>
+      <span class="step-display" id="update-step">步骤 0 / 7</span>
+    </div>
+    <div class="anim-canvas" id="update-canvas"></div>
+  </div>
+</div>
 
-  // Click part HEADER → toggle independently (multi-select)
-  document.querySelectorAll(".part-header").forEach(function(h){
-    h.addEventListener("click", function(e){
-      e.stopPropagation();
-      var pt = h.closest(".part");
-      var pKey = pt.closest(".partition").getAttribute("data-p");
-      var partKey = pt.getAttribute("data-part");
+<!-- ===== Slide 4: DELETE ===== -->
+<div class="slide-page" data-page="4">
+  <div class="crud-slide">
+    <div class="crud-title"><span class="badge delete">DELETE</span> aligned_drop / DELETE — 删除列组或行</div>
+    <div class="crud-desc">
+      <code>aligned_drop(table, 'factor/alpha')</code> 删除单个列组目录树；<code>aligned_drop(table, 'index')</code> 删除整张表。
+      标准 <code>DELETE FROM al.cnstk_ixday WHERE date = '2026-07-01'</code> 按主键删除行：删空分区 → 整分区移除，删空中间 part → 原地重写为 0 行空文件保持索引连续。
+    </div>
+    <div class="anim-legend">
+      <div class="lg-item"><div class="lg-dot index"></div>index 列组</div>
+      <div class="lg-item"><div class="lg-dot factor"></div>factor 列组</div>
+      <div class="lg-item"><div class="lg-dot delete"></div>正在删除</div>
+      <div class="lg-item"><div class="lg-dot" style="background:var(--panel2);border-color:var(--line2);opacity:.4"></div>已删除</div>
+    </div>
+    <div class="anim-controls">
+      <button class="primary" onclick="playCRUD('delete')">▶ 播放</button>
+      <button onclick="resetCRUD('delete')">↺ 重置</button>
+      <span class="step-display" id="delete-step">步骤 0 / 6</span>
+    </div>
+    <div class="anim-canvas" id="delete-canvas"></div>
+  </div>
+</div>
 
-      // Ensure parent partition is selected
-      if (!pt.closest(".partition").classList.contains("selected")) {
-        document.querySelectorAll('.partition[data-p="'+pKey+'"]').forEach(function(x){
-          x.classList.add("selected");
-        });
-      }
+</div><!-- slide-container -->
 
-      // Toggle all groups' same part together
-      var isOn = pt.classList.contains("selected");
-      document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"]').forEach(function(x){
-        if (isOn) x.classList.remove("selected");
-        else x.classList.add("selected");
-      });
-      // When collapsing a part, also collapse its child RGs
-      if (isOn) {
-        document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"] .rg.selected').forEach(function(x){
-          x.classList.remove("selected");
-        });
-      }
-      updateSpotlight();
-    });
-  });
-
-  // Click RG LABEL → toggle independently, synced only within same partition+part
-  document.querySelectorAll(".rg-label").forEach(function(h){
-    h.addEventListener("click", function(e){
-      e.stopPropagation();
-      var rg = h.closest(".rg");
-      var rgKey = rg.getAttribute("data-rg");
-      var pKey = rg.closest(".partition").getAttribute("data-p");
-      var partKey = rg.closest(".part").getAttribute("data-part");
-
-      // Toggle only RGs in the SAME partition + SAME part across all groups
-      var isOn = rg.classList.contains("selected");
-      document.querySelectorAll('.partition[data-p="'+pKey+'"] .part[data-part="'+partKey+'"] .rg[data-rg="'+rgKey+'"]').forEach(function(x){
-        if (isOn) x.classList.remove("selected");
-        else x.classList.add("selected");
-      });
-      updateSpotlight();
-    });
-  });
-
-  function updateSpotlight(){
-    var hasP = document.querySelector(".partition.selected");
-    var hasPt = document.querySelector(".part.selected");
-    var hasRG = document.querySelector(".rg.selected");
-    tableBox.classList.remove("has-sel","has-sel-part","has-sel-rg");
-    if (hasRG) tableBox.classList.add("has-sel","has-sel-part","has-sel-rg");
-    else if (hasPt) tableBox.classList.add("has-sel","has-sel-part");
-    else if (hasP) tableBox.classList.add("has-sel");
-  }
-})();
-</script>
+<script src="logic/js/anim.js"></script>
+<script src="logic/js/nav.js"></script>
+<script src="logic/js/slide0.js"></script>
+<script src="logic/js/create.js"></script>
+<script src="logic/js/read.js"></script>
+<script src="logic/js/update.js"></script>
+<script src="logic/js/delete.js"></script>
 </body>
 </html>
