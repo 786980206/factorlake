@@ -247,7 +247,80 @@ struct MergeWriter {
 
 } // namespace
 
-idx_t RewritePart(ClientContext &context, const PartMergeInput &input) {
+//! Fast path: write a new part entirely from the update buffer, skipping the
+//! read-modify-write merge. Used when every row of the old part is overwritten
+//! (full overwrite scenario). The update buffer has [position, ...mapped_cols]
+//! and the output has [col_names...] where mapped columns get values and
+//! unmapped columns get NULL.
+static idx_t RewritePartFullOverwrite(ClientContext &context, const PartMergeInput &input) {
+	auto &fs = FileSystem::GetFileSystem(context);
+
+	// Map update columns to output positions (same as MergeWriter).
+	vector<idx_t> update_col_pos(input.update_cols.size(), DConstants::INVALID_INDEX);
+	for (idx_t i = 0; i < input.update_cols.size(); i++) {
+		for (idx_t c = 0; c < input.col_names.size(); c++) {
+			if (StringUtil::CIEquals(input.col_names[c], input.update_cols[i])) {
+				update_col_pos[i] = c;
+				break;
+			}
+		}
+	}
+
+	auto writer = CreateParquetWriter(context, fs, input.staged_path, input.col_names, input.col_types);
+	unique_ptr<ParquetWriteTransformData> transform;
+
+	// Buffer for batch output.
+	ColumnDataCollection buffer(context, input.col_types);
+	ColumnDataAppendState append_state;
+	buffer.InitializeAppend(append_state);
+
+	DataChunk out_chunk;
+	out_chunk.Initialize(context, input.col_types);
+
+	// Scan the update buffer.
+	ColumnDataScanState scan;
+	input.updates->InitializeScan(scan);
+	DataChunk upd_chunk;
+	input.updates->InitializeScanChunk(upd_chunk);
+
+	idx_t emitted = 0;
+	while (input.updates->Scan(scan, upd_chunk)) {
+		if (upd_chunk.size() == 0) {
+			continue;
+		}
+		idx_t n = upd_chunk.size();
+		out_chunk.Reset();
+		out_chunk.SetCardinality(n);
+		// Initialize all columns to NULL.
+		for (idx_t c = 0; c < input.col_types.size(); c++) {
+			auto &vec = out_chunk.data[c];
+			auto &validity = FlatVector::Validity(vec);
+			validity.SetAllInvalid(n);
+		}
+		// Copy mapped columns from the update buffer (columns 1..N).
+		// The update buffer layout: [position (BIGINT), val0, val1, ...].
+		for (idx_t i = 0; i < input.update_cols.size(); i++) {
+			if (update_col_pos[i] == DConstants::INVALID_INDEX) {
+				continue;
+			}
+			VectorOperations::Copy(upd_chunk.data[1 + i], out_chunk.data[update_col_pos[i]],
+			                       n, 0, 0);
+		}
+		buffer.Append(append_state, out_chunk);
+		emitted += n;
+		if (buffer.Count() >= input.rgs) {
+			writer->Flush(buffer, transform);
+			buffer.Reset();
+			buffer.InitializeAppend(append_state);
+		}
+	}
+
+	writer->Flush(buffer, transform);
+	writer->Finalize();
+	return emitted;
+}
+
+	idx_t RewritePart(ClientContext &context, const PartMergeInput &input) {
 	// Validate the buffer shapes ([pos, ...mapped cols]).
 	if (input.inserts && input.insert_cols.size() != input.inserts->Types().size() - 1) {
 		throw IOException("Aligned table: internal error — insert buffer has %llu value columns, mapping declares "
@@ -258,6 +331,20 @@ idx_t RewritePart(ClientContext &context, const PartMergeInput &input) {
 		throw IOException("Aligned table: internal error — update buffer has %llu value columns, mapping declares "
 		                  "%llu",
 		                  input.updates->Types().size() - 1, input.update_cols.size());
+	}
+
+	// Fast path: full overwrite. If the update buffer covers every row of the
+	// existing part (same count, no inserts, no deletes), we can write the new
+	// part directly from the update buffer — no need to read the old part data.
+	// This is the critical optimization for the "full table rewrite" scenario:
+	// all keys are updates, all rows in every part are overwritten.
+	if (input.part && input.updates && !input.inserts &&
+	    (!input.deletes || input.deletes->empty())) {
+		idx_t old_count = input.part->row_count;
+		if (input.updates->Count() == old_count) {
+			// Full overwrite: skip old data read entirely.
+			return RewritePartFullOverwrite(context, input);
+		}
 	}
 
 	MergeWriter mw(context, input);
