@@ -239,9 +239,12 @@ static ColumnDataCollection ResolveKeysForRowids(ClientContext &context, const s
 		}
 		UnifiedVectorFormat sv, dv;
 		scan_chunk.data[0].ToUnifiedFormat(scan_chunk.size(), sv); // symbol
-		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), dv); // date
+		scan_chunk.data[1].ToUnifiedFormat(scan_chunk.size(), dv); // date/timestamp
 		auto sptr = UnifiedVectorFormat::GetData<string_t>(sv);
-		auto dptr = UnifiedVectorFormat::GetData<int32_t>(dv);     // DATE = int32 days since epoch
+		// The date column may be DATE (int32) or TIMESTAMP (int64).
+		bool is_timestamp = scan_chunk.data[1].GetType().id() == LogicalTypeId::TIMESTAMP;
+		auto dptr32 = is_timestamp ? nullptr : UnifiedVectorFormat::GetData<int32_t>(dv);
+		auto dptr64 = is_timestamp ? UnifiedVectorFormat::GetData<int64_t>(dv) : nullptr;
 		idx_t out_n = 0;
 		for (idx_t i = 0; i < scan_chunk.size(); i++) {
 			int64_t rid = abs_row + static_cast<int64_t>(i);
@@ -258,7 +261,11 @@ static ColumnDataCollection ResolveKeysForRowids(ClientContext &context, const s
 				auto di = dv.sel->get_index(i);
 				out_chunk.SetValue(0, out_n, Value::BIGINT(rid));            // rowid
 				out_chunk.SetValue(1, out_n, Value(sptr[si].GetString()));   // symbol
-				out_chunk.SetValue(2, out_n, Value::DATE(date_t(dptr[di]))); // date
+				if (is_timestamp) {
+					out_chunk.SetValue(2, out_n, Value::TIMESTAMP(timestamp_t(dptr64[di])));
+				} else {
+					out_chunk.SetValue(2, out_n, Value::DATE(date_t(dptr32[di])));
+				}
 				out_n++;
 			}
 		}
@@ -540,11 +547,22 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 
 		// staged schema: <symbol_col>, <date_col>, then set columns in
 		// set_names order (v8). The key column NAMES come from the table plan.
+		// The date column type must match the index group's actual type
+		// (DATE or TIMESTAMP) — using a hardcoded DATE would truncate
+		// TIMESTAMP keys to midnight.
+		LogicalType date_type = LogicalType::DATE;
+		auto &index_gp = plan.groups[0];
+		for (idx_t ci = 0; ci < index_gp.column_order.size(); ci++) {
+			if (StringUtil::CIEquals(index_gp.column_order[ci], date_name)) {
+				date_type = index_gp.schema_types[ci];
+				break;
+			}
+		}
 		vector<LogicalType> staged_types;
 		vector<string> staged_names;
 		staged_types.push_back(LogicalType::VARCHAR);
 		staged_names.push_back(symbol_name);
-		staged_types.push_back(LogicalType::DATE);
+		staged_types.push_back(date_type);
 		staged_names.push_back(date_name);
 		for (auto &expr : expressions) {
 			staged_types.push_back(expr->return_type);
@@ -602,10 +620,14 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 
 		// Upsert mapping (v8): index:<symbol_col>,<date_col> (+ any
 		// index-group set columns); each non-index set group gets its own
-		// mapping segment. The key column names come from the table plan.
+		// mapping segment with comma-separated columns. The key column
+		// names come from the table plan. Columns in the same group must
+		// be merged into one segment (e.g. "g1/data:val,info"), not
+		// repeated as separate segments.
 		string index_cols = symbol_name + "," + date_name;
-		string index_prefix = "index:" + index_cols;
-		string mapping = index_prefix;
+		// Collect non-index set columns per group (preserve first-seen order).
+		vector<string> group_order;
+		case_insensitive_map_t<vector<string>> group_cols;
 		for (idx_t i = 0; i < set_names.size(); i++) {
 			if (set_groups[i].empty()) {
 				continue;
@@ -613,11 +635,21 @@ SinkFinalizeType PhysicalAlignedUpdate::Finalize(Pipeline &pipeline, Event &even
 			if (set_groups[i] == "index") {
 				index_cols += "," + set_names[i];
 			} else {
-				mapping += ";" + set_groups[i] + ":" + set_names[i];
+				if (group_cols.find(set_groups[i]) == group_cols.end()) {
+					group_order.push_back(set_groups[i]);
+				}
+				group_cols[set_groups[i]].push_back(set_names[i]);
 			}
 		}
-		if (index_cols != symbol_name + "," + date_name) {
-			mapping = "index:" + index_cols + mapping.substr(index_prefix.size());
+		string mapping = "index:" + index_cols;
+		for (auto &grp : group_order) {
+			mapping += ";" + grp + ":";
+			for (idx_t j = 0; j < group_cols[grp].size(); j++) {
+				if (j > 0) {
+					mapping += ",";
+				}
+				mapping += group_cols[grp][j];
+			}
 		}
 
 		auto result = AlignedUpsertFromCollection(context, table, root, mapping, staged_coll, staged_names);
