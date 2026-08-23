@@ -264,17 +264,7 @@ idx_t RewritePart(ClientContext &context, const PartMergeInput &input) {
 
 	// Open the old part (fresh part: no old rows).
 	if (input.part) {
-		mw.old_reader = make_uniq<ParquetReader>(context, OpenFileInfo(input.part->path), ParquetOptions(context));
-		for (idx_t i = 0; i < mw.old_reader->columns.size(); i++) {
-			mw.old_reader->column_ids.push_back(MultiFileLocalColumnId(i));
-		}
-		vector<PartitionStatistics> rg_stats;
-		mw.old_reader->GetPartitionStats(rg_stats);
-		vector<idx_t> all_rgs;
-		for (idx_t i = 0; i < rg_stats.size(); i++) {
-			all_rgs.push_back(i);
-		}
-		mw.old_reader->InitializeScan(context, mw.old_scan, all_rgs);
+		mw.old_reader = OpenPartReaderAllColumns(context, input.part->path, mw.old_scan);
 		mw.old_chunk.Initialize(context, input.col_types);
 		mw.old_count = mw.old_reader->NumRows();
 		// v6 defensive check: the footer row count must match the

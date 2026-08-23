@@ -1,6 +1,10 @@
 #include "io/parquet_io.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/parallel/async_result.hpp"
+#include "parquet_reader.hpp"
 #include "parquet_writer.hpp"
 #include "parquet_field_id.hpp"
 #include "parquet_shredding.hpp"
@@ -44,6 +48,111 @@ bool ParsePartName(const string &name, idx_t &index, idx_t &rows) {
 	index = (idx_t)std::stoull(base.substr(0, 4));
 	rows = (idx_t)std::stoull(base.substr(5));
 	return true;
+}
+
+void WriteEmptyParquet(ClientContext &context, FileSystem &fs, const string &path,
+                       const vector<string> &col_names, const vector<LogicalType> &col_types) {
+	auto writer = CreateParquetWriter(context, fs, path, col_names, col_types);
+	auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
+	unique_ptr<ParquetWriteTransformData> transform;
+	writer->Flush(*buffer, transform);
+	writer->Finalize();
+}
+
+void WriteNullParquet(ClientContext &context, FileSystem &fs, const string &path,
+                      const vector<string> &col_names, const vector<LogicalType> &col_types,
+                      idx_t row_count) {
+	auto writer = CreateParquetWriter(context, fs, path, col_names, col_types);
+
+	auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
+	ColumnDataAppendState append_state;
+	buffer->InitializeAppend(append_state);
+
+	DataChunk chunk;
+	chunk.Initialize(context, col_types);
+	idx_t remaining = row_count;
+	while (remaining > 0) {
+		idx_t batch = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
+		chunk.Reset();
+		chunk.SetCardinality(batch);
+		for (idx_t c = 0; c < col_types.size(); c++) {
+			FlatVector::Validity(chunk.data[c]).SetAllInvalid(batch);
+		}
+		buffer->Append(append_state, chunk);
+		remaining -= batch;
+	}
+
+	unique_ptr<ParquetWriteTransformData> transform;
+	writer->Flush(*buffer, transform);
+	writer->Finalize();
+}
+
+unique_ptr<ParquetReader> OpenPartReaderAllColumns(ClientContext &context, const string &path,
+                                                    ParquetReaderScanState &scan_state) {
+	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
+	for (idx_t i = 0; i < reader->columns.size(); i++) {
+		reader->column_ids.push_back(MultiFileLocalColumnId(i));
+	}
+	vector<PartitionStatistics> rg_stats;
+	reader->GetPartitionStats(rg_stats);
+	vector<idx_t> all_rgs;
+	for (idx_t i = 0; i < rg_stats.size(); i++) {
+		all_rgs.push_back(i);
+	}
+	reader->InitializeScan(context, scan_state, all_rgs);
+	return reader;
+}
+
+unique_ptr<ParquetReader> OpenPartReaderNamedColumns(ClientContext &context, const string &path,
+                                                      const vector<string> &col_names,
+                                                      vector<LogicalType> &out_types,
+                                                      ParquetReaderScanState &scan_state) {
+	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
+	for (auto &name : col_names) {
+		idx_t pos = DConstants::INVALID_INDEX;
+		for (idx_t c = 0; c < reader->columns.size(); c++) {
+			if (StringUtil::CIEquals(reader->columns[c].name, name)) {
+				pos = c;
+				break;
+			}
+		}
+		if (pos == DConstants::INVALID_INDEX) {
+			throw IOException("Aligned table: column '%s' not found in '%s'", name, path);
+		}
+		out_types.push_back(reader->columns[pos].type);
+		reader->column_ids.push_back(MultiFileLocalColumnId(pos));
+	}
+	vector<PartitionStatistics> rg_stats;
+	reader->GetPartitionStats(rg_stats);
+	vector<idx_t> all_rgs;
+	for (idx_t i = 0; i < rg_stats.size(); i++) {
+		all_rgs.push_back(i);
+	}
+	reader->InitializeScan(context, scan_state, all_rgs);
+	return reader;
+}
+
+unique_ptr<ColumnDataCollection> ReadPartToCollection(ClientContext &context, const string &path,
+                                                       const vector<LogicalType> &col_types) {
+	ParquetReaderScanState scan_state;
+	auto reader = OpenPartReaderAllColumns(context, path, scan_state);
+	auto out = make_uniq<ColumnDataCollection>(context, col_types);
+	ColumnDataAppendState append_state;
+	out->InitializeAppend(append_state);
+	DataChunk chunk;
+	chunk.Initialize(context, col_types);
+	while (true) {
+		auto res = reader->Scan(context, scan_state, chunk);
+		auto async_type = res.GetResultType();
+		if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+			break;
+		}
+		if (chunk.size() == 0) {
+			continue;
+		}
+		out->Append(append_state, chunk);
+	}
+	return out;
 }
 
 } // namespace duckdb

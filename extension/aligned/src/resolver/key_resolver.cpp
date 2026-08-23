@@ -1,6 +1,7 @@
 #include "resolver/key_resolver.hpp"
 
 #include "resolver/partition_resolver.hpp"
+#include "io/parquet_io.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -44,44 +45,15 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 	bool has_prev = false;
 	for (idx_t k = 0; k < partition.part_count; k++) {
 		auto &part = index_group->parts[partition.first_part + k];
-		auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(part.path), ParquetOptions(context));
 		// The key columns (symbol, date) must exist in every index part.
-		idx_t symbol_pos = DConstants::INVALID_INDEX;
-		idx_t date_pos = DConstants::INVALID_INDEX;
-		for (idx_t c = 0; c < reader->columns.size(); c++) {
-			if (StringUtil::CIEquals(reader->columns[c].name, index_group->symbol_column)) {
-				symbol_pos = c;
-			}
-			if (StringUtil::CIEquals(reader->columns[c].name, index_group->partition_source)) {
-				date_pos = c;
-			}
-		}
-		if (symbol_pos == DConstants::INVALID_INDEX) {
-			throw IOException("Aligned table '%s' group 'index' partition '%s': part '%s' has no symbol column "
-			                  "'%s' (v8 primary-key contract)",
-			                  plan.table_name, partition.key,
-			                  part.part_name, index_group->symbol_column);
-		}
-		if (date_pos == DConstants::INVALID_INDEX) {
-			throw IOException("Aligned table '%s' group 'index' partition '%s': part '%s' has no date column "
-			                  "'%s' (v8 primary-key contract)",
-			                  plan.table_name, partition.key,
-			                  part.part_name, index_group->partition_source);
-		}
-		reader->column_ids.push_back(MultiFileLocalColumnId(symbol_pos));
-		reader->column_ids.push_back(MultiFileLocalColumnId(date_pos));
-
-		vector<PartitionStatistics> rg_stats;
-		reader->GetPartitionStats(rg_stats);
-		vector<idx_t> all_rgs;
-		for (idx_t i = 0; i < rg_stats.size(); i++) {
-			all_rgs.push_back(i);
-		}
+		vector<LogicalType> key_types;
 		ParquetReaderScanState scan_state;
-		reader->InitializeScan(context, scan_state, all_rgs);
+		auto reader = OpenPartReaderNamedColumns(context, part.path,
+		                                          {index_group->symbol_column, index_group->partition_source},
+		                                          key_types, scan_state);
 		DataChunk chunk;
-		chunk.Initialize(context, {reader->columns[symbol_pos].type, reader->columns[date_pos].type});
-		bool is_timestamp = reader->columns[date_pos].type.id() == LogicalTypeId::TIMESTAMP;
+		chunk.Initialize(context, key_types);
+		bool is_timestamp = key_types[1].id() == LogicalTypeId::TIMESTAMP;
 		while (true) {
 			auto res = reader->Scan(context, scan_state, chunk);
 			auto async_type = res.GetResultType();

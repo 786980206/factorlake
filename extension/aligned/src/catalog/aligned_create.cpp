@@ -18,50 +18,6 @@ namespace duckdb {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-//! Writes a 0-row parquet file at `path` with the given column names + types.
-//! The footer carries the schema so the reader can discover it.
-static void WriteEmptyParquet(ClientContext &context, FileSystem &fs, const string &path,
-                              const vector<string> &col_names, const vector<LogicalType> &col_types) {
-	auto writer = CreateParquetWriter(context, fs, path, col_names, col_types);
-	auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
-	unique_ptr<ParquetWriteTransformData> transform;
-	writer->Flush(*buffer, transform);
-	writer->Finalize();
-}
-
-//! Writes a parquet file at `path` with `row_count` rows of all-NULL values.
-//! Used when adding a new column group to an existing table: each existing
-//! partition gets a placeholder with the same row count as the index partition
-//! (all NULL for the new columns) to satisfy the partition-aligned contract.
-static void WriteNullParquet(ClientContext &context, FileSystem &fs, const string &path,
-                             const vector<string> &col_names, const vector<LogicalType> &col_types,
-                             idx_t row_count) {
-	auto writer = CreateParquetWriter(context, fs, path, col_names, col_types);
-
-	// Build a buffer of `row_count` all-NULL rows.
-	auto buffer = make_uniq<ColumnDataCollection>(context, col_types);
-	ColumnDataAppendState append_state;
-	buffer->InitializeAppend(append_state);
-
-	DataChunk chunk;
-	chunk.Initialize(context, col_types);
-	idx_t remaining = row_count;
-	while (remaining > 0) {
-		idx_t batch = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-		chunk.Reset();
-		chunk.SetCardinality(batch);
-		for (idx_t c = 0; c < col_types.size(); c++) {
-			FlatVector::Validity(chunk.data[c]).SetAllInvalid(batch);
-		}
-		buffer->Append(append_state, chunk);
-		remaining -= batch;
-	}
-
-	unique_ptr<ParquetWriteTransformData> transform;
-	writer->Flush(*buffer, transform);
-	writer->Finalize();
-}
-
 //! Validates a group name: "index" is valid as-is; all other groups must be
 //! a two-level path "lv1/lv2" (exactly one slash, neither segment empty).
 static void ValidateGroupName(const string &group_name) {

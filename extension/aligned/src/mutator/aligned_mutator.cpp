@@ -402,35 +402,14 @@ static void SortAndDedupe(vector<SortedRow> &rows) {
 //! collection's types are the reader's column types, matched by name).
 static unique_ptr<ColumnDataCollection> ReadSourceColumns(ClientContext &context, const string &path,
                                                          const vector<string> &col_names) {
-	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
 	vector<LogicalType> types;
-	for (auto &name : col_names) {
-		idx_t pos = DConstants::INVALID_INDEX;
-		for (idx_t c = 0; c < reader->columns.size(); c++) {
-			if (StringUtil::CIEquals(reader->columns[c].name, name)) {
-				pos = c;
-				break;
-			}
-		}
-		if (pos == DConstants::INVALID_INDEX) {
-			throw IOException("Aligned table: column '%s' not found in '%s'", name, path);
-		}
-		types.push_back(reader->columns[pos].type);
-		reader->column_ids.push_back(MultiFileLocalColumnId(pos));
-	}
-	auto out = make_uniq<ColumnDataCollection>(context, types);
-	vector<PartitionStatistics> rg_stats;
-	reader->GetPartitionStats(rg_stats);
-	vector<idx_t> all_rgs;
-	for (idx_t i = 0; i < rg_stats.size(); i++) {
-		all_rgs.push_back(i);
-	}
 	ParquetReaderScanState scan_state;
-	reader->InitializeScan(context, scan_state, all_rgs);
-	DataChunk chunk;
-	chunk.Initialize(context, types);
+	auto reader = OpenPartReaderNamedColumns(context, path, col_names, types, scan_state);
+	auto out = make_uniq<ColumnDataCollection>(context, types);
 	ColumnDataAppendState append_state;
 	out->InitializeAppend(append_state);
+	DataChunk chunk;
+	chunk.Initialize(context, types);
 	while (true) {
 		auto res = reader->Scan(context, scan_state, chunk);
 		auto async_type = res.GetResultType();
@@ -438,7 +417,7 @@ static unique_ptr<ColumnDataCollection> ReadSourceColumns(ClientContext &context
 			break;
 		}
 		if (chunk.size() == 0) {
-			continue; // parquet emits empty setup chunks on row-group switches
+			continue;
 		}
 		out->Append(append_state, chunk);
 	}
