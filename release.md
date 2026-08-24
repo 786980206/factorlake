@@ -1415,4 +1415,70 @@ compaction → 数据完整性验证。
 
 提交：`890b91b`、`eaea083`
 
+## 2026-09-03 — 深度审查 Round 18-22：全路径审计 + 并行扫描 + 最终验证
+
+### Round 18-19：COPY TO 审计 + 质量扫描
+- 审计 `aligned_copy.hpp` + `aligned_copy.cpp` Sink/Combine/Finalize 完整流程
+  - Sink：分区键缓存 + run-length 批量复制 + identity-map 零拷贝快路径
+  - Combine：本地缓冲刷新到全局
+  - Flush：两阶段锁（全局锁查找 + 分区锁写入）+ part 轮转
+  - Finalize：received == written 统计校验
+  - Bind：列映射、组 schema 推断、分区列位置校验
+- 审计 `aligned_scan.cpp` carry_chunk 逻辑
+  - src_offset 正确使用 `seg.flow_off + (copy_from - seg.win_start) - rg_off`
+  - 双向 clamp 防止下溢
+  - surplus → carry 转换正确
+- 质量扫描：无 TODO/FIXME/HACK 注释，全量重编零警告
+
+### Round 20：key_resolver + part_rewriter 审计 + 新测试
+- 审计 `key_resolver.cpp`：三级解析（fast path → part 二分 → 行二分）
+  - 缓存标志在成功后设置（之前修复）
+  - BLOCKED 异步处理正确
+  - DATE/TIMESTAMP 键类型处理正确
+- 审计 `part_rewriter.cpp`：合并/重写逻辑
+  - 全覆写快路径（跳过旧数据读取）
+  - 合并循环按位置处理事件
+  - EmitInsertRow 使用 SetInvalid（避免 per-column Value 构造）
+  - FetchOldChunk BLOCKED 处理正确
+- 新增测试：多分区 TIMESTAMP COPY TO（跨午夜时间戳 → 2 个日期分区）
+- 测试总数：271/271
+
+### Round 21：aligned_mutator 审计 + 文档一致性
+- 审计 `aligned_mutator.cpp` SourceReader/ExtractSortedRows/SortAndDedupe
+  - SourceReader GetValue 所有基本类型快路径
+  - ExtractSortedRows 向量化提取 + NULL 校验 + VARCHAR 快路径
+  - SortAndDedupe last-wins 语义（upsert 后值覆盖前值）
+  - ReadSourceColumns BLOCKED 处理正确
+  - 空输入提前退出（不获取锁、不创建事务）
+- 文档一致性：17 个 cpp 文件 + 8 个共享函数与 AGENTS.md 完全一致
+
+### Round 22：aligned_compactor 审计 + 最终验证
+- 审计 `aligned_compactor.cpp` 并行暂存 + 两阶段提交
+  - IsAlreadyNormalized 正确处理 0-row part
+  - MergePartsToWriter schema 校验 + BLOCKED 处理
+  - StageOneJob contiguity 校验 + 多 part 切分
+  - Phase 1 并行（thread pool + atomic work queue）
+  - Phase 2 串行（move + delete + RAII 清理）
+  - 无新性能优化机会（已优化到位）
+
+### 并行扫描验证
+- `MaxThreads()` 返回 `MAX_THREADS`
+- `CLAIM_RANGE = 16 * STANDARD_VECTOR_SIZE`（16 chunk/range → 8 线程 4.2×）
+- Range claiming 逻辑正确（锁仅用于 claim，扫描在锁外执行）
+- Interval 推进 + cursor snap-up 正确
+
+### 错误消息一致性
+- 所有异常使用 DuckDB 类型（IOException/BinderException/InternalException）
+- 无裸 `throw std::exception`
+- 4 处 `catch(...)` 全部正确（worker 异常传播 / 日期解析容错）
+- 无错误被静默吞掉
+
+### 测试结果
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED
+- 基准测试：aligned 0.69s vs native year-part 1.19s = 1.72x faster
+- Feature Lake 脚本：109,600 行，对齐校验通过，0 null key
+
+提交：`bca59f8`
+
 
