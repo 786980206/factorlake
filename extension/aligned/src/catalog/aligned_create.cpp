@@ -12,6 +12,7 @@
 #include "io/parquet_io.hpp"
 
 
+#include <algorithm>
 #include <map>
 
 namespace duckdb {
@@ -302,7 +303,11 @@ void AlignedCreateTable(ClientContext &context, const string &root, const string
 	if (fs.DirectoryExists(table_dir)) {
 		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
 		for (auto &p : parts) {
-			if (p.path.find("/_tmp/") == string::npos) {
+			// Normalize to '/' separators so the _tmp check works on Windows
+			// (glob may return backslash paths on Windows).
+			string norm = p.path;
+			std::replace(norm.begin(), norm.end(), '\\', '/');
+			if (norm.find("/_tmp/") == string::npos) {
 				table_exists = true;
 				break;
 			}
