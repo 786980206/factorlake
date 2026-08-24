@@ -1052,4 +1052,38 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'table' (FORMAT aligned, GROU
 
 提交：`126049b`
 
+### 后续优化
+
+1. **并行 Finalize**（`c9d3b2b`）：Finalize 循环不再持有全局锁——每个分区
+   `FinalizePartition` 用自己的 per-partition lock，不同分区并行 finalize。
+   `FinalizePartition` 新增 per-partition lock 防止与 Combine 的 Flush 竞争。
+
+2. **Flush 返回 PartitionWriter\***（`e05aac1`）：`Flush` 返回 `PartitionWriter*`，
+   Combine 直接用返回的指针更新 `received_rows`（atomic），不再在 Combine 中
+   额外获取全局锁做 map lookup。
+
+3. **全 chunk 快速路径**（`af6db46`）：当 run 覆盖整个 chunk（`run.start == 0 &&
+   n == input.size()`）时跳过 SelectionVector，直接用
+   `VectorOperations::Copy(src, tgt, n, 0, 0)` 全量拷贝。排序输入下几乎所有
+   chunk 都是 full-chunk single-run，此优化省去了 SelectionVector 构建 +
+   indexed copy 开销。
+
+### 优化后基准测试结果
+
+| 规模 | 行数 | aligned panel (7col) | native year-part (7col) | native flat (7col) | aligned/native |
+|------|------|------|------|------|------|
+| 400 sym | 5.26M | **0.678s** | 1.342s | 0.574s | **0.51x (1.98× faster)** |
+
+优化后 aligned panel（0.678s）接近 native flat（0.574s），差距仅 18%。
+分区路由 + Combine + Finalize 的总开销 < 100ms。
+
+### 测试
+
+- SQLLogicTest：141/141 PASS
+- PS test suite：ALL PASSED（test_aligned 42/42、test_dml 10/10、
+  test_compaction 16/16、test_parallel 8/8）
+- Loadable extension 构建通过
+
+提交：`af6db46`
+
 
