@@ -205,6 +205,27 @@ SELECT count(*) FROM aligned_scan('copy_ts')
 ----
 6
 
+# --- (i2) COPY TO with TIMESTAMP partition spanning multiple dates ---
+# Multiple timestamps across 2 dates → 2 partitions (date=%Y-%m-%d template)
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_ts_multi', 'index', 'symbol VARCHAR, date TIMESTAMP', partition_template => 'date=%Y-%m-%d')
+
+statement ok
+COPY (SELECT s.symbol, d.ts AS date FROM UNNEST(generate_series('2026-01-01 23:58:00'::TIMESTAMP, '2026-01-02 00:02:00'::TIMESTAMP, INTERVAL 1 MINUTE)) AS d(ts) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.ts) TO 'copy_ts_multi' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_ts_multi')
+----
+5
+
+query I
+SELECT count(DISTINCT CAST(date AS DATE)) FROM aligned_scan('copy_ts_multi')
+----
+2
+
 # --- (j) COPY TO to a new non-existent group (auto-create from query) ---
 statement ok
 SET aligned_data_root='{TEST_DIR}'
