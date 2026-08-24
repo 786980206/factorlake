@@ -26,6 +26,9 @@ struct AlignedGroupScanState {
 	idx_t part_idx = 0;
 	bool part_ready = false;
 	unique_ptr<ParquetReader> reader;
+	// Case-insensitive column name → file index map (built once per OpenPart
+	// to avoid O(cols²) linear scans via std::find_if).
+	case_insensitive_map_t<idx_t> col_map;
 	// Fresh scan state per row-group window: duckdb's parquet scan state is
 	// designed for a single InitializeScan + repeated Scan lifecycle; reusing
 	// one state across windows re-initializes it, which is not a supported
@@ -574,6 +577,14 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	g.part_idx = part_idx;
 	g.reader = OpenPartReader(context, part, bind.plan.table_name, group.manifest.group);
 
+	// Build the column name → index map for this part (O(cols) once,
+	// replaces O(cols²) std::find_if scans in the loop below and in
+	// ComputeRowGroupWindow).
+	g.col_map.clear();
+	for (idx_t fi = 0; fi < g.reader->columns.size(); fi++) {
+		g.col_map[g.reader->columns[fi].name] = fi;
+	}
+
 	// Defensive check (v6): the open file's footer row count must equal the
 	// self-describing value parsed from the file name. The plan's row counts
 	// come from file names ONLY (no footer reads), so a mismatch means the
@@ -606,13 +617,12 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 			continue;
 		}
 		auto &col = group.column_order[i];
-		auto it = std::find_if(g.reader->columns.begin(), g.reader->columns.end(),
-		                       [&](const MultiFileColumnDefinition &c) { return StringUtil::CIEquals(c.name, col); });
-		if (it == g.reader->columns.end()) {
+		auto it = g.col_map.find(col);
+		if (it == g.col_map.end()) {
 			g.missing_positions.push_back(projected);
 			continue;
 		}
-		auto file_idx = it - g.reader->columns.begin();
+		auto file_idx = it->second;
 		// Cross-part type consistency: the plan schema uses the last part's
 		// types; every part must agree on a column's type (schema evolution
 		// only adds/removes columns, never changes a type). A mismatch would
@@ -681,13 +691,12 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 			bool skip = false;
 			if (rg.partition_row_group) {
 				for (auto &gf : group_filters) {
-auto it = std::find_if(g.reader->columns.begin(), g.reader->columns.end(),
-				                       [&](const MultiFileColumnDefinition &c) { return StringUtil::CIEquals(c.name, gf.column_name); });
-					if (it == g.reader->columns.end()) {
+					auto it = g.col_map.find(gf.column_name);
+					if (it == g.col_map.end()) {
 						// Column absent in this part (schema evolution): no pruning
 						continue;
 					}
-					auto file_idx = it - g.reader->columns.begin();
+					auto file_idx = it->second;
 					auto stats = rg.partition_row_group->GetColumnStatistics(StorageIndex(file_idx));
 					if (!stats) {
 						continue;
