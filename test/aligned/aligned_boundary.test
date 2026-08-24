@@ -110,3 +110,46 @@ query I
 SELECT count(*) FROM aligned_scan('bnd_cpt2')
 ----
 1999001
+
+# --- DML: empty INSERT (0 rows) should not crash or create files ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+ATTACH '{TEST_DIR}' AS al (TYPE ALIGNED); CREATE TABLE al.bnd_empty_ins (symbol VARCHAR, date DATE, val DOUBLE) WITH (groups='index:val', partition_template='year=%Y')
+
+statement ok
+ATTACH '{TEST_DIR}' AS al (TYPE ALIGNED); INSERT INTO al.bnd_empty_ins SELECT 'S' AS symbol, DATE '2026-01-01' AS date, 1.0 AS val WHERE 1=0
+
+query I
+SELECT count(*) FROM aligned_scan('bnd_empty_ins')
+----
+0
+
+# --- DML: empty DELETE (0 rows) should not crash ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+ATTACH '{TEST_DIR}' AS al (TYPE ALIGNED); CREATE TABLE al.bnd_empty_del (symbol VARCHAR, date DATE, val DOUBLE) WITH (groups='index:val', partition_template='year=%Y')
+
+statement ok
+ATTACH '{TEST_DIR}' AS al (TYPE ALIGNED); INSERT INTO al.bnd_empty_del SELECT 'S000001' AS symbol, DATE '2026-01-01' AS date, 1.0 AS val
+
+statement ok
+ATTACH '{TEST_DIR}' AS al (TYPE ALIGNED); DELETE FROM al.bnd_empty_del WHERE 1=0
+
+query I
+SELECT count(*) FROM aligned_scan('bnd_empty_del')
+----
+1
+
+# --- DML: NULL symbol should be rejected ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+ATTACH '{TEST_DIR}' AS al (TYPE ALIGNED); CREATE TABLE al.bnd_null_sym (symbol VARCHAR, date DATE, val DOUBLE) WITH (groups='index:val', partition_template='year=%Y')
+
+statement error
+ATTACH '{TEST_DIR}' AS al (TYPE ALIGNED); INSERT INTO al.bnd_null_sym SELECT NULL AS symbol, DATE '2026-01-01' AS date, 1.0 AS val

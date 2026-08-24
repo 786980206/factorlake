@@ -1054,7 +1054,10 @@ static vector<SortedRow> ExtractSortedRows(ClientContext &context, const ColumnD
 				throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
 			}
 			auto si = sym_sel->get_index(i);
-			if (sym_str_data && sym_fmt.validity.RowIsValid(si)) {
+			if (!sym_fmt.validity.RowIsValid(si)) {
+				throw IOException("Aligned table: NULL in the symbol column at source row %llu", r);
+			}
+			if (sym_str_data) {
 				// Fast path: construct Value from string_t (zero-copy for
 				// inline strings, one alloc for long strings).
 				row.symbol = Value(sym_str_data[si].GetString());
@@ -1124,6 +1127,17 @@ static void AlignedUpsertFunction(ClientContext &context, TableFunctionInput &da
 	// 3. Build + sort + dedupe the key list.
 	auto rows = ExtractSortedRows(context, *src, date_pos, symbol_pos, bind.date_col, template_str);
 	SortAndDedupe(rows);
+
+	// Early exit for empty input: no rows to upsert → return zero counts
+	// without acquiring the write lock or creating a staged transaction.
+	if (rows.empty()) {
+		output.SetCardinality(1);
+		output.SetValue(0, 0, Value::BIGINT(0));
+		output.SetValue(1, 0, Value::BIGINT(0));
+		output.SetValue(2, 0, Value::BIGINT(0));
+		output.SetValue(3, 0, Value::BIGINT(0));
+		return;
+	}
 
 	// 4. Pre-load partition boundaries for all existing partitions that
 	//    appear in the source data. KeyResolver::Resolve triggers
@@ -1430,6 +1444,17 @@ static void AlignedDeleteFunction(ClientContext &context, TableFunctionInput &da
 	// date is column 0, symbol is column 1 (key_names = {date_col, symbol_col})
 	auto rows = ExtractSortedRows(context, *src, 0, 1, bind.date_col, template_str);
 	SortAndDedupe(rows);
+
+	// Early exit for empty input: no rows to delete → return zero counts
+	// without acquiring the write lock or creating a staged transaction.
+	if (rows.empty()) {
+		output.SetCardinality(1);
+		output.SetValue(0, 0, Value::BIGINT(0));
+		output.SetValue(1, 0, Value::BIGINT(0));
+		output.SetValue(2, 0, Value::BIGINT(0));
+		output.SetValue(3, 0, Value::BIGINT(0));
+		return;
+	}
 
 	// 3. Resolve every key; non-existent keys are skipped (idempotent delete).
 	KeyResolver resolver(context, bind.plan);
