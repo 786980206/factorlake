@@ -1342,4 +1342,30 @@ compaction → 数据完整性验证。
 
 提交：`00a7f90`
 
+## 2026-09-01 — 深度审查 Round 11：DML 边界条件修复
+
+### DML 路径审计
+
+23. **空 DML 输入早期退出**（`aligned_mutator.cpp`）：
+    `AlignedUpsertFunction` 和 `AlignedDeleteFunction` 在输入集合为空时
+    不再获取写锁、不创建暂存事务、不创建任何文件。直接返回 0 计数。
+    之前会走完整 pipeline（锁 → 事务目录 → 空操作 → 提交），浪费 I/O。
+
+24. **NULL symbol 键验证**（`aligned_mutator.cpp`）：
+    `ExtractSortedRows` 中 NULL date 已有验证，但 NULL symbol 会静默创建
+    NULL 键行。现在 NULL symbol 抛出 `IOException`，与 NULL date 一致。
+
+### 新增边界测试（254→266）
+
+25. **空 INSERT**（0 行）：不崩溃，不创建文件，count=0
+26. **空 DELETE**（0 行）：不崩溃，已有数据保留，count=1
+27. **NULL symbol INSERT**：正确拒绝，抛出 IOException
+
+### 测试
+
+- SQLLogicTest：266/266 PASS（254→266，+12 新边界测试）
+- PS test suite：ALL PASSED
+
+提交：`6289ecc`
+
 
