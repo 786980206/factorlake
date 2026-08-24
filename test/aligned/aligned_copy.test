@@ -253,3 +253,88 @@ query I
 SELECT count(*) FROM aligned_scan('copy_missing_col')
 ----
 2
+
+# --- (i) COPY TO multi-RG: >131072 rows in one partition triggers per-RG flush
+# in Sink. Verify data integrity across the RG boundary.
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_multirg', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT LPAD((r % 100)::VARCHAR, 6, '0') AS symbol, DATE '2026-01-01' + (r % 365) * INTERVAL '1 day' AS date FROM generate_series(0, 199999) AS t(r) ORDER BY 1, 2) TO 'copy_multirg' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_multirg')
+----
+200000
+
+# Verify row count matches per symbol
+query I
+SELECT count(DISTINCT symbol) FROM aligned_scan('copy_multirg')
+----
+100
+
+# --- (j) COPY TO column reorder: write columns in different order than
+# group schema. Exercises the non-identity map slow path.
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_reord2', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT DATE '2026-01-01' AS date, '000001' AS symbol ORDER BY 1, 2) TO 'copy_reord2' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_reord2')
+----
+1
+
+query T
+SELECT symbol FROM aligned_scan('copy_reord2')
+----
+000001
+
+# --- (k) COPY TO multi-partition multi-RG: two partitions each >1 RG.
+# Tests per-RG flush across multiple partitions simultaneously.
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_2part_2rg', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT LPAD((r % 50)::VARCHAR, 6, '0') AS symbol, DATE '2026-06-01' + (r / 50) * INTERVAL '1 day' AS date FROM generate_series(0, 299999) AS t(r) ORDER BY 1, 2) TO 'copy_2part_2rg' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_2part_2rg')
+----
+300000
+
+query I
+SELECT count(DISTINCT symbol) FROM aligned_scan('copy_2part_2rg')
+----
+50
+
+# --- (l) COPY TO type mismatch: query has TIMESTAMP, group schema has DATE.
+# Exercises the cast path in the non-identity slow path.
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_cast2', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT '000001' AS symbol, TIMESTAMP '2026-01-01 00:00:00' AS date) TO 'copy_cast2' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_cast2')
+----
+1
+
+query D
+SELECT date FROM aligned_scan('copy_cast2')
+----
+2026-01-01
