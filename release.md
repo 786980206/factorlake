@@ -1230,4 +1230,37 @@ compaction → 数据完整性验证。
 
 提交：`3260a9a`
 
+## 2026-09-01 — 深度审查 Round 6-7：Mutator 性能 + 代码审计
+
+### Round 6：Mutator 路径 + 文档
+
+12. **`SourceReader::GetValue` VARCHAR 快速路径**（`aligned_mutator.cpp`）：
+    添加 VARCHAR 类型的 `UnifiedVectorFormat::GetData<string_t>` 直接读取，
+    避免通用 `GetValue` 的类型切换 + 字符串拷贝开销。
+
+13. **扫描边界条件审计**（`aligned_scan.cpp`）：
+    - 0-row part 在 `BuildIntervals` 中正确跳过
+    - 空表（无 part）返回空 plan，scan 返回 0 行
+    - 过滤列不在任何 group 中时不做分区剪枝（正确，行级过滤由 executor 处理）
+    - 全部分区被剪枝时 `active_intervals` 为空，scan 正确返回 0 行
+
+14. **文档更新**：README.md、API.md、AGENTS.md、release.md 全部更新到最新。
+    - API.md 添加并行暂存文档
+    - README.md 功能表更新
+    - AGENTS.md 添加并行 compaction + BLOCKED async 坑
+
+### Round 7：Mutator 快速路径扩展
+
+15. **`SourceReader::GetValue` 全类型快速路径**（`aligned_mutator.cpp`）：
+    从 if-else 链改为 switch，添加 FLOAT、INTEGER、SMALLINT、TINYINT、BOOLEAN
+    快速路径。所有常见类型都通过 `UnifiedVectorFormat::GetData` 直接读取，
+    避免通用 `GetValue` 的类型切换和 `Value` 构造开销。
+
+### 测试
+
+- SQLLogicTest：234/234 PASS
+- PS test suite：ALL PASSED（test_aligned, test_dml, test_compaction, test_parallel）
+
+提交：`8866bc2`
+
 
