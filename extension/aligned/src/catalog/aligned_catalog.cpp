@@ -21,6 +21,7 @@
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_delete.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
@@ -218,12 +219,23 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction tr
 	auto &columns = base.columns;
 
 	// Parse options from WITH (key=value, ...).
-	// DuckDB's parser stores each option as a ParsedExpression; for string
-	// constants, expr->ToString() returns the value wrapped in single quotes.
-	// We strip a single layer of surrounding single quotes (the common case).
-	// A more robust approach (ExpressionExecutor::EvaluateScalar) is possible
-	// but requires a ClientContext; this is sufficient for DDL string options.
-	auto strip_quotes = [](const string &s) -> string {
+	// DuckDB's parser stores each option as a ParsedExpression. For string
+	// constants, the expression is a ConstantExpression wrapping a Value.
+	// We extract the Value directly, handling quoting/escaping correctly.
+	// Fallback to expr->ToString() for non-constant expressions (rare).
+	auto get_option_value = [](const unique_ptr<ParsedExpression> &expr) -> string {
+		if (!expr) {
+			return "";
+		}
+		if (expr->GetExpressionClass() == ExpressionClass::CONSTANT) {
+			auto &const_expr = expr->Cast<ConstantExpression>();
+			if (const_expr.value.IsNull()) {
+				return "";
+			}
+			return const_expr.value.ToString();
+		}
+		// Fallback: strip surrounding single quotes from ToString().
+		auto s = expr->ToString();
 		if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
 			return s.substr(1, s.size() - 2);
 		}
@@ -238,7 +250,7 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction tr
 		auto &key = opt.first;
 		auto &expr = opt.second;
 		if (expr) {
-			auto value = strip_quotes(expr->ToString());
+			auto value = get_option_value(expr);
 			if (StringUtil::CIEquals(key, "groups")) {
 				groups_option = value;
 			} else if (StringUtil::CIEquals(key, "partition_template")) {

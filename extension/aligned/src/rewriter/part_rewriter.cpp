@@ -170,8 +170,15 @@ struct MergeWriter {
 	//! at their output columns, everything else stays NULL.
 	void EmitInsertRow() {
 		idx_t pos = scratch_rows;
+		// Set every output column to NULL at `pos` by directly marking the
+		// validity bit invalid. This avoids constructing a per-column `Value`
+		// (which can heap-allocate) for every insert row — critical for wide
+		// tables (10k+ columns). Semantically equivalent to
+		// `scratch.SetValue(c, pos, Value(col_types[c]))` for primitive types
+		// (NULL just clears the validity bit); matches the NULL-fill pattern
+		// used by RewritePartFullOverwrite below.
 		for (idx_t c = 0; c < out_cols; c++) {
-			scratch.SetValue(c, pos, Value(input.col_types[c]));
+			FlatVector::Validity(scratch.data[c]).SetInvalid(pos);
 		}
 		for (idx_t i = 0; i < input.insert_cols.size(); i++) {
 			Value v = CastValue(insert_cursor.CurrentValue(i), insert_col_pos[i]);
