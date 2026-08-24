@@ -1086,4 +1086,75 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'table' (FORMAT aligned, GROU
 
 提交：`af6db46`
 
+## 2026-08-30 — 深度审查 Round 1：Bug 修复 + 边界测试 + 代码清理
+
+### 审查方法
+
+4 个并行审计子代理分别审查读路径、写路径、边界条件、catalog/extension init，
+发现 2 个 P0 bug + 4 个重要 bug + 多个性能/清理机会。全部修复并测试。
+
+### Bug 修复
+
+1. **P0: `partition_col_pos` 默认值为 0 而非 `INVALID_INDEX`**
+   （`aligned_copy.hpp`）：当分区列缺失时，静默使用第 0 列作为分区列。
+   修复：默认 `DConstants::INVALID_INDEX`，guard 改为 `== INVALID_INDEX`。
+
+2. **读路径大小写敏感列匹配 bug**
+   （`aligned_scan.cpp:610,685`）：`OpenPart` 和 `ComputeRowGroupWindow` 用
+   `c.name == col` 精确匹配，而 `parquet_io.cpp` 用 `CIEquals` 大小写不敏感。
+   跨 part 列名大小写不一致（如 `Symbol` vs `symbol`）会被静默 NULL 填充。
+   修复：统一使用 `StringUtil::CIEquals`。
+
+3. **`EnsureTablesLoaded` 吞掉所有 `std::exception`**
+   （`aligned_catalog.cpp:141`）：`IOException`、`InternalException`、
+   `PermissionException` 全被静默跳过。真实 I/O 错误和内部 bug 被隐藏。
+   修复：只 catch `IOException`。
+
+4. **`PlanUpdate` 不校验空 group**
+   （`aligned_catalog.cpp:482`）：SET 列不在任何 group 中时 `grp` 为空，下游
+   mutator 收到空 group 字符串导致混乱。修复：throw `BinderException`。
+
+5. **`aligned_create` 2-arg 不校验 group 名格式和已存在**
+   （`aligned_create_fn.cpp:157`）：单级 group 名（如 `factor`）和已存在的
+   group 目录被静默接受。修复：校验 `lv1/lv2` 格式 + 已存在检查。
+
+6. **compactor 不吸收 0-row 占位 part**
+   （`aligned_compactor.cpp:91`）：`IsAlreadyNormalized` 跳过 0-row part，
+   导致 `[1M, 1M, 0]` 被误判为已规范化，0-row 占位 part 不被合并。
+   修复：遇到 0-row part 返回 `false`（需要合并）。
+
+7. **`partition_resolver` `Date::FromString` 可能 throw**
+   （`partition_resolver.cpp:263`）：畸形分区目录名导致 `Date::FromString`
+   throw 而非返回 `infinity`，整个 scan 失败。修复：try/catch 包裹。
+
+### 边界条件测试
+
+新增 `test/aligned/aligned_copy.test`（66 个断言），覆盖 12 种 COPY TO 边界：
+0-row、单行、NULL 非分区列、单分区覆写、多日分区、列顺序不同、额外列忽略、
+类型 cast（INT→DOUBLE）、`preserve_insertion_order=true` 单线程、TIMESTAMP
+分区列、新组自动创建、缺少列拒绝。
+
+SQLLogicTest 总数：141 → 207（+66）。
+
+### 代码清理
+
+- 删除 dead fields：`row_group_size`、`write_partition_column`、`flushed_rows`
+- 删除 `CreateAlignedParquetWriter` 重复（改用共享 `CreateParquetWriter`）
+- 删除 compactor 中 dead no-op loop（`pending_moves` 空循环）
+- 去重 `CountRecursive` 到 `io/parquet_io`（`aligned_create_fn` + `aligned_drop` 共用）
+
+### Feature Lake 生成脚本
+
+新增 `test/gen_feature_lake.sql`：完整 end-to-end Feature Lake 生命周期脚本，
+包含建表 → COPY TO 批量写入 → aligned_scan 跨组查询 → DML 更新/删除 →
+compaction → 数据完整性验证。
+
+### 测试
+
+- SQLLogicTest：207/207 PASS
+- PS test suite：ALL PASSED（test_aligned, test_dml, test_compaction, test_parallel）
+- Feature Lake 脚本：全流程通过
+
+提交：`4fe9c03`
+
 
