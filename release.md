@@ -1157,4 +1157,65 @@ compaction → 数据完整性验证。
 
 提交：`4fe9c03`
 
+## 2026-08-31 — 深度审查 Round 2-4：性能优化 + 竞态修复 + 边界测试
+
+### Round 2：读路径性能
+
+1. **key_resolver 逐行 `GetValue` 优化**
+   （`key_resolver.cpp`）：`LoadPartition` 和 `LoadSinglePart` 中每行调用
+   `chunk.GetValue(0, r)` 构造 `Value` 对象（含堆分配），改为通过
+   `UnifiedVectorFormat::GetData<string_t>` 直接读取 `string_t`，避免
+   `Value` 构造开销。新增 NULL symbol 校验。
+
+2. **基准测试验证**：400 symbols（5.26M 行）对齐 panel 0.657s vs
+   原生 year-part 1.166s = **1.78x 更快**（vs 之前 0.678s，无回归）。
+
+### Round 3：写入路径 + DDL + 异步修复
+
+3. **part_rewriter `EmitInsertRow` 向量化**
+   （`part_rewriter.cpp`）：将 `scratch.SetValue(c, pos, Value(col_types[c]))`
+   （每列构造 `Value` 对象）替换为 `FlatVector::Validity(scratch.data[c]).SetInvalid(pos)`。
+   对于宽表（10k+ 列），消除每行每列的 `Value` 堆分配。
+
+4. **scan `BLOCKED` 异步处理**（`aligned_scan.cpp:970`）：
+   对象存储 `Scan` 可能返回 `BLOCKED`（异步未就绪），之前被误判为
+   "alignment violation" 并抛异常。改为 `continue` 重试。
+
+5. **DDL 选项解析**（`aligned_catalog.cpp`）：
+   `WITH (groups='...')` 选项解析从 `strip_quotes(expr->ToString())` 改为
+   检查 `ConstantExpression` 并直接读取 `value` 字段，正确处理转义引号。
+
+6. **`LookupEntry` `tables_loaded` 数据竞态**（`aligned_catalog.cpp:193`）：
+   `tables_loaded = false` 在锁外设置，与并发 `EnsureTablesLoaded`/`Scan` 竞态。
+   修复：在 `lock_guard` 内设置 flag 后再调用 `EnsureTablesLoaded`。
+
+### Round 4：边界条件测试 + 扫描优化
+
+7. **新增 27 个边界测试**（`aligned_boundary.test`）：
+   - DML 空表（insert/update/delete/re-insert）
+   - COPY TO 覆写（同组写入两次替换旧数据）
+   - SCAN 非存在值过滤
+   - CREATE TABLE 列组扩展
+   - Compaction：单 part 跳过 + 多 part 合并（2M 行）
+   总数：207 → 234 SQLLogicTests。
+
+8. **扫描列查找 O(1) 优化**（`aligned_scan.cpp`）：
+   在 `OpenPart` 时构建 `case_insensitive_map_t<idx_t> col_map`，将
+   `OpenPart` 列映射和 `ComputeRowGroupWindow` 过滤剪枝中的
+   `std::find_if` 线性扫描替换为 O(1) map 查找。对宽表消除
+   O(cols²) per-part 开销。
+
+### Round 5：Compaction 并行化（进行中）
+
+9. **Compaction Phase 1 并行化**：将 `_tmp/` 暂存阶段从串行改为并行
+   处理各分区目录（每个目录的读-写独立）。
+
+### 测试
+
+- SQLLogicTest：234/234 PASS
+- PS test suite：ALL PASSED
+- 基准测试：无回归（0.657s @ 400 symbols, 1.78x faster than native）
+
+提交：`ff34fdf`
+
 
