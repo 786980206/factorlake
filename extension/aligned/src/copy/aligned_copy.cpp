@@ -417,20 +417,32 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		chunk.Initialize(context.client, bind_data.sql_types);
 		chunk.SetCardinality(n);
 
-		// Build a sequential selection vector for this contiguous range
+		bool full_chunk = (run.start == 0 && n == input.size());
 		SelectionVector sel(n);
-		for (idx_t i = 0; i < n; i++) {
-			sel.set_index(i, run.start + i);
+		if (!full_chunk) {
+			// Partial run: build sequential selection vector for this range
+			for (idx_t i = 0; i < n; i++) {
+				sel.set_index(i, run.start + i);
+			}
 		}
 		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
 			idx_t src_col = bind_data.input_col_map[c];
 			auto &src_vec = input.data[src_col];
 			auto &tgt_vec = chunk.data[c];
 			if (src_vec.GetType() == tgt_vec.GetType()) {
-				VectorOperations::Copy(src_vec, tgt_vec, sel, n, 0, 0);
+				if (full_chunk) {
+					// Full-chunk run: copy entire vector (no selection vector needed)
+					VectorOperations::Copy(src_vec, tgt_vec, n, 0, 0);
+				} else {
+					VectorOperations::Copy(src_vec, tgt_vec, sel, n, 0, 0);
+				}
 			} else {
 				Vector temp(src_vec.GetType(), n);
-				VectorOperations::Copy(src_vec, temp, sel, n, 0, 0);
+				if (full_chunk) {
+					VectorOperations::Copy(src_vec, temp, n, 0, 0);
+				} else {
+					VectorOperations::Copy(src_vec, temp, sel, n, 0, 0);
+				}
 				VectorOperations::Cast(context.client, temp, tgt_vec, n);
 			}
 		}
