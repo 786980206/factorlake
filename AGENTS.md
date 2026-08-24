@@ -429,3 +429,18 @@ extension/aligned/src/
 - **PS 5.1 `-c` 无法携带引号标识符**：走临时文件 + `cmd /c "exe < file"`。
 - **DuckDB CLI `-csv` 输出 NULL 是字面 `NULL`**（不是空串）。
 - **DuckDB COPY TO PARQUET 的 ROW_GROUP_SIZE 不精确**：writer 按 vector 大小 flush。
+- **`EvaluatePartitionTemplate` int64_t 版本的 date/timestamp 启发式**：
+  `value >= 0 && value <= 200000` 判为 date_t，否则判为 timestamp_t。1970 年
+  之前的日期（负 date_t）和 epoch 后 200000 微秒内的 timestamp_t 会被误判。
+  金融数据（1990 年后）不受影响，但使用前需注意此假设。
+- **读路径列匹配必须大小写不敏感**：`OpenPart` 和 `ComputeRowGroupWindow` 中
+  查找 parquet reader 列名必须用 `StringUtil::CIEquals`，与 `parquet_io.cpp`
+  一致。跨 part 列名大小写不一致（如 `Symbol` vs `symbol`）不应被静默 NULL 填充。
+- **`partition_col_pos` 必须初始化为 `INVALID_INDEX`**：`AlignedCopyBindData`
+  的 `partition_col_pos` 默认值必须为 `DConstants::INVALID_INDEX`，guard 必须用
+  `== INVALID_INDEX`。默认 0 会在分区列缺失时静默使用第 0 列。
+- **`EnsureTablesLoaded` 只 catch `IOException`**：不应 catch `std::exception`，
+  否则 `InternalException`、`PermissionException` 被静默吞掉，真实错误隐藏。
+- **`Date::FromString` 可能 throw**：`partition_resolver` 的 `ExtractPartitionDate`
+  调用 `Date::FromString` 处理分区目录名时必须 try/catch，畸形目录名应跳过剪枝
+  而非 abort 整个 scan。
