@@ -1309,4 +1309,37 @@ compaction → 数据完整性验证。
 
 提交：`fcffc3c`
 
+## 2026-09-01 — 深度审查 Round 9-10：BLOCKED 系统性修复 + 边界测试
+
+### Round 9：BLOCKED async 系统性修复
+
+19. **`part_rewriter.cpp` BLOCKED async**（`FetchOldChunk`）：
+    `ParquetReader::Scan` 返回 `BLOCKED` 被误判为流结束。改为 `continue` 重试。
+
+20. **系统性修复所有 BLOCKED 处理器**（4 处）：
+    `parquet_io.cpp`（`ReadPartToCollection`）、`aligned_mutator.cpp`、
+    `key_resolver.cpp`（`LoadPartition` + `LoadSinglePart` 2 处）。
+    所有 `FINISHED || BLOCKED` → `FINISHED` + `BLOCKED continue`。
+    全代码库 8 个 Scan 循环已全部修复。
+
+21. **`aligned_copy.hpp` 缺少 `<limits>` 头文件**：
+    `std::numeric_limits<int64_t>::min()` 使用需 `#include <limits>`。
+
+### Round 10：COPY TO 边界测试
+
+22. **新增 10 个 COPY TO 边界测试**（`aligned_copy.test`）：
+    - (i) 多 RG 单分区：200k 行触发 per-RG flush
+    - (j) 列重排：date 在 symbol 前触发 non-identity map 慢路径
+    - (k) 多分区多 RG：300k 行跨 2+ 分区
+    - (l) 类型不匹配：TIMESTAMP 输入 → DATE 组 schema（cast ��径）
+
+### 测试
+
+- SQLLogicTest：254/254 PASS（234→254，+10 新边界测试）
+- PS test suite：ALL PASSED（test_aligned, test_dml, test_compaction, test_parallel）
+- 编译器警告：0
+- TODO/FIXME：0
+
+提交：`00a7f90`
+
 
