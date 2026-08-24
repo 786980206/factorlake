@@ -62,6 +62,15 @@ UPDATE al.cnstk_ixday SET close = 123.4 WHERE symbol = '009999';
 DELETE FROM al.cnstk_ixday WHERE symbol = '009999';
 -- INSERT/UPDATE 按 (symbol, date) 主键 upsert，只重写受影响 part；原子提交。
 -- DETACH al; 即可卸载（数据始终在 parquet 列组里）。
+
+-- 批量写入（COPY TO，推荐大批量数据加载）：
+-- 1. 先创建空组（2-arg 形式，schema 首次 COPY 时从 query 推断）：
+SELECT * FROM aligned_create('cnstk_ixday', 'panel/ma');
+-- 2. 批量写入（per-partition 自动覆盖，无需 OVERWRITE）：
+SET preserve_insertion_order = false;  -- 启用并行写入
+COPY (SELECT symbol, date, ma5, ma20 FROM source ORDER BY symbol, date)
+  TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma');
+-- 已有组写入时自动列裁剪（只写组内列）+ 类型转换（如 TIMESTAMP → DATE）。
 ```
 
 ## 核心概念
@@ -86,6 +95,7 @@ DELETE FROM al.cnstk_ixday WHERE symbol = '009999';
 | 并行扫描 | ✅ | Aligned Row Group 为任务单元，8 线程实测 ≈4.2× 加速 |
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
 | 写入 | ✅ | 标准 DML（INSERT/UPDATE/DELETE）通过 `ATTACH ... TYPE ALIGNED` 使用（v8 mutator）：按 (symbol, date) 主键插入 / 更新 / 删除；只重写受影响 part；`_tmp` 暂存 + 原子提交 |
+| 批量写入 | ✅ | `COPY TO ... (FORMAT aligned, GROUP '...')`：走 DuckDB CopyFunction 框架，per-partition 覆盖，自描述文件名，RG 131072 / part 8 RG，ZSTD/V1，`preserve_insertion_order=false` 启用并行写入（5M 行 7 列 0.8s） |
 | 建表 | ✅ | `aligned_create()` 表函数 + `CREATE TABLE ... WITH (groups=..., partition_template=...)` DDL |
 | 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，按分区目录合并 part，规范化重写（1M rows/part），原子切换 |
 | 删除 | ✅ | `aligned_drop()`：删除列组（`factor/alpha`）或整表（`index`） |

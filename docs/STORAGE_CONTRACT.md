@@ -187,6 +187,11 @@ footer 推导。
   第 1 列（col0）= symbol（字符串），第 2 列（col1）= `DATE`/`TIMESTAMP`
   （分区源列）。col1 非 DATE/TIMESTAMP 即 fail-fast。表按 date 分区；
   分区内按 `(symbol, date)` 升序排列（同一 symbol 可多行/多日期）。
+- **TIMESTAMP 键（v9）**：当 col1 为 TIMESTAMP 时，键为完整 timestamp 值
+  （微秒级），不截断为日期——同一天内同一标的的多个时间戳（如分钟 K 线）是不同
+  键。KeyResolver 内部键类型为 `int64_t`（兼容 `date_t` 与 `timestamp_t`）；
+  分区目录求值时自动提取日期部分（TIMESTAMP 列按 `int64_t` 读取，DATE 列按
+  `int32_t` 读取）。
 
 ---
 
@@ -231,6 +236,54 @@ DELETE FROM al.<table> ...   → Count
   单 part（同目录必须同列集，拒绝 schema-evolution 合并）。**两阶段提交**：所有组
   的合并 part 先全部写入 `_tmp/`，全部成功后再统一 move 到目标目录并删除旧 part；
   任一组合并失败则清理 `_tmp`、表状态不变（旧 part 仍在原位）。
+
+### COPY TO (FORMAT aligned) — 批量写入路径
+
+COPY TO (FORMAT aligned) 是**批量写入主路径**，走 DuckDB CopyFunction 框架
+（`GetAlignedCopyFunction` 注册，Sink/Combine/Finalize pipeline）。
+
+```sql
+-- 新组首次写入（schema 从 query 推断，排除 index key 列）
+COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday'
+  (FORMAT aligned, GROUP 'panel/ma');
+
+-- 已有组写入（schema 从 last parquet footer 读取，列裁剪到组内列）
+COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday'
+  (FORMAT aligned, GROUP 'index');
+```
+
+**写入 pipeline**（单向数据流，唯一写入路径）：
+
+```
+input chunk
+    ↓
+Sink: 按 partition key 分流 → per-partition local buffer (ColumnDataCollection)
+    ↓                          (Sink 不碰 ParquetWriter)
+Combine: 每个 partition buffer → GlobalState::Flush (FlushManager，唯一写入入口)
+    ↓
+Flush: PartitionWriter → ParquetWriter::Flush (写一个 RG)
+       满足 row_groups_per_file (8) → 轮转 part 文件 (rename 临时名 → 自描述名)
+    ↓
+Finalize: 逐分区 Finalize + Rename + 统计校验 (received == written)
+```
+
+- **per-partition 覆盖**：每个分区目录首次写入时自动清理旧 parquet 文件
+  （无需 `OVERWRITE true`）。
+- **自描述文件名**：先以 `0000-0000000000.parquet` 写入，Finalize 后 rename 为
+  `{idx:04d}-{rows:10d}.parquet`（实际行数）；0 行空文件自动删除。
+- **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
+  = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part。
+  压缩 **ZSTD**、Parquet 版本 **V1**（`CreateParquetWriter` 统一构造参数）。
+- **并行写入**：`SET preserve_insertion_order = false` 启用并行写入
+  （DuckDB pipeline 并发执行 Sink/Combine）；`REGULAR_COPY_TO_FILE` 执行模式
+  保留输入顺序，配合 query 中 `ORDER BY (symbol, date)` 保证分区内有序。
+- **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排；输入列类型
+  ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
+- **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
+  `written_rows`，Finalize 时校验 `received == written`，不匹配抛
+  `InternalException`。
+- **新组推断**：`aligned_create('table', 'group')` 2-arg 形式创建空组目录，
+  首次 COPY 时从 query 列推断 schema（排除 index key 列 symbol/date）。
 
 ---
 
@@ -350,7 +403,6 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 - `canonical_order: "sorted"` + skip index
 - Bloom filter / 二级索引
 - Tombstone / Delta
-- 并发写互斥
 - 类型升级
 - 稀疏专用存储
 - 非日期列的 partition source
