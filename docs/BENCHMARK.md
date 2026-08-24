@@ -168,3 +168,37 @@ monthly partitions and an update touching 1-2 days, aligned would rewrite 1-2 pa
 (~20k rows each) while native rewrites all 600k+ rows. The part-level granularity is
 the aligned engine's core write advantage; this benchmark's single-partition layout
 hides it.
+
+## COPY TO Benchmark (FORMAT aligned vs native PARQUET)
+
+Date: 2026-09-01  Script: `test/bench_copy_to.ps1`
+Dataset: progressive scale (1/4/20/80/400 symbols × 13159 days = 5.26M rows at max),
+7 columns, year partitioning, ZSTD compression, 8 threads.
+
+### Results (400 symbols, 5.26M rows)
+
+| Engine | Time | Ratio vs native flat |
+|--------|------|---------------------|
+| Aligned index (2 col) | 0.22s | 0.41x |
+| Aligned panel (7 col) | 0.68s | 1.26x |
+| Native year-part (7 col) | 1.14s | 2.12x |
+| Native flat (7 col) | 0.54s | 1.00x |
+
+### Key Findings
+
+- **Aligned vs native year-part: 1.67x faster.** The aligned engine's
+  per-partition CDC buffering + run-length batching outperforms native's
+  per-row partition routing for year-partitioned writes.
+- **Aligned vs native flat: 1.26x slower.** Native flat has zero partition
+  overhead (single file, no partition key evaluation, no per-partition
+  locking). The 26% gap is the inherent cost of partition management.
+- **At small scale (1 symbol):** aligned is 1.8x slower than native flat
+  (fixed overhead dominates). At 400 symbols, aligned narrows to 1.26x
+  as partition routing amortizes.
+- **Optimization history:** initial aligned panel was 0.731s (1.37x vs
+  native flat). After identity-map zero-copy fast path + per-RG flush in
+  Sink + single-slot partition key cache, improved to 0.68s (1.26x).
+- **For wide tables (100+ columns):** aligned's advantage grows because
+  column pruning + projection pushdown in the read path saves far more
+  than the partition management costs. The 7-column benchmark is the
+  worst case for aligned (narrow table, partition overhead dominates).
