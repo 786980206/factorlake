@@ -1205,17 +1205,29 @@ compaction → 数据完整性验证。
    `std::find_if` 线性扫描替换为 O(1) map 查找。对宽表消除
    O(cols²) per-part 开销。
 
-### Round 5：Compaction 并行化（进行中）
+### Round 5：Compaction 并行化 + 异步修复
 
-9. **Compaction Phase 1 并行化**：将 `_tmp/` 暂存阶段从串行改为并行
-   处理各分区目录（每个目录的读-写独立）。
+9. **Compaction Phase 1 并行化**（`aligned_compactor.cpp`）：
+   将 `_tmp/` 暂存阶段从串行改为并行处理各分区目录。新增 `StagingJob`/`StagingResult`
+   结构，用 `std::thread` 线程池 + `std::atomic` work queue 分发任务。每个 worker
+   创建独立的 `ParquetReader`/`ParquetWriter`/`ScanState`/`DataChunk`/`Collection`，
+   无共享状态。worker 异常用 `std::exception_ptr` 捕获并在 `join()` 后 rethrow。
+   Phase 2（move + delete）仍串行。
+
+10. **Compactor BLOCKED 异步修复**（`aligned_compactor.cpp`）：
+    `MergePartsToWriter` 和多 part 分流写入路径中 `ParquetReader::Scan` 返回
+    `BLOCKED` 之前被误判为结束。改为 `continue` 重试。
+
+11. **扫描列查找 O(1) 优化**（`aligned_scan.cpp`）：
+    在 `OpenPart` 时构建 `case_insensitive_map_t<idx_t> col_map`，将列映射和
+    过滤剪枝中的 `std::find_if` 线性扫描替换为 O(1) map 查找。
 
 ### 测试
 
 - SQLLogicTest：234/234 PASS
 - PS test suite：ALL PASSED
-- 基准测试：无回归（0.657s @ 400 symbols, 1.78x faster than native）
+- 基准测试：0.731s @ 400 symbols（1.68x faster than native year-part，无回归）
 
-提交：`ff34fdf`
+提交：`3260a9a`
 
 
