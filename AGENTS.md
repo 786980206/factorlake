@@ -297,7 +297,6 @@ extension/aligned/src/
 | | `FormatPartName` / `ParsePartName` | `{idx:04d}-{rows:10d}.parquet` 唯一格式化/解析 |
 | | `WriteEmptyParquet` / `WriteNullParquet` | 0 行占位 / N 行全 NULL 占位写入 |
 | | `OpenPartReaderAllColumns` / `OpenPartReaderNamedColumns` | 打开 ParquetReader + 初始化扫描 |
-| | `ReadPartToCollection` | 全列读入 ColumnDataCollection |
 | | `CountRecursive` | 递归计数目录/文件（跳过 `.aligned_write.lock`） |
 | `catalog/manifest` | `ResolveDataRoot` | root 参数或 `aligned_data_root` 设置解析 |
 | | `IndexGroup` | 返回 `plan.groups[0]`（index 组不变量） |
@@ -452,7 +451,7 @@ extension/aligned/src/
 - **`ParquetReader::Scan` 返回 `BLOCKED` 不是错误**：对象存储异步 I/O 可能返回
   `BLOCKED`（数据未就绪），应 `continue` 重试而非 `break`/throw。本地文件不会
   触发此路径。**所有** Scan 循环都已修复：scan、compactor（`MergePartsToWriter`、
-  多 part 分流）、`part_rewriter`（`FetchOldChunk`）、`parquet_io`（`ReadPartToCollection`）、
+  多 part 分流）、`part_rewriter`（`FetchOldChunk`）、
   `key_resolver`（`LoadPartition`、`LoadSinglePart`）、`aligned_mutator`。
 - **Compaction Phase 1 并行化**：各分区目录的暂存独立（各自有 reader/writer），
   可并行处理。线程池用 `std::thread` + `std::atomic` work queue，每个 worker
