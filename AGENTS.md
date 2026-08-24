@@ -445,3 +445,12 @@ extension/aligned/src/
 - **`Date::FromString` 可能 throw**：`partition_resolver` 的 `ExtractPartitionDate`
   调用 `Date::FromString` 处理分区目录名时必须 try/catch，畸形目录名应跳过剪枝
   而非 abort 整个 scan。
+- **`ParquetReader::Scan` 返回 `BLOCKED` 不是错误**：对象存储异步 I/O 可能返回
+  `BLOCKED`（数据未就绪），应 `continue` 重试而非 `break`/throw。本地文件不会
+  触发此路径。scan、compactor 的 `MergePartsToWriter` 和多 part 分流写入路径
+  都已修复。
+- **Compaction Phase 1 并行化**：各分区目录的暂存独立（各自有 reader/writer），
+  可并行处理。线程池用 `std::thread` + `std::atomic` work queue，每个 worker
+  创建自己的 `ParquetReader`/`ParquetWriter`/`ScanState`/`DataChunk`/`Collection`。
+  Phase 2（move + delete）仍串行。worker 异常用 `std::exception_ptr` 捕获并在
+  `join()` 后在主线程 rethrow。
