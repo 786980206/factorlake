@@ -190,7 +190,12 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::LookupEntry(CatalogTransaction tr
 		string table_dir = root + "/" + lookup_info.GetEntryName();
 		if (fs->DirectoryExists(table_dir)) {
 			// Force a full reload on the next EnsureTablesLoaded call.
-			tables_loaded = false;
+			// Set the flag inside the lock to avoid a data race with
+			// concurrent EnsureTablesLoaded / Scan calls.
+			{
+				std::lock_guard<std::mutex> flag_lock(tables_mutex);
+				tables_loaded = false;
+			}
 			if (transaction.HasContext()) {
 				EnsureTablesLoaded(transaction.GetContext());
 			}
