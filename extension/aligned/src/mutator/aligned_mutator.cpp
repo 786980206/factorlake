@@ -415,8 +415,11 @@ static unique_ptr<ColumnDataCollection> ReadSourceColumns(ClientContext &context
 	while (true) {
 		auto res = reader->Scan(context, scan_state, chunk);
 		auto async_type = res.GetResultType();
-		if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+		if (async_type == AsyncResultType::FINISHED) {
 			break;
+		}
+		if (async_type == AsyncResultType::BLOCKED) {
+			continue;
 		}
 		if (chunk.size() == 0) {
 			continue;

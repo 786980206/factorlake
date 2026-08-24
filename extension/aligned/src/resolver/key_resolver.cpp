@@ -66,8 +66,11 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 		while (true) {
 			auto res = reader->Scan(context, scan_state, chunk);
 			auto async_type = res.GetResultType();
-			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+			if (async_type == AsyncResultType::FINISHED) {
 				break;
+			}
+			if (async_type == AsyncResultType::BLOCKED) {
+				continue;
 			}
 			UnifiedVectorFormat sv, dv;
 			chunk.data[0].ToUnifiedFormat(chunk.size(), sv);
@@ -197,8 +200,11 @@ void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) 
 	while (true) {
 		auto res = reader->Scan(context, scan_state, chunk);
 		auto async_type = res.GetResultType();
-		if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+		if (async_type == AsyncResultType::FINISHED) {
 			break;
+		}
+		if (async_type == AsyncResultType::BLOCKED) {
+			continue;
 		}
 		UnifiedVectorFormat sv, dv;
 		chunk.data[0].ToUnifiedFormat(chunk.size(), sv);
