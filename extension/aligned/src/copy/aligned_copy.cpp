@@ -67,10 +67,10 @@ static unique_ptr<ParquetWriter> CreateAlignedParquetWriter(ClientContext &conte
 	    ParquetVersion::V1, GeoParquetVersion::V1);
 }
 
-void AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollection &buffer) {
+PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollection &buffer) {
 	idx_t rows = buffer.Count();
 	if (rows == 0) {
-		return;
+		return nullptr;
 	}
 
 	// Phase 1: Get or create the partition writer (needs global lock for map access).
@@ -129,6 +129,8 @@ void AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollec
 		pw->rows_in_current_part = 0;
 		pw->row_groups_in_current_part = 0;
 	}
+
+	return pw;
 }
 
 void AlignedCopyGlobalState::FinalizePartition(PartitionWriter &pw) {
@@ -461,12 +463,11 @@ static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_dat
 		// Flush manages its own locking (global lock for writer lookup,
 		// per-partition lock for the actual write). Different partitions
 		// can flush in parallel across threads.
-		global_state.Flush(partition_key, pbuf.collection);
+		PartitionWriter *pw = global_state.Flush(partition_key, pbuf.collection);
 		// Track received rows on the partition writer (for final accounting).
-		std::lock_guard<std::mutex> lock(global_state.lock);
-		auto it = global_state.writers.find(partition_key);
-		if (it != global_state.writers.end()) {
-			it->second->received_rows += rows;
+		// received_rows is atomic — no lock needed. Flush returns the writer.
+		if (pw) {
+			pw->received_rows += rows;
 		}
 		// Reset the buffer (defensive — Combine is called once per thread).
 		pbuf.collection.Reset();

@@ -108,8 +108,10 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 	//   2. writer->Flush(buffer) — writes one Row Group.
 	//   3. Rotate part file at row_groups_per_file boundary.
 	//
-	// Thread safety: caller must hold `lock`.
-	void Flush(const string &partition_key, ColumnDataCollection &buffer);
+	// Returns the PartitionWriter* (never null after a successful flush).
+	// Thread safety: uses global lock for writer lookup, per-partition lock
+	// for the actual write.  Different partitions flush in parallel.
+	PartitionWriter *Flush(const string &partition_key, ColumnDataCollection &buffer);
 
 	// Finalize a single partition writer: flush footer, rename file,
 	// update written_rows.  Called only from Finalize.
