@@ -1,7 +1,7 @@
 # FactorLake / AlignedTable — API 对接文档
 
 > 本文档面向需要通过 DuckDB 对接 AlignedTable 存储引擎的项目。
-> 涵盖 ATTACH 挂载、标准 SQL 增删改查、表函数 API 及全部参数说明。
+> 涵盖 ATTACH 挂载、标准 SQL 增删改查、COPY TO 批量写入、表函数 API 及全部参数说明。
 
 ---
 
@@ -11,10 +11,11 @@
 2. [快速开始](#2-快速开始)
 3. [ATTACH 挂载](#3-attach-挂载)
 4. [增删改查（标准 SQL）](#4-增删改查标准-sql)
-5. [表函数 API](#5-表函数-api)
-6. [配置项](#6-配置项)
-7. [参数详解](#7-参数详解)
-8. [C++ 内部 API（供扩展开发者）](#8-c-内部-api供扩展开发者)
+5. [COPY TO (FORMAT aligned) — 批量写入](#5-copy-to-format-aligned-批量写入)
+6. [表函数 API](#6-表函数-api)
+7. [配置项](#7-配置项)
+8. [参数详解](#8-参数详解)
+9. [C++ 内部 API（供扩展开发者）](#9-c-内部-api供扩展开发者)
 
 ---
 
@@ -230,11 +231,111 @@ DELETE FROM al.<table> WHERE <conditions>;
 
 ---
 
-## 5. 表函数 API
+## 5. COPY TO (FORMAT aligned) — 批量写入
+
+`COPY TO (FORMAT aligned)` 是**批量写入主路径**，走 DuckDB CopyFunction 框架，适用于
+大批量数据的一次性灌入（如因子批算、历史回填）。相比标准 DML（§4 的 INSERT upsert
+逐行语义），COPY TO 走单向数据流 pipeline（Sink → Combine → Flush → Finalize），
+吞吐更高，尤其适合整组覆盖写入场景。
+
+### 5.1 语法
+
+```sql
+COPY (SELECT ...) TO '<table_name>' (FORMAT aligned, GROUP '<group_name>');
+```
+
+| 选项 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `FORMAT aligned` | 固定关键字 | 是 | 指定使用 AlignedTable 批量写入。`TO` 后的字符串是**逻辑表名**（数据根目录下的子目录），不是文件路径。 |
+| `GROUP '<group_name>'` | VARCHAR | 是 | 目标列组：`'index'` 或 `'panel/ma'`、`'factor/alpha'` 等 `lv1/lv2` 两级路径。 |
+
+> **注意**：`GROUP` 选项是**必填**的——COPY TO 必须明确写入哪个列组，不像标准 DML
+> 那样由 catalog 自动路由。`TO` 后的字符串是**逻辑表名**，不是文件路径。
+
+### 5.2 新组首次写入（schema 从 query 推断）
+
+目标列组不存在时，需先用 `aligned_create` 的 **2-arg 形式**（详见 §6.0）创建空组目录，
+再执行首次 COPY：
+
+```sql
+-- 1. 创建空组目录（不写任何 parquet，schema 留待首次 COPY 推断）
+SELECT * FROM aligned_create('cnstk_ixday', 'panel/ma');
+
+-- 2. 首次 COPY：从 query 列推断组 schema（排除 index key 列 symbol/date）
+COPY (SELECT symbol, date, ma5, ma20, ma60 FROM mock ORDER BY symbol, date)
+  TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma');
+```
+
+- 首次 COPY 时，引擎从 query 的输出列中**排除 index key 列（symbol、date）**，
+  剩余列即新组的 schema，按 query 列顺序写入 Parquet。
+- Key 列（symbol/date）只在 `index/` 组保存一份，非 index 组不再重复存储。
+
+### 5.3 已有组写入（schema 从 footer 读取 + 列裁剪）
+
+组已存在（已有 parquet 文件）时，schema 从组内最后一个 part 的 Parquet footer 读取，
+COPY 时只写组 schema 包含的列，按组 schema 顺序重排：
+
+```sql
+-- index 组写入（schema 已由建表确定）
+COPY (SELECT * FROM mock ORDER BY symbol, date)
+  TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index');
+```
+
+- 输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
+- query 中不在组 schema 内的列会被忽略；缺少组 schema 需要的列则报错。
+
+### 5.4 写入行为
+
+- **per-partition 覆盖**：每个分区目录首次写入时**自动清理旧 parquet 文件**，
+  无需 `OVERWRITE true` 选项。同一 COPY 语句内多次命中同一分区则追加。
+- **自描述文件名**：先以 `0000-0000000000.parquet` 临时名写入，Finalize 后 rename 为
+  `{idx:04d}-{rows:10d}.parquet`（`idx` = 组内 part 序号，`rows` = 该 part 实际行数）。
+  0 行空文件自动删除。
+- **RG / Part 切分**：Row Group flush size = 131072；单个 part 文件上限 = 8 RG
+  = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part 文件。
+- **排序**：用户须在 query 中 `ORDER BY (symbol, date)` 保证分区内有序；COPY 在
+  `REGULAR_COPY_TO_FILE` 执行模式下保留输入顺序。
+- **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
+  `written_rows`，Finalize 时校验 `received == written`，不匹配抛 `InternalException`。
+
+### 5.5 并行写入
+
+默认单线程写入。开启多线程：
+
+```sql
+SET preserve_insertion_order = false;
+COPY (SELECT * FROM huge_mock ORDER BY symbol, date)
+  TO 'cnstk_ixday' (FORMAT aligned, GROUP 'factor/alpha');
+```
+
+`preserve_insertion_order = false` 允许 DuckDB 并行执行写入 pipeline，多线程同时写不同
+分区。**注意**：关闭插入顺序后仍须在 query 内 `ORDER BY (symbol, date)`，以保证每个
+分区**内部**有序（分区内有序是 AlignedTable 行对齐契约的要求）。
+
+### 5.6 完整示例
+
+```sql
+SET aligned_data_root = 'D:/data/factorlake';
+
+-- 场景 A：向新组 panel/ma 批量灌入（组不存在）
+SELECT * FROM aligned_create('cnstk_ixday', 'panel/ma');   -- 创建空组
+COPY (SELECT symbol, date, ma5, ma20, ma60
+      FROM mock ORDER BY symbol, date)
+  TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma');
+
+-- 场景 B：向已有 index 组批量覆盖写入
+COPY (SELECT symbol, date, close, volume
+      FROM mock ORDER BY symbol, date)
+  TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index');
+```
+
+---
+
+## 6. 表函数 API
 
 除了标准 SQL DML，还提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
-### 5.0 `aligned_create` — 建表 / 扩展列组
+### 6.0 `aligned_create` — 建表 / 扩展列组
 
 ```sql
 SELECT * FROM aligned_create(table_name, group_name, columns [, root => '...']
@@ -252,7 +353,7 @@ SELECT * FROM aligned_create(table_name, group_name, columns [, root => '...']
 **返回**：单行 `(dirs_created BIGINT, files_created BIGINT, txid BIGINT)`。
 
 **两种模式**：
-- **`group_name='index'`**：**建表**。前两列的**类型**必须满足主键契约：col0 = VARCHAR（symbol 列），col1 = DATE/TIMESTAMP（date 列，分区源列）。列名可自定义（详见 §7.4）。所有列写入 index 组。创建 0 行占位 parquet。
+- **`group_name='index'`**：**建表**。前两列的**类型**必须满足主键契约：col0 = VARCHAR（symbol 列），col1 = DATE/TIMESTAMP（date 列，分区源列）。列名可自定义（详见 §8.4）。所有列写入 index 组。创建 0 行占位 parquet。
 - **`group_name='lv1/lv2'`**：**扩展列组**。表必须已存在。新组的列定义不需含主键。每个已有分区写 N 行全 NULL 占位 parquet（N = index 分区行数），满足分区对齐契约。已有列组不受影响。
 
 ```sql
@@ -267,7 +368,47 @@ SELECT * FROM aligned_create('ptbl', 'index', 'symbol VARCHAR, date DATE, close 
                              partition_template => 'date=%Y-%m-%d');
 ```
 
-### 5.1 `aligned_scan` — 扫描逻辑表
+#### 2-arg 形式：创建空组（供 COPY TO 批量灌入）
+
+省略 `columns` 位置参数，仅传 `table_name` + `group_name`（及可选命名参数）：
+
+```sql
+SELECT * FROM aligned_create(table_name, group_name
+                             [, root => '...']
+                             [, partition_template => '...']);
+```
+
+**创建一个空组目录**（不写任何 parquet 文件，无 footer）。组的 schema 留待首次
+`COPY TO (FORMAT aligned)`（详见 §5）时从 query 输出列推断——引擎自动排除 index key
+列（symbol、date），剩余列即新组 schema，按 query 列顺序写入。
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|------|------|------|------|------|
+| `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名（表必须已存在）。 |
+| `group_name` | 位置参数 2 | VARCHAR | 是 | 列组路径，必须是 `lv1/lv2` 两级路径（**不能是 `'index'`**）。 |
+| `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root`。 |
+| `partition_template` | 命名参数 | VARCHAR | 否 | 分区模板，默认 `month=%Y-%m`。 |
+
+**返回**：单行 `(dirs_created BIGINT, files_created BIGINT, txid BIGINT)`，其中
+`files_created = 0`（空组不创建 parquet）。
+
+> **这是为 `COPY TO` 批量灌入创建非 index 组的推荐方式**。相比 3-arg 形式（需预先给出
+> 完整列定义 + 每个已有分区写 N 行全 NULL 占位），2-arg 形式零开销创建空目录，schema
+> 由首次灌入的数据自然确定。
+>
+> 2-arg 与 3-arg 注册为 `TableFunctionSet` 的两个独立 overload（DuckDB 表函数不支持
+> 可选位置参数），按实参数量自动分发。
+
+```sql
+-- 创建空组，schema 留待首次 COPY 推断
+SELECT * FROM aligned_create('cnstk_ixday', 'panel/ma');
+
+-- 首次 COPY 时从 query 列推断 schema（排除 symbol/date key 列）
+COPY (SELECT symbol, date, ma5, ma20, ma60 FROM mock ORDER BY symbol, date)
+  TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma');
+```
+
+### 6.1 `aligned_scan` — 扫描逻辑表
 
 ```sql
 SELECT * FROM aligned_scan(table_name [, root => '...']);
@@ -289,7 +430,7 @@ SELECT symbol, date, close FROM aligned_scan('cnstk_ixday')
 SELECT * FROM aligned_scan('cnstk_ixday', root => 'D:/data/factorlake');
 ```
 
-### 5.2 `aligned_groups` — 查看列组
+### 6.2 `aligned_groups` — 查看列组
 
 ```sql
 SELECT * FROM aligned_groups(table_name [, root => '...']);
@@ -317,7 +458,7 @@ SELECT * FROM aligned_groups('cnstk_ixday');
 --   fieldset/ma    ma5;ma20                3
 ```
 
-### 5.3 `aligned_compact` — 合并 part 碎片
+### 6.3 `aligned_compact` — 合并 part 碎片
 
 ```sql
 SELECT * FROM aligned_compact(table_name, group_name [, root => '...']);
@@ -345,7 +486,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'factor/alpha001');
 SELECT * FROM aligned_compact('cnstk_ixday', 'all');
 ```
 
-### 5.4 `aligned_drop` — 删除列组或整表
+### 6.4 `aligned_drop` — 删除列组或整表
 
 ```sql
 SELECT * FROM aligned_drop(table_name, group_name [, root => '...']);
@@ -375,9 +516,9 @@ SELECT * FROM aligned_drop('cnstk_ixday', 'index');
 
 ---
 
-## 6. 配置项
+## 7. 配置项
 
-### 6.1 `aligned_data_root`
+### 7.1 `aligned_data_root`
 
 | 属性 | 值 |
 |------|-----|
@@ -392,7 +533,7 @@ SET aligned_data_root = 'D:/data/factorlake';
 -- 之后所有 aligned_scan/create/compact/drop 调用无需传 root
 ```
 
-### 6.2 `parquet_metadata_cache`
+### 7.2 `parquet_metadata_cache`
 
 | 属性 | 值 |
 |------|-----|
@@ -405,15 +546,15 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 
 ---
 
-## 7. 参数详解
+## 8. 参数详解
 
-### 7.1 `table_name`（表名）
+### 8.1 `table_name`（表名）
 
 - 类型：VARCHAR
 - 含义：逻辑表名，对应数据根目录下的一个一级子目录。
 - 示例：`'cnstk_ixday'` → `<root>/cnstk_ixday/`
 
-### 7.2 `root`（数据根目录）
+### 8.2 `root`（数据根目录）
 
 - 类型：VARCHAR
 - 含义：所有逻辑表的顶层父目录。
@@ -421,12 +562,12 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
 - 可通过 `SET aligned_data_root` 设为默认值，避免每次传参。
 - 在 ATTACH 模式下，`root` 就是 ATTACH 路径，无需单独指定。
 
-### 7.3 `group_name`（列组路径）
+### 8.3 `group_name`（列组路径）
 
 - 类型：VARCHAR
 - 含义：列组路径，用于 `aligned_create`、`aligned_compact`、`aligned_drop`。
 - 特殊值：
-  - `'index'`：index 组（Key 列所在组，详见 §7.4 主键契约）。`aligned_create` 中表示新建表；`aligned_drop` 中表示删除整张表。
+  - `'index'`：index 组（Key 列所在组，详见 §8.4 主键契约）。`aligned_create` 中表示新建表；`aligned_drop` 中表示删除整张表。
   - `'all'`：`aligned_compact` 专用，合并表中所有列组（单事务原子切换）。
 - 非 index 组名格式：必须是 `lv1/lv2` 两级路径，如 `factor/alpha101`、`fieldset/ma`。
 - **各函数用法**：
@@ -434,7 +575,7 @@ Parquet footer / schema / Row Group statistics 的 LRU 缓存。跨查询跨线�
   - `aligned_compact`：`group='factor/alpha'` → 合并该组；`group='all'` → 合并所有组。
   - `aligned_drop`：`group='factor/alpha'` → 删除该列组目录；`group='index'` → 删除整张表。
 
-### 7.4 主键契约（symbol 列与 date 列）
+### 8.4 主键契约（symbol 列与 date 列）
 
 AlignedTable 的主键是 `(symbol, date)` 复合键，但 **列名不固定**——引擎按 index 组
 前两列的**类型**动态推断哪列是 symbol、哪列是 date，而非按列名匹配。
@@ -484,7 +625,7 @@ date 列（col1）是**分区源列**——其值决定行属于哪个分区目�
 `date=2026-01-15` 等）。分区模板（`partition_template`）定义了分区目录的命名格式，
 但分区值始终从 date 列的值求值得出。
 
-### 7.5 WITH 子句参数（CREATE TABLE）
+### 8.5 WITH 子句参数（CREATE TABLE）
 
 CREATE TABLE 的 `WITH (...)` 子句支持以下选项：
 
@@ -496,11 +637,11 @@ CREATE TABLE 的 `WITH (...)` 子句支持以下选项：
 
 ---
 
-## 8. C++ 内部 API（供扩展开发者）
+## 9. C++ 内部 API（供扩展开发者）
 
 以下 API 供 DuckDB 扩展开发者在 C++ 层直接调用，**不需要** 通过 SQL。
 
-### 8.1 扫描绑定
+### 9.1 扫描绑定
 
 ```cpp
 unique_ptr<FunctionData> AlignedBindForCatalog(
@@ -521,7 +662,7 @@ unique_ptr<FunctionData> AlignedBindForCatalog(
 
 用于在不经过 `TableFunctionBindInput` 的情况下绑定扫描（catalog 内部使用）。
 
-### 8.2 内存 Upsert
+### 9.2 内存 Upsert
 
 ```cpp
 UpsertResult AlignedUpsertFromCollection(
@@ -546,7 +687,7 @@ UpsertResult AlignedUpsertFromCollection(
 
 跳过临时 Parquet 文件的双写，直接从内存 collection 执行 upsert。`PhysicalAlignedInsert` 使用此接口。
 
-### 8.3 内存 Delete
+### 9.3 内存 Delete
 
 ```cpp
 DeleteResult AlignedDeleteFromCollection(
@@ -565,7 +706,7 @@ DeleteResult AlignedDeleteFromCollection(
 
 **返回**：`DeleteResult { idx_t rows_deleted, parts_rewritten }`
 
-### 8.4 建表
+### 9.4 建表
 
 ```cpp
 void AlignedCreateTable(
@@ -583,7 +724,7 @@ void AlignedCreatePartition(
     const string &partition_key);
 ```
 
-### 8.5 写锁（RAII）
+### 9.5 写锁（RAII）
 
 ```cpp
 TableWriteLock lock(fs, table_path);
@@ -592,7 +733,7 @@ TableWriteLock lock(fs, table_path);
 在 `<table_path>/.aligned_write.lock` 创建锁文件；已存在则抛异常。析构时删除锁文件。
 mutator 和 compactor 内部自动使用。崩溃残留需手动删除。
 
-### 8.6 事务 ID
+### 9.6 事务 ID
 
 ```cpp
 idx_t NextTransactionId();
