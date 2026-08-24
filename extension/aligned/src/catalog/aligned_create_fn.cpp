@@ -13,6 +13,8 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parallel/async_result.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 //===----------------------------------------------------------------------===//
@@ -117,7 +119,10 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 	if (fs.DirectoryExists(table_dir)) {
 		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
 		for (auto &p : parts) {
-			if (p.path.find("/_tmp/") == string::npos) {
+			// Normalize to '/' separators so the _tmp check works on Windows.
+			string norm = p.path;
+			std::replace(norm.begin(), norm.end(), '\\', '/');
+			if (norm.find("/_tmp/") == string::npos) {
 				table_exists = true;
 				break;
 			}

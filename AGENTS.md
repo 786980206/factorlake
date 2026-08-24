@@ -458,3 +458,7 @@ extension/aligned/src/
   创建自己的 `ParquetReader`/`ParquetWriter`/`ScanState`/`DataChunk`/`Collection`。
   Phase 2（move + delete）仍串行。worker 异常用 `std::exception_ptr` 捕获并在
   `join()` 后在主线程 rethrow。
+- **`GlobFiles` 在 Windows 可能返回反斜杠路径**：对 glob 结果做字符串搜索时
+  （如排除 `_tmp/`），必须先 `std::replace(norm.begin(), norm.end(), '\\', '/')`
+  归一化为正斜杠再搜索。`aligned_create.cpp` 和 `aligned_create_fn.cpp` 的
+  table-exists 检测都已修复。
