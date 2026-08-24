@@ -260,7 +260,12 @@ static bool ExtractPartitionDate(const PartInfo &part, const vector<PartitionTem
 		bool t_has_day = t.template_str.find("%d") != string::npos;
 		if (t_has_year && t_has_month && t_has_day) {
 			// the value is a full date string (strftime output of the template)
-			auto d = Date::FromString(value, false);
+			date_t d;
+			try {
+				d = Date::FromString(value, false);
+			} catch (...) {
+				return false; // malformed date in partition dir — skip pruning
+			}
 			if (d == date_t::infinity()) {
 				return false;
 			}
