@@ -298,6 +298,7 @@ extension/aligned/src/
 | | `WriteEmptyParquet` / `WriteNullParquet` | 0 行占位 / N 行全 NULL 占位写入 |
 | | `OpenPartReaderAllColumns` / `OpenPartReaderNamedColumns` | 打开 ParquetReader + 初始化扫描 |
 | | `ReadPartToCollection` | 全列读入 ColumnDataCollection |
+| | `CountRecursive` | 递归计数目录/文件（跳过 `.aligned_write.lock`） |
 | `catalog/manifest` | `ResolveDataRoot` | root 参数或 `aligned_data_root` 设置解析 |
 | | `IndexGroup` | 返回 `plan.groups[0]`（index 组不变量） |
 | | `NextPartIndexForPartition` | 跨组最大 partition_index + 1 |
