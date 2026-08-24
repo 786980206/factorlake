@@ -349,8 +349,21 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 	part_vec.ToUnifiedFormat(input.size(), part_fmt);
 	bool is_timestamp = part_vec.GetType().id() == LogicalTypeId::TIMESTAMP;
 
-	// Group row indices by partition key.
-	std::map<string, vector<idx_t>> rows_by_partition;
+	// Group row indices by partition key using run-length detection.
+	// Since input is typically sorted by (symbol, date), consecutive rows
+	// usually share the same partition key. We detect partition boundaries
+	// and batch-copy contiguous ranges, avoiding per-row map overhead.
+	// We still use the partition_key_cache to avoid re-evaluating the
+	// partition template for repeated date values.
+	struct PartitionRun {
+		idx_t start;
+		idx_t count;
+		string key;
+	};
+	vector<PartitionRun> runs;
+	string current_key;
+	idx_t run_start = 0;
+
 	for (idx_t i = 0; i < input.size(); i++) {
 		auto si = part_fmt.sel->get_index(i);
 		if (!part_fmt.validity.RowIsValid(si)) {
@@ -363,27 +376,47 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		} else {
 			date_val = static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(part_fmt)[si]);
 		}
-		string partition_key;
-		if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val, partition_key)) {
-			throw IOException("aligned COPY: cannot evaluate partition template '%s'",
-			                  bind_data.partition_template);
+		// Cache lookup: avoid string formatting for repeated dates
+		auto cache_it = local_state.partition_key_cache.find(date_val);
+		const string *pk_ptr;
+		if (cache_it != local_state.partition_key_cache.end()) {
+			pk_ptr = &cache_it->second;
+		} else {
+			string pk;
+			if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val, pk)) {
+				throw IOException("aligned COPY: cannot evaluate partition template '%s'",
+				                  bind_data.partition_template);
+			}
+			pk_ptr = &local_state.partition_key_cache.emplace(date_val, std::move(pk)).first->second;
 		}
-		rows_by_partition[partition_key].push_back(i);
+		if (*pk_ptr != current_key) {
+			if (i > run_start) {
+				runs.push_back({run_start, i - run_start, std::move(current_key)});
+			}
+			current_key = *pk_ptr;
+			run_start = i;
+		}
+	}
+	// Final run
+	if (input.size() > run_start) {
+		runs.push_back({run_start, input.size() - run_start, std::move(current_key)});
 	}
 
-	// For each partition: build a reordered chunk and append to local buffer.
-	for (auto &kv : rows_by_partition) {
-		auto &partition_key = kv.first;
-		auto &row_indices = kv.second;
-		idx_t n = row_indices.size();
+	// For each run: build a reordered chunk and append to local buffer.
+	for (auto &run : runs) {
+		idx_t n = run.count;
+		if (n == 0) {
+			continue;
+		}
 
 		DataChunk chunk;
 		chunk.Initialize(context.client, bind_data.sql_types);
 		chunk.SetCardinality(n);
 
+		// Build a sequential selection vector for this contiguous range
 		SelectionVector sel(n);
 		for (idx_t i = 0; i < n; i++) {
-			sel.set_index(i, row_indices[i]);
+			sel.set_index(i, run.start + i);
 		}
 		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
 			idx_t src_col = bind_data.input_col_map[c];
@@ -398,7 +431,7 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 			}
 		}
 
-		auto *pbuf = local_state.GetBuffer(partition_key, context.client);
+		auto *pbuf = local_state.GetBuffer(run.key, context.client);
 		pbuf->collection.Append(pbuf->append_state, chunk);
 	}
 	// NOTE: Sink does NOT flush. Flushing happens only in Combine.

@@ -8,6 +8,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace duckdb {
@@ -134,6 +135,11 @@ struct AlignedCopyLocalState : public LocalFunctionData {
 	std::map<string, unique_ptr<PartitionBuffer>> buffers;
 	const vector<LogicalType> &types;
 	idx_t received_rows = 0; // local accounting
+
+	// Partition key cache: date value → partition key string.
+	// Avoids re-evaluating the partition template for every row when
+	// consecutive rows share the same date (common with sorted input).
+	std::unordered_map<int64_t, string> partition_key_cache;
 
 	// Get or create the buffer for a partition key.
 	PartitionBuffer *GetBuffer(const string &partition_key, ClientContext &context);
