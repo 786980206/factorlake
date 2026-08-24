@@ -1367,4 +1367,52 @@ compaction → 数据完整性验证。
 
 提交：`6289ecc`
 
+## 2026-09-02 — 深度审查 Round 12-17：文档清理 + 路径归一化 + 最终审计
+
+### Round 12-14：文档清理 + 死代码移除
+- 移除死代码 `ReadPartToCollection`（`parquet_io.cpp` 定义 + 声明，从未被调用）
+- 清理 `AGENTS.md` 和 `release.md` 中所有 `ReadPartToCollection` 过期引用
+- 审计 `aligned_transaction.cpp`（正确，极简事务管理器）
+- 审计 `aligned_drop.cpp`（正确，drop 不需要 staging）
+
+### Round 15：manifest.cpp + partition_resolver 审计
+- 审计 `manifest.cpp` `BuildTablePlan`：分区对齐契约完整强制执行
+  - index 组必须存在、index 分区索引必须从 0000 连续
+  - 非 index 组分区键必须是 index 键子集
+  - 共享分区总行数必须一致、共享 part 索引行数必须一致
+  - 非 index 组必须是 lv1/lv2 两级路径
+- 审计 `partition_resolver.cpp`：`Date::FromString` 和 `std::stoi` 都有 try/catch
+- 基准测试验证：无性能回归
+
+### Round 16：aligned_create.cpp + extension.cpp 审计
+- **修复 Windows 路径归一化 bug**（P2）：`aligned_create.cpp` line 305
+  `p.path.find("/_tmp/")` 在 Windows 上 glob 可能返回反斜杠路径，导致
+  `\_tmp\` 不匹配 `/_tmp/`，崩溃残留的 _tmp ���录会被误判为"表已存在"
+- 修复：搜索前 `std::replace(norm.begin(), norm.end(), '\\', '/')`
+- 审计 `extension.cpp`：所有 6 个函数注册完整
+- Feature Lake 脚本验证通过
+
+### Round 17：aligned_catalog.cpp + aligned_dml.cpp + aligned_groups.cpp 审计
+- **修复 `aligned_create_fn.cpp` 同一路径归一化 bug**（P2）
+- 新增 AGENTS.md 陷阱条目：`GlobFiles` Windows 路径归一化
+- 审计 `aligned_catalog.cpp`：
+  - `EnsureTablesLoaded` 线程安全（mutex + IOException catch only）
+  - `LookupEntry` 无死锁（锁释放后再重载）
+  - `CreateTable` 选项解析正确
+  - `PlanInsert/PlanDelete/PlanUpdate` 映射构建正确
+- 审计 `aligned_dml.cpp`：
+  - INSERT 批量 1M 行、空输入提前退出
+  - DELETE rowid 收集 + 键解析 + 投影
+  - UPDATE 排序归并 + DATE/TIMESTAMP 键类型处理
+  - `ResolveKeysForRowids` 使用表计划列名（非硬编码）
+- 审计 `aligned_groups.cpp`：简单表函数，无 bug
+- 路径分隔符全面扫描：所有 `find_last_of` 都用 `"/\\"`
+
+### 测试结果
+- SQLLogicTest：266/266 PASS
+- PS test suite：ALL PASSED
+- 基准测试：aligned 0.67s vs native year-part 1.05s = 1.56x faster
+
+提交：`890b91b`、`eaea083`
+
 
