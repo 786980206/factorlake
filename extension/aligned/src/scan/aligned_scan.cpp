@@ -607,7 +607,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 		}
 		auto &col = group.column_order[i];
 		auto it = std::find_if(g.reader->columns.begin(), g.reader->columns.end(),
-		                       [&](const MultiFileColumnDefinition &c) { return c.name == col; });
+		                       [&](const MultiFileColumnDefinition &c) { return StringUtil::CIEquals(c.name, col); });
 		if (it == g.reader->columns.end()) {
 			g.missing_positions.push_back(projected);
 			continue;
@@ -682,7 +682,7 @@ static void ComputeRowGroupWindow(ClientContext &context, AlignedGroupScanState 
 			if (rg.partition_row_group) {
 				for (auto &gf : group_filters) {
 auto it = std::find_if(g.reader->columns.begin(), g.reader->columns.end(),
-				                       [&](const MultiFileColumnDefinition &c) { return c.name == gf.column_name; });
+				                       [&](const MultiFileColumnDefinition &c) { return StringUtil::CIEquals(c.name, gf.column_name); });
 					if (it == g.reader->columns.end()) {
 						// Column absent in this part (schema evolution): no pruning
 						continue;

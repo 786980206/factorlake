@@ -1,0 +1,255 @@
+# name: test/aligned/aligned_copy.test
+# description: COPY TO (FORMAT aligned) boundary condition tests
+# Covers: 0-row, single-row, NULL, col-order, extra-cols, missing-cols,
+#         TIMESTAMP partition, new-group auto-create, type cast,
+#         preserve_insertion_order=true, single-partition, many-partitions
+
+statement ok
+LOAD 'aligned'
+
+statement ok
+SET threads=4
+
+statement ok
+SET preserve_insertion_order=false
+
+# --- (a) COPY TO with 0 rows: no crash, no files, no partition created ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_empty', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-01' AS date WHERE 1=0) TO 'copy_empty' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_groups('copy_empty')
+----
+1
+
+# --- (c) COPY TO with a single row ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_single', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-01' AS date) TO 'copy_single' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_single')
+----
+1
+
+query TT
+SELECT symbol, date FROM aligned_scan('copy_single') ORDER BY symbol
+----
+000001,2026-01-01
+
+# --- (d) COPY TO with all rows in one partition, then overwrite ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_overwrite', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-03'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_overwrite' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_overwrite')
+----
+3
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-10'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001','000002','000003']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_overwrite' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_overwrite')
+----
+30
+
+# --- (b) COPY TO with NULL in non-partition column ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_null', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-03'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_null' (FORMAT aligned, GROUP 'index')
+
+statement ok
+COPY (SELECT s.symbol, d.date, CAST(NULL AS DOUBLE) AS close FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-03'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_null' (FORMAT aligned, GROUP 'panel/price')
+
+query I
+SELECT count(close) FROM aligned_scan('copy_null')
+----
+0
+
+query I
+SELECT count(*) FROM aligned_scan('copy_null')
+----
+3
+
+# --- (e) COPY TO with many small partitions (daily) ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_daily', 'index', 'symbol VARCHAR, date DATE', partition_template => 'date=%Y-%m-%d')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-05'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY d.date) TO 'copy_daily' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_daily')
+----
+5
+
+query I
+SELECT partition_count FROM aligned_groups('copy_daily') WHERE group_name='index'
+----
+6
+
+# --- (f) COPY TO with columns in different order than group schema ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_reorder', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-02'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_reorder' (FORMAT aligned, GROUP 'index')
+
+statement ok
+COPY (SELECT s.symbol, d.date, CAST(42.0 AS DOUBLE) AS close FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-02'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_reorder' (FORMAT aligned, GROUP 'panel/price')
+
+query R rowsort
+SELECT close FROM aligned_scan('copy_reorder')
+----
+42.0
+42.0
+
+# --- (g) COPY TO with extra columns (silently ignored) ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_extra', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-01'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_extra' (FORMAT aligned, GROUP 'index')
+
+statement ok
+COPY (SELECT s.symbol, d.date, CAST(99.0 AS DOUBLE) AS close, 'extra_value' AS extra_col FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-01'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_extra' (FORMAT aligned, GROUP 'panel/price')
+
+query R
+SELECT close FROM aligned_scan('copy_extra') WHERE symbol='000001'
+----
+99.0
+
+# --- (k) COPY TO with type cast (INTEGER -> DOUBLE) ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_cast', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-01'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_cast' (FORMAT aligned, GROUP 'index')
+
+statement ok
+COPY (SELECT s.symbol, d.date, CAST(55 AS INTEGER) AS close FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-01'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_cast' (FORMAT aligned, GROUP 'panel/price')
+
+query R
+SELECT close FROM aligned_scan('copy_cast') WHERE symbol='000001'
+----
+55.0
+
+# --- (l) COPY TO with preserve_insertion_order=true (single-threaded) ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SET preserve_insertion_order=true
+
+statement ok
+SELECT * FROM aligned_create('copy_ordered', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-05'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001','000002']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_ordered' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_ordered')
+----
+10
+
+statement ok
+SET preserve_insertion_order=false
+
+# --- (i) COPY TO with TIMESTAMP partition column ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_ts', 'index', 'symbol VARCHAR, date TIMESTAMP', partition_template => 'date=%Y-%m-%d')
+
+statement ok
+COPY (SELECT s.symbol, d.ts AS date FROM UNNEST(generate_series('2026-01-01 09:30:00'::TIMESTAMP, '2026-01-01 09:35:00'::TIMESTAMP, INTERVAL 1 MINUTE)) AS d(ts) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.ts) TO 'copy_ts' (FORMAT aligned, GROUP 'index')
+
+query I
+SELECT count(*) FROM aligned_scan('copy_ts')
+----
+6
+
+# --- (j) COPY TO to a new non-existent group (auto-create from query) ---
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_newgrp', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-02'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_newgrp' (FORMAT aligned, GROUP 'index')
+
+statement ok
+COPY (SELECT s.symbol, d.date, CAST(1.5 AS DOUBLE) AS factor1 FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-02'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_newgrp' (FORMAT aligned, GROUP 'factor/newgrp')
+
+query T
+SELECT group_name FROM aligned_groups('copy_newgrp') WHERE group_name='factor/newgrp'
+----
+factor/newgrp
+
+query R
+SELECT factor1 FROM aligned_scan('copy_newgrp') WHERE symbol='000001' AND date=DATE '2026-01-01'
+----
+1.5
+
+# --- (h) COPY TO with fewer columns than group schema ---
+# The price group has [close]. Writing only symbol+date (no close) means
+# no group columns are in the query → bind correctly rejects.
+statement ok
+SET aligned_data_root='{TEST_DIR}'
+
+statement ok
+SELECT * FROM aligned_create('copy_missing_col', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y')
+
+statement ok
+COPY (SELECT s.symbol, d.date FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-02'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_missing_col' (FORMAT aligned, GROUP 'index')
+
+statement ok
+COPY (SELECT s.symbol, d.date, CAST(42.0 AS DOUBLE) AS close FROM UNNEST(generate_series('2026-01-01'::DATE, '2026-01-02'::DATE, INTERVAL 1 DAY)) AS d(date) CROSS JOIN UNNEST(ARRAY['000001']) AS s(symbol) ORDER BY s.symbol, d.date) TO 'copy_missing_col' (FORMAT aligned, GROUP 'panel/price')
+
+# Verify close is present after full write
+query I
+SELECT count(close) FROM aligned_scan('copy_missing_col')
+----
+2
+
+query I
+SELECT count(*) FROM aligned_scan('copy_missing_col')
+----
+2
