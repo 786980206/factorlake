@@ -474,6 +474,7 @@ SELECT * FROM aligned_compact(table_name, group_name [, root => '...']);
 
 **行为**：
 - **规范化重写**：每个分区的所有 part 按 `ALIGNED_DEFAULT_PART_ROWS`（1M 行）重新切分——前面的 part 满行（恰好 1M 行），末 part ≤ 1M 行。0 行占位 part 被合并吸收。
+- **并行暂存**：Phase 1 暂存阶段并行处理各分区目录（每个目录的读-写独立），Phase 2 提交仍串行。
 - 已规范化的分区（单 part ≤ 1M，或多 part 均满行）跳过不重写。
 - **两阶段提交**：所有组的合并 part 先写入 `_tmp/`，全部成功后再统一 move 到目标目录 + 删除旧 part；任一组失败则清理 `_tmp`、表状态不变。
 - 同目录必须同列集（拒绝 schema-evolution 合并）。
