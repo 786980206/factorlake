@@ -967,10 +967,16 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 		while (segment_pos < read_need) {
 auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 		auto async_type = res.GetResultType();
-			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+			if (async_type == AsyncResultType::FINISHED) {
 				throw IOException("Aligned table '%s' group '%s': parquet scan ended early at row %llu (alignment "
 				                  "violation)",
 				                  bind.plan.table_name, group.manifest.group, cursor + segment_pos);
+			}
+			if (async_type == AsyncResultType::BLOCKED) {
+				// Async not ready (e.g. object storage) — retry.
+				// For local files this never fires; for remote storage it
+				// means the scan needs to yield and be retried.
+				continue;
 			}
 			idx_t chunk_rows = g.chunk->size();
 			if (chunk_rows == 0) {
