@@ -367,18 +367,26 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		} else {
 			date_val = static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(part_fmt)[si]);
 		}
-		// Cache lookup: avoid string formatting for repeated dates
-		auto cache_it = local_state.partition_key_cache.find(date_val);
+		// Cache lookup: single-slot fast cache for sorted-by-date input
+		// (the common case), then hash map fallback.
 		const string *pk_ptr;
-		if (cache_it != local_state.partition_key_cache.end()) {
-			pk_ptr = &cache_it->second;
+		if (date_val == local_state.fast_cache_date && !local_state.fast_cache_key.empty()) {
+			pk_ptr = &local_state.fast_cache_key;
 		} else {
-			string pk;
-			if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val, pk)) {
-				throw IOException("aligned COPY: cannot evaluate partition template '%s'",
-				                  bind_data.partition_template);
+			auto cache_it = local_state.partition_key_cache.find(date_val);
+			if (cache_it != local_state.partition_key_cache.end()) {
+				pk_ptr = &cache_it->second;
+			} else {
+				string pk;
+				if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val, pk)) {
+					throw IOException("aligned COPY: cannot evaluate partition template '%s'",
+					                  bind_data.partition_template);
+				}
+				pk_ptr = &local_state.partition_key_cache.emplace(date_val, std::move(pk)).first->second;
 			}
-			pk_ptr = &local_state.partition_key_cache.emplace(date_val, std::move(pk)).first->second;
+			// Update fast cache.
+			local_state.fast_cache_date = date_val;
+			local_state.fast_cache_key = *pk_ptr;
 		}
 		if (*pk_ptr != current_key) {
 			if (i > run_start) {

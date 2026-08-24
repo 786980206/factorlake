@@ -139,6 +139,11 @@ struct AlignedCopyLocalState : public LocalFunctionData {
 	// Avoids re-evaluating the partition template for every row when
 	// consecutive rows share the same date (common with sorted input).
 	std::unordered_map<int64_t, string> partition_key_cache;
+	// Single-slot fast cache: with sorted-by-date input, the partition key
+	// almost never changes between consecutive rows. Checking this before
+	// the hash map eliminates ~all hash lookups.
+	int64_t fast_cache_date = std::numeric_limits<int64_t>::min();
+	string fast_cache_key;
 
 	// Get or create the buffer for a partition key.
 	PartitionBuffer *GetBuffer(const string &partition_key, ClientContext &context);
