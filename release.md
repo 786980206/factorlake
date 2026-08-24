@@ -988,4 +988,68 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'table' (FORMAT aligned, GROU
 
 提交：`2f3aa48`
 
+## 2026-08-29 — 文档清理 + 渐进式基准测试 + Sink 优化
+
+### 文档清理
+
+删除 4 个 repo root 下孤立 bench SQL 文件（`bench_copy_perf.sql`、
+`bench_copy_perf2.sql`、`bench_no_order.sql`、`bench_parallel.sql`），
+被 `test/bench_copy_to.ps1` 渐进式基准脚本取代。
+
+文档更新：
+- `README.md`：新增 COPY TO (FORMAT aligned) 用法示例 + 功能表行
+- `docs/API.md`：新增 §5 COPY TO 章节（语法/新组/已有组/写入行为/并行/示例）+
+  2-arg aligned_create 文档 + 节号重编
+- `docs/STORAGE_CONTRACT.md`：§8 新增 v9 TIMESTAMP 键契约；§9 新增 COPY TO
+  批量写入路径；§13 删除"并发写互斥"（已实现）
+- `docs/BENCHMARK.md`：修正 AGENTS.md 交叉引用 §16→§11；删除 (Phase 6) 标题；
+  manifest commit → atomic commit
+- `docs/BENCHMARK_MULTI_ANALYSIS.md`：修正 AGENTS.md 交叉引用 §16.2→§11；
+  标注 _table.json 引用为历史
+
+### 渐进式基准测试
+
+数据：400 标的 × 36 年，7 列，按年分区。`preserve_insertion_order=false`，8 线程。
+
+| 规模 | 行数 | aligned index (2col) | aligned panel (7col) | native year-part (7col) | native flat (7col) | aligned/native 比值 |
+|------|------|------|------|------|------|------|
+| 1 sym | 13K | 0.086s | 0.122s | 0.078s | 0.023s | 1.56x (慢) |
+| 4 sym | 53K | 0.084s | 0.135s | 0.104s | 0.031s | 1.30x (慢) |
+| 20 sym | 263K | 0.087s | 0.160s | 0.260s | 0.074s | 0.62x (快) |
+| 80 sym | 1.05M | 0.104s | 0.241s | 0.642s | 0.151s | 0.38x (快) |
+| **400 sym** | **5.26M** | **0.244s** | **0.734s** | **1.292s** | **0.654s** | **0.57x (快)** |
+
+结论：
+- 小数据量（<100K 行）时 aligned 有固定开销，比 native 慢
+- 大数据量（>250K 行）时 aligned 比 native year-part 快 1.6-2.6×
+- aligned panel (0.734s) 接近 native flat (0.654s)，分区开销仅 12%
+- aligned index（2 列）比 native year-part 快 5.3×（因为只写 2 列 vs 7 列）
+
+### Sink 优化：partition key cache + run-length batch copy
+
+1. **Partition key cache**：`unordered_map<int64_t, string>` 缓存 date_val →
+   partition_key 映射，避免对相同日期重复调用 `EvaluatePartitionTemplate`。
+   对排序输入效果显著（同一年的所有日期共享缓存）。
+
+2. **Run-length batch copy**：检测连续相同分区键的行段（run），用连续
+   SelectionVector 批量拷贝，避免 per-row `std::map` 插入和 `vector<idx_t>`
+   构建。对排序输入（ORDER BY symbol, date）效果最好——整个 chunk 通常
+   属于同一分区，只有 1 个 run。
+
+### 改动文件
+
+- `test/bench_copy_to.ps1`（NEW）：渐进式基准脚本
+- `extension/aligned/src/include/copy/aligned_copy.hpp`：
+  `AlignedCopyLocalState` 新增 `partition_key_cache` 字段
+- `extension/aligned/src/copy/aligned_copy.cpp`：
+  Sink 改为 run-length 检测 + cache 查找
+- 6 个文档文件更新
+
+### 测试
+
+- SQLLogicTest：141/141 PASS
+- Loadable extension 构建通过
+
+提交：`126049b`
+
 
