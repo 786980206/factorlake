@@ -72,10 +72,17 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 			UnifiedVectorFormat sv, dv;
 			chunk.data[0].ToUnifiedFormat(chunk.size(), sv);
 			chunk.data[1].ToUnifiedFormat(chunk.size(), dv);
+			auto sym_data = UnifiedVectorFormat::GetData<string_t>(sv);
 			for (idx_t r = 0; r < chunk.size(); r++) {
 				auto si = sv.sel->get_index(r);
 				auto di = dv.sel->get_index(r);
-				Value sym_val = chunk.GetValue(0, r);
+				if (!sv.validity.RowIsValid(si)) {
+					throw IOException("Aligned table '%s' group 'index' partition '%s': NULL symbol at row %llu",
+					                  plan.table_name, partition.key, (unsigned long long)entry.symbols.size());
+				}
+				// Read symbol as string_t to avoid per-row Value allocation.
+				string_t sym_str = sym_data[si];
+				Value sym_val(sym_str.GetString());
 				int64_t date_val;
 				if (local_is_timestamp) {
 					auto tptr = UnifiedVectorFormat::GetData<int64_t>(dv);
@@ -196,10 +203,16 @@ void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) 
 		UnifiedVectorFormat sv, dv;
 		chunk.data[0].ToUnifiedFormat(chunk.size(), sv);
 		chunk.data[1].ToUnifiedFormat(chunk.size(), dv);
+		auto sym_data = UnifiedVectorFormat::GetData<string_t>(sv);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			auto si = sv.sel->get_index(r);
 			auto di = dv.sel->get_index(r);
-			Value sym_val = chunk.GetValue(0, r);
+			if (!sv.validity.RowIsValid(si)) {
+				throw IOException("Aligned table '%s' group 'index': NULL symbol in part '%s'",
+				                  plan.table_name, part.part_name);
+			}
+			string_t sym_str = sym_data[si];
+			Value sym_val(sym_str.GetString());
 			int64_t date_val;
 			if (local_is_timestamp) {
 				auto tptr = UnifiedVectorFormat::GetData<int64_t>(dv);
