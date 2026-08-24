@@ -447,8 +447,9 @@ extension/aligned/src/
   而非 abort 整个 scan。
 - **`ParquetReader::Scan` 返回 `BLOCKED` 不是错误**：对象存储异步 I/O 可能返回
   `BLOCKED`（数据未就绪），应 `continue` 重试而非 `break`/throw。本地文件不会
-  触发此路径。scan、compactor 的 `MergePartsToWriter` 和多 part 分流写入路径
-  都已修复。
+  触发此路径。**所有** Scan 循环都已修复：scan、compactor（`MergePartsToWriter`、
+  多 part 分流）、`part_rewriter`（`FetchOldChunk`）、`parquet_io`（`ReadPartToCollection`）、
+  `key_resolver`（`LoadPartition`、`LoadSinglePart`）、`aligned_mutator`。
 - **Compaction Phase 1 并行化**：各分区目录的暂存独立（各自有 reader/writer），
   可并行处理。线程池用 `std::thread` + `std::atomic` work queue，每个 worker
   创建自己的 `ParquetReader`/`ParquetWriter`/`ScanState`/`DataChunk`/`Collection`。
