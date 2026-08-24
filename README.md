@@ -97,7 +97,7 @@ COPY (SELECT symbol, date, ma5, ma20 FROM source ORDER BY symbol, date)
 | 写入 | ✅ | 标准 DML（INSERT/UPDATE/DELETE）通过 `ATTACH ... TYPE ALIGNED` 使用（v8 mutator）：按 (symbol, date) 主键插入 / 更新 / 删除；只重写受影响 part；`_tmp` 暂存 + 原子提交 |
 | 批量写入 | ✅ | `COPY TO ... (FORMAT aligned, GROUP '...')`：走 DuckDB CopyFunction 框架，per-partition 覆盖，自描述文件名，RG 131072 / part 8 RG，ZSTD/V1，`preserve_insertion_order=false` 启用并行写入（5M 行 7 列 0.8s） |
 | 建表 | ✅ | `aligned_create()` 表函数 + `CREATE TABLE ... WITH (groups=..., partition_template=...)` DDL |
-| 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，按分区目录合并 part，规范化重写（1M rows/part），原子切换 |
+| 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，并行暂存各分区目录（Phase 1 多线程），规范化重写（1M rows/part），原子切换 |
 | 删除 | ✅ | `aligned_drop()`：删除列组（`factor/alpha`）或整表（`index`） |
 | catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组** |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
