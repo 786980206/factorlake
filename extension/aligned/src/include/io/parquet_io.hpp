@@ -55,4 +55,8 @@ unique_ptr<ParquetReader> OpenPartReaderNamedColumns(ClientContext &context, con
 unique_ptr<ColumnDataCollection> ReadPartToCollection(ClientContext &context, const string &path,
                                                        const vector<LogicalType> &col_types);
 
+//! Recursively count files and subdirectories under a path.
+//! Skips the `.aligned_write.lock` file (transient, created by TableWriteLock).
+void CountRecursive(FileSystem &fs, const string &path, idx_t &dirs_count, idx_t &files_count);
+
 } // namespace duckdb

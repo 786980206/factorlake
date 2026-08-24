@@ -155,4 +155,19 @@ unique_ptr<ColumnDataCollection> ReadPartToCollection(ClientContext &context, co
 	return out;
 }
 
+void CountRecursive(FileSystem &fs, const string &path, idx_t &dirs_count, idx_t &files_count) {
+	fs.ListFiles(path, [&](OpenFileInfo &info) {
+		if (StringUtil::CIEquals(info.path, ".aligned_write.lock")) {
+			return;
+		}
+		string child = path + "/" + info.path;
+		if (fs.DirectoryExists(child)) {
+			dirs_count++;
+			CountRecursive(fs, child, dirs_count, files_count);
+		} else {
+			files_count++;
+		}
+	});
+}
+
 } // namespace duckdb

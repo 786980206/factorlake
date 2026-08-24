@@ -1,6 +1,7 @@
 #include "catalog/aligned_create_fn.hpp"
 #include "catalog/aligned_create.hpp"
 #include "catalog/manifest.hpp"
+#include "io/parquet_io.hpp"
 #include "mutator/aligned_mutator.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -97,22 +98,7 @@ unique_ptr<GlobalTableFunctionState> AlignedCreateInitGlobal(ClientContext &cont
 // Create
 //===----------------------------------------------------------------------===//
 
-//! Recursively count files and subdirectories under a path.
-//! Skips the `.aligned_write.lock` file (transient, created by TableWriteLock).
-static void CountRecursive(FileSystem &fs, const string &path, idx_t &dirs_count, idx_t &files_count) {
-	fs.ListFiles(path, [&](OpenFileInfo &info) {
-		if (StringUtil::CIEquals(info.path, ".aligned_write.lock")) {
-			return;
-		}
-		string child = path + "/" + info.path;
-		if (fs.DirectoryExists(child)) {
-			dirs_count++;
-			CountRecursive(fs, child, dirs_count, files_count);
-		} else {
-			files_count++;
-		}
-	});
-}
+//! (CountRecursive is now in io/parquet_io.hpp — shared with aligned_drop)
 
 void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind = data.bind_data->Cast<AlignedCreateBindData>();

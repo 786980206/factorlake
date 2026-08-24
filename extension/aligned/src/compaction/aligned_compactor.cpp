@@ -86,13 +86,15 @@ unique_ptr<GlobalTableFunctionState> AlignedCompactInitGlobal(ClientContext &con
 
 //! Check whether a partition's parts are already normalized: every part
 //! (except possibly the last) has exactly ALIGNED_DEFAULT_PART_ROWS, and the
-//! last has ≤ ALIGNED_DEFAULT_PART_ROWS. 0-row parts are treated as already
-//! fine (they keep the index consecutive).
+//! last has ≤ ALIGNED_DEFAULT_PART_ROWS. Any 0-row placeholder part means
+//! the partition is NOT normalized — 0-row parts should be absorbed by
+//! compaction (per AGENTS.md: "0-row placeholder parts are merged absorbed").
 static bool IsAlreadyNormalized(const vector<const PartInfo *> &parts) {
 	for (idx_t i = 0; i < parts.size(); i++) {
 		idx_t rc = parts[i]->row_count;
 		if (rc == 0) {
-			continue; // 0-row placeholder — leave as-is
+			// 0-row part present → not normalized, should be absorbed.
+			return false;
 		}
 		if (i < parts.size() - 1) {
 			if (rc != ALIGNED_DEFAULT_PART_ROWS) {
@@ -421,12 +423,6 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 					string part_name = FormatPartName(pi, part_row_counts[pi]);
 					pm.target_path = dir + "/" + part_name;
 					pending_moves.push_back(std::move(pm));
-				}
-				// All old parts in this directory will be replaced
-				for (auto &pm : pending_moves) {
-					if (pm.target_path.rfind(dir, 0) == 0) {
-						// This is from this dir — already handled below
-					}
 				}
 
 				// Collect old paths for this directory

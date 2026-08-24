@@ -1,6 +1,7 @@
 #include "compaction/aligned_drop.hpp"
 
 #include "catalog/manifest.hpp"
+#include "io/parquet_io.hpp"
 #include "mutator/aligned_mutator.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -30,22 +31,7 @@ struct AlignedDropGlobalState : public GlobalTableFunctionState {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-//! Recursively count files and subdirectories under a path.
-static void CountRecursive(FileSystem &fs, const string &path, idx_t &dirs_count, idx_t &files_count) {
-	fs.ListFiles(path, [&](OpenFileInfo &info) {
-		// Skip the write lock file (transient, created by TableWriteLock)
-		if (StringUtil::CIEquals(info.path, ".aligned_write.lock")) {
-			return;
-		}
-		string child = path + "/" + info.path;
-		if (fs.DirectoryExists(child)) {
-			dirs_count++;
-			CountRecursive(fs, child, dirs_count, files_count);
-		} else {
-			files_count++;
-		}
-	});
-}
+//! (CountRecursive is now in io/parquet_io.hpp — shared with aligned_create)
 
 //===----------------------------------------------------------------------===//
 // Bind
