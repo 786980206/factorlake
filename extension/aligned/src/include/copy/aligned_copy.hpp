@@ -5,6 +5,7 @@
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
 #include <atomic>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>

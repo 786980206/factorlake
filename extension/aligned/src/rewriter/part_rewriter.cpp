@@ -239,9 +239,13 @@ struct MergeWriter {
 		while (true) {
 			auto res = old_reader->Scan(context, old_scan, old_chunk);
 			auto async_type = res.GetResultType();
-			if (async_type == AsyncResultType::FINISHED || async_type == AsyncResultType::BLOCKED) {
+			if (async_type == AsyncResultType::FINISHED) {
 				old_chunk_rows = 0;
 				return false;
+			}
+			if (async_type == AsyncResultType::BLOCKED) {
+				// Async not ready (e.g. object storage) — retry.
+				continue;
 			}
 			if (old_chunk.size() == 0) {
 				continue;
