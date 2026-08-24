@@ -5,6 +5,7 @@
 #include "catalog/aligned_groups.hpp"
 #include "compaction/aligned_compactor.hpp"
 #include "compaction/aligned_drop.hpp"
+#include "copy/aligned_copy.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -56,21 +57,39 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	aligned_drop_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_drop_fn);
 
-	// aligned_create(table_name, group_name, columns, root=..., partition_template=...)
+	// aligned_create(table_name, group_name [, columns], root=..., partition_template=...)
 	// Create a new AlignedTable (group_name='index') or extend an existing
 	// table with a new column group (group_name='factor/alpha'). `columns` is
-	// a column-definition string. Returns (dirs_created, files_created, txid).
-	TableFunction aligned_create_fn("aligned_create",
-	                                {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                                AlignedCreateFunction, AlignedCreateBind, AlignedCreateInitGlobal, nullptr);
-	aligned_create_fn.named_parameters["root"] = LogicalType::VARCHAR;
-	aligned_create_fn.named_parameters["partition_template"] = LogicalType::VARCHAR;
-	loader.RegisterFunction(aligned_create_fn);
+	// an optional column-definition string (omit to create an empty group
+	// whose schema is inferred on first COPY TO). Returns (dirs_created,
+	// files_created, txid).
+	TableFunction aligned_create_fn_2("aligned_create",
+	                                  {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                  AlignedCreateFunction, AlignedCreateBind, AlignedCreateInitGlobal, nullptr);
+	aligned_create_fn_2.named_parameters["root"] = LogicalType::VARCHAR;
+	aligned_create_fn_2.named_parameters["partition_template"] = LogicalType::VARCHAR;
+	TableFunction aligned_create_fn_3("aligned_create",
+	                                  {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                  AlignedCreateFunction, AlignedCreateBind, AlignedCreateInitGlobal, nullptr);
+	aligned_create_fn_3.named_parameters["root"] = LogicalType::VARCHAR;
+	aligned_create_fn_3.named_parameters["partition_template"] = LogicalType::VARCHAR;
+	TableFunctionSet aligned_create_set("aligned_create");
+	aligned_create_set.functions.push_back(std::move(aligned_create_fn_2));
+	aligned_create_set.functions.push_back(std::move(aligned_create_fn_3));
+	loader.RegisterFunction(std::move(aligned_create_set));
 
 	// Phase 8: DuckLake-style storage extension. ATTACH '<root>' AS name
 	// (TYPE ALIGNED) creates a logical catalog over the parquet column groups:
 	// SELECT reads the parquet files directly (no materialization).
 	RegisterAlignedStorageExtension(db);
+
+	// COPY TO (FORMAT aligned, GROUP '...') — bulk write to a column group.
+	// Routes through DuckDB's COPY TO framework with aligned-specific:
+	//   - Hive partitioning by the index group's date/timestamp column
+	//   - Self-describing part file names {idx:04d}-{rows:10d}.parquet
+	//   - ZSTD compression, RG flush at 131072, part limit at 1048576 rows
+	//   - OVERWRITE of the target group's partitions
+	loader.RegisterFunction(GetAlignedCopyFunction());
 
 	// Phase 4: Parquet metadata cache (footer / schema / row-group stats, LRU
 	// via DuckDB's ObjectCache, 8 GiB, validity-checked on access). The parquet

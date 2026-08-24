@@ -40,8 +40,8 @@ unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunction
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<AlignedCreateBindData>();
 
-	if (input.inputs.size() != 3) {
-		throw BinderException("aligned_create: expected (table_name, group_name, columns)");
+	if (input.inputs.size() != 2 && input.inputs.size() != 3) {
+		throw BinderException("aligned_create: expected (table_name, group_name) or (table_name, group_name, columns)");
 	}
 
 	result->table_name = StringValue::Get(input.inputs[0]);
@@ -54,20 +54,21 @@ unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunction
 		throw BinderException("aligned_create: group_name must not be empty");
 	}
 
-	// Parse the column definition string using DuckDB's SQL parser.
-	string columns_str = StringValue::Get(input.inputs[2]);
-	if (columns_str.empty()) {
-		throw BinderException("aligned_create: columns definition must not be empty");
-	}
-	auto column_list = Parser::ParseColumnList(columns_str);
-	for (auto &col : column_list.Logical()) {
-		auto col_copy = col.Copy();
-		// The parser returns UNBOUND types for column definitions; resolve
-		// them to concrete LogicalTypes using TransformStringToLogicalType.
-		if (col_copy.Type().id() == LogicalTypeId::UNBOUND) {
-			col_copy.SetType(TransformStringToLogicalType(col_copy.Type().ToString(), context));
+	// Optional 3rd positional parameter: column definition string. When
+	// omitted (2-arg form), creates an empty group directory whose schema
+	// is inferred on first COPY TO.
+	if (input.inputs.size() == 3) {
+		string columns_str = StringValue::Get(input.inputs[2]);
+		if (!columns_str.empty()) {
+			auto column_list = Parser::ParseColumnList(columns_str);
+			for (auto &col : column_list.Logical()) {
+				auto col_copy = col.Copy();
+				if (col_copy.Type().id() == LogicalTypeId::UNBOUND) {
+					col_copy.SetType(TransformStringToLogicalType(col_copy.Type().ToString(), context));
+				}
+				result->columns.push_back(std::move(col_copy));
+			}
 		}
-		result->columns.push_back(std::move(col_copy));
 	}
 
 	// Named parameters
@@ -153,6 +154,17 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 		}
 		AlignedCreateTable(context, bind.root, bind.table_name, bind.columns,
 		                   "", bind.partition_template);
+	} else if (bind.columns.empty()) {
+		// --- Empty column group creation (2-arg form) ---
+		// Just create the directory structure. The schema will be inferred
+		// on first COPY TO (FORMAT aligned, GROUP '...').
+		if (!table_exists) {
+			throw BinderException("aligned_create: table '%s' does not exist at '%s' — "
+			                       "cannot add column group '%s' to a non-existent table",
+			                       bind.table_name, table_dir, bind.group_name);
+		}
+		string group_dir = table_dir + "/" + bind.group_name;
+		fs.CreateDirectoriesRecursive(group_dir);
 	} else {
 		// --- Column group extension ---
 		// Add a new column group to an existing table. Build a groups option

@@ -28,6 +28,7 @@ set(ALIGNED_EXTENSION_FILES
     src/transaction/aligned_transaction.cpp
     src/compaction/aligned_compactor.cpp
     src/compaction/aligned_drop.cpp
+    src/copy/aligned_copy.cpp
 )
 
 # Statically linked into the DuckDB binary (dev loop).

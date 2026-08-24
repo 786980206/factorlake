@@ -142,15 +142,57 @@ AlignedTableScan
 
 ---
 
-## 7. Writer（aligned_create / aligned_compact / aligned_drop / CREATE TABLE / DML）
+## 7. Writer（COPY TO / aligned_create / aligned_compact / aligned_drop / CREATE TABLE / DML）
 
 ```
 aligned_scan(table, root=...)                    → (table columns)
 aligned_groups(table, root=...)                  → (group_name, columns, partition_count)
 aligned_create(table, group, columns, root=..., partition_template=...)  → (dirs_created, files_created, txid)
+aligned_create(table, group, root=..., partition_template=...)            → (dirs_created, files_created, txid)  -- 2-arg 空组
 aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
 aligned_drop(table, group_name, root=...)         → (dirs_removed, files_removed, txid)
 ```
+
+- **COPY TO (FORMAT aligned)**：批量写入主路径，走 DuckDB CopyFunction 框架。
+
+```sql
+-- 新组首次写入（schema 从 query 推断，排除 index key 列）
+COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma');
+
+-- 已有组写入（schema 从 last parquet footer 读取，列裁剪到组内列）
+COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index');
+```
+
+  - **写入 pipeline 架构**（单向数据流，唯一写入路径）：
+
+    ```
+    input chunk
+        ↓
+    Sink: 按 partition key 分流 → per-partition local buffer (ColumnDataCollection)
+        ↓                          (Sink 不碰 ParquetWriter)
+    Combine: 每个 partition buffer → GlobalState::Flush (FlushManager, 唯一写入入口)
+        ↓
+    Flush: PartitionWriter → ParquetWriter::Flush (写一个 RG)
+           满足 row_groups_per_file (8) → 轮转 part 文件 (rename 临时名 → 自描述名)
+        ↓
+    Finalize: 逐分区 Finalize + Rename + 统计校验 (received == written)
+    ```
+
+  - **per-partition 覆盖**：每个分区目录首次写入时自动清理旧 parquet 文件
+    （无需 `OVERWRITE true`）。
+  - **自描述文件名**：先以 `0000-0000000000.parquet` 写入，Finalize 后 rename 为
+    `{idx:04d}-{rows:10d}.parquet`（实际行数）。0 行空文件自动删除。
+  - **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
+    = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part。
+  - **排序**：用户在 query 中 `ORDER BY (symbol, date)` 保证分区内有序；
+    `REGULAR_COPY_TO_FILE` 执行模式保留输入顺序。
+  - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
+    输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
+  - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
+    `written_rows`，Finalize 时校验 `received == written`，不匹配抛
+    `InternalException`。
+  - **新组推断**：`aligned_create('table', 'group')` 2-arg 形式创建空组目录，
+    首次 COPY 时从 query 列推断 schema（排除 index key 列 symbol/date）。
 
 - **标准 DML**：ATTACH 后直接用 `INSERT` / `UPDATE` / `DELETE` 操作
   `al.<table>`，内部通过 `AlignedUpsertFromCollection` /
@@ -236,6 +278,7 @@ extension/aligned/src/
 ├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp  aligned_groups.cpp
 ├── resolver/      partition_resolver.cpp  key_resolver.cpp
 ├── scan/          aligned_scan.cpp
+├── copy/          aligned_copy.cpp
 ├── mutator/       aligned_mutator.cpp
 ├── rewriter/      part_rewriter.cpp
 ├── compaction/    aligned_compactor.cpp  aligned_drop.cpp
@@ -260,6 +303,7 @@ extension/aligned/src/
 | | `NextPartIndexForPartition` | 跨组最大 partition_index + 1 |
 | `resolver/partition_resolver` | `EvaluatePartitionTemplate` / `IsKnownTemplate` | 三种模板求值/校验 |
 | | `DefaultPartitionKey` / `ValidatePartitionKey` | 默认分区键 / 分区键校验 |
+| `copy/aligned_copy` | `GetAlignedCopyFunction` | 注册 FORMAT aligned CopyFunction（Sink/Combine/Finalize pipeline） |
 | `mutator/aligned_mutator` | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
 | | `NextTransactionId` | 共享事务号计数器 |
 | | `ExtractSortedRows` | 向量化提取 (symbol, date) 排序键 |
@@ -329,6 +373,29 @@ extension/aligned/src/
   后才能用于 schema 校验或 ParquetWriter。
 - **`TableWriteLock` 在目录中创建 `.aligned_write.lock`**：递归计数目录文件时
   须跳过此文件（RAII 析构前它仍存在）。
+- **`ParquetWriter::Flush` 会消耗 ColumnDataCollection 的行计数**：`Flush` 后
+  `buffer.Count()` 返回 0，必须在 Flush 前保存 `idx_t rows = buffer.Count()`，
+  不可在 Flush 后再读 `buffer.Count()` 作为行数。Combine 中按 partition 逐个 Flush
+  时尤其注意。
+- **CopyFunction `REGULAR_COPY_TO_FILE` 下 `write_empty_file` 默认 true**：
+  `GetGlobalSinkState` 会立即调 `copy_to_initialize_global`；`write_empty_file=false`
+  时延迟到 `Sink` 首个 chunk 才调。两种模式都必须支持 global state 为 null 直到
+  首次 Sink——不要假设 global state 一定在 sink 前已初始化。
+- **`PhysicalCopyToFile::CheckDirectory` 在 partition_output/per_thread_output/
+  rotate 路径才会调**：`REGULAR_COPY_TO_FILE`（无 partition/per_thread/rotate）
+  不调 `CheckDirectory`，所以 OVERWRITE 选项不会删除目标目录文件。自定义的
+  per-partition 覆盖须在 sink/flush 内自行实现。
+- **`ParquetWriteTransformData` 是 `class` 不是 `struct`**（parquet_writer.hpp）：
+  前向声明必须写 `class`，否则 MSVC 链接器 mangling 不同（`U` vs `V`）→ LNK2019。
+- **Windows `MoveFile` 宏污染**：`windows.h` 把 `MoveFile` 宏定义为 `MoveFileA`，
+  即使 `file_system.hpp` 有 `#undef MoveFile`，parquet_writer.hpp 等头文件间接包含
+  windows.h 会重新定义。必须在所有 `#include` 之后、使用 `fs.MoveFile()` 之前再
+  `#undef MoveFile`。
+- **DuckDB 表函数不支持可选位置参数**：`aligned_create` 2-arg 和 3-arg 必须
+  注册为 `TableFunctionSet` 两个独立 overload，不能用单个函数 + 默认参数。
+- **`generate_series(DATE, DATE, INTERVAL)` 返回 TIMESTAMP 不是 DATE**：sink 中
+  分区列读取时必须检查 `part_vec.GetType().id() == TIMESTAMP`，用 `int64_t`
+  读取；DATE 列用 `int32_t`。类型不匹配时 `VectorOperations::Copy` 会崩溃。
 
 ### 构建陷阱
 

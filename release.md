@@ -786,4 +786,119 @@ TIMESTAMP 时，`Timestamp::GetDate()` 截断为日期，导致同一天内同�
 
 提交：`<TBD>`（TIMESTAMP 键 + example_setup.ps1）
 
+## 2026-08-27 — COPY TO (FORMAT aligned) 批量写入路径
+
+### 背景
+
+旧的写入路径（mutator / aligned_upsert）适合小批量 upsert，但批量全量写入
+（如 400 标的 × 36 年 = 500 万行）性能很差。新增 `COPY TO (FORMAT aligned)`
+走 DuckDB CopyFunction 框架，直接用 ParquetWriter 写分区 parquet 文件，
+绕过 mutator 的逐行 upsert 逻辑。
+
+### 用法
+
+```sql
+-- 新组首次写入（2-arg aligned_create 创建空组，schema 从 query 推断）
+SELECT * FROM aligned_create('cnstk_ixday', 'index', 'symbol VARCHAR, date DATE', partition_template => 'year=%Y');
+SELECT * FROM aligned_create('cnstk_ixday', 'panel/ma');
+
+-- 批量写入（无需 OVERWRITE / WRITE_EMPTY_FILE，per-partition 覆盖自动处理）
+COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index');
+COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma');
+```
+
+### 架构演进：从混乱到单向 pipeline
+
+#### 第一版（有缺陷）
+
+初版实现存在 5 个架构级缺陷（详见代码评审）：
+
+1. **Partition 路由责任放错层**：Combine 把所有 local buffer 剩余数据 flush 到
+   "最后一个 active partition writer"，导致跨分区数据混淆（数据正确性 bug）。
+2. **三个 flush 入口**：Sink / Combine / Finalize 都可能 flush，修改同一个
+   `rows_in_current_part` / `part_index` / file size，风险极高。
+3. **ParallelSink + 单 writer 锁**：并行 sink 串行写，partition 少时性能差。
+4. **Finalize 依赖 destructor**：异常路径可能 double close。
+5. **小数据场景 0 行文件**：`rows_in_current_part` 在 `Flush` 后读
+   `buffer.Count()` 返回 0（因为 Flush 消耗了行计数），文件名显示 rows=0。
+
+#### 第二版（重构后）
+
+按评审建议重构为单向数据流 pipeline：
+
+```
+input chunk
+    ↓
+Sink: 按 partition key 分流 → per-partition local buffer (ColumnDataCollection)
+    ↓                          (Sink 不碰 ParquetWriter)
+Combine: 每个 partition buffer → GlobalState::Flush (FlushManager, 唯一写入入口)
+    ↓
+Flush: PartitionWriter → ParquetWriter::Flush (写一个 RG)
+       满足 row_groups_per_file (8) → 轮转 part 文件 (rename 临时名 → 自描述名)
+    ↓
+Finalize: 逐分区 Finalize + Rename + 统计校验 (received == written)
+```
+
+核心改动：
+
+- **LocalState**：从单个 `ColumnDataCollection buffer` 改为
+  `map<partition_key, PartitionBuffer>`，每个分区独立 buffer，杜绝跨分区混写。
+- **Sink**：只做分区路由 + 追加到 local buffer，**不碰 ParquetWriter**。
+- **Combine**：遍历每个 partition buffer，分别交给 `GlobalState::Flush`。
+- **GlobalState::Flush**：唯一写入入口，创建 PartitionWriter + Flush + 轮转 part。
+  Flush 前保存 `idx_t rows = buffer.Count()`（因为 Flush 后 Count() 返回 0）。
+- **Finalize**：唯一做 `writer->Finalize()` + `RenamePartFile()` + 统计校验。
+  Destructor 是默认的，只释放 unique_ptr（`~ParquetWriter()` 是空的）。
+- **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
+  `written_rows`（原子计数器），Finalize 时校验 `received == written`。
+
+### aligned_create 2-arg 形式
+
+DuckDB 表函数不支持可选位置参数，`aligned_create` 改为 `TableFunctionSet` 注册
+两个 overload：
+- 2-arg `aligned_create('table', 'group')`：创建空组目录（无 parquet），首次
+  COPY 时从 query 推断 schema。
+- 3-arg `aligned_create('table', 'group', 'cols')`：显式列定义，写 0 行占位
+  parquet（footer 携带 schema）。
+
+### 遇到的坑
+
+| 坑 | 原因 | 修复 |
+|----|------|------|
+| LNK2019 `ParquetWriter::Flush` unresolved | 前向声明 `struct ParquetWriteTransformData` 但实际是 `class`，MSVC mangling 不同 | 改为 `class` 前向声明 |
+| INTERNAL Error INT64 vs INT32 | `generate_series(DATE, DATE, INTERVAL)` 返回 TIMESTAMP (INT64)，group schema 是 DATE (INT32) | Sink 中检测类型不匹配时 cast |
+| `MoveFileA` not a member of FileSystem | `windows.h` 把 `MoveFile` 宏定义为 `MoveFileA`，parquet_writer.hpp 间接包含 windows.h | 所有 `#include` 后再 `#undef MoveFile` |
+| 文件名 rows=0 | `ParquetWriter::Flush` 后 `buffer.Count()` 返回 0，在 Flush 前未保存行数 | Flush 前 `idx_t rows = buffer.Count()` |
+| `WRITE_EMPTY_FILE false` 必需 | 第一版 global state 初始化有 bug | 第二版重构后不再需要，默认 `write_empty_file=true` 也能工作 |
+
+### 改动文件
+
+- `extension/aligned/src/include/copy/aligned_copy.hpp`（NEW）：数据结构定义
+  - `AlignedCopyBindData`：bind 数据（表名、组名、schema、分区配置、列映射）
+  - `PartitionWriter`：单分区 ParquetWriter + part 轮转 + 原子统计计数器
+  - `AlignedCopyGlobalState`：全局状态，持有所有 PartitionWriter，唯一 Flush 入口
+  - `AlignedCopyLocalState`：每线程状态，per-partition ColumnDataCollection buffer
+- `extension/aligned/src/copy/aligned_copy.cpp`（NEW，~480 行）：CopyFunction 实现
+  - `copy_to_bind`：解析 GROUP 选项，发现表结构，推断新组 schema，构建列映射
+  - `copy_to_sink`：按 partition key 分流到 local buffer
+  - `copy_to_combine`：每个 partition buffer 交给 GlobalState::Flush
+  - `copy_to_finalize`：逐分区 Finalize + Rename + 统计校验
+  - `execution_mode` = `REGULAR_COPY_TO_FILE`
+- `extension/aligned/src/extension.cpp`：注册 CopyFunction + aligned_create
+  TableFunctionSet（2-arg + 3-arg）
+- `extension/aligned/src/catalog/aligned_create_fn.cpp`：2-arg 空组创建分支
+- `extension/aligned/CMakeLists.txt`：新增 `src/copy/aligned_copy.cpp`
+- `AGENTS.md`：§7 Writer 新增 COPY TO (FORMAT aligned) 文档；§10 代码结构新增
+  `copy/` 目录；§12 新增 8 条 API 陷阱
+
+### 测试
+
+- SQLLogicTest：141/141 PASS
+- PS test suite：ALL TESTS PASSED
+- 完整数据集（400 标的 × 36 年 = 5,263,600 行）：写入 + 读取验证通过
+- 文件名正确：`{idx:04d}-{rows:10d}.parquet` 自描述格式
+- Loadable extension 构建通过
+
+提交：`b70bfa2`
+
 
