@@ -598,6 +598,10 @@ struct SourceReader {
 		} else if (type.id() == LogicalTypeId::BIGINT) {
 			auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
 			return Value(data[si]);
+		} else if (type.id() == LogicalTypeId::VARCHAR) {
+			// Avoid the generic GetValue type-switch + string copy overhead.
+			auto data = UnifiedVectorFormat::GetData<string_t>(fmt);
+			return Value(data[si].GetString());
 		}
 		return chunk.data[column].GetValue(local);
 	}
