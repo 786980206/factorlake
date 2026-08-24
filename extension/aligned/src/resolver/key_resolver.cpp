@@ -48,7 +48,6 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 	if (entry.loaded) {
 		return;
 	}
-	entry.loaded = true;
 
 	Value prev_sym;
 	int64_t prev_date {};
@@ -111,6 +110,8 @@ void KeyResolver::LoadPartition(const GroupPartition &partition) {
 			}
 		}
 	}
+	// Set the flag only after all parts are successfully loaded.
+	entry.loaded = true;
 }
 
 void KeyResolver::LoadPartitionBoundaries(const GroupPartition &partition) {
@@ -118,7 +119,6 @@ void KeyResolver::LoadPartitionBoundaries(const GroupPartition &partition) {
 	if (entry.boundary_loaded) {
 		return;
 	}
-	entry.boundary_loaded = true;
 
 	for (idx_t k = 0; k < partition.part_count; k++) {
 		auto &part = index_group->parts[partition.first_part + k];
@@ -172,6 +172,10 @@ void KeyResolver::LoadPartitionBoundaries(const GroupPartition &partition) {
 		entry.part_sym_min.push_back(std::move(part_min));
 		entry.part_sym_max.push_back(std::move(part_max));
 	}
+	// Set the flag only after all parts are successfully loaded — if the
+	// loop throws (corrupt parquet), the next call will retry instead of
+	// silently using empty stats.
+	entry.boundary_loaded = true;
 }
 
 void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) {
@@ -184,7 +188,6 @@ void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) 
 	if (entry.part_loaded[part_k]) {
 		return;
 	}
-	entry.part_loaded[part_k] = true;
 
 	auto &part = index_group->parts[partition.first_part + part_k];
 	vector<LogicalType> key_types;
@@ -231,6 +234,8 @@ void KeyResolver::LoadSinglePart(const GroupPartition &partition, idx_t part_k) 
 			dates.push_back(date_val);
 		}
 	}
+	// Set the flag only after the part is successfully loaded.
+	entry.part_loaded[part_k] = true;
 }
 
 KeyLocation KeyResolver::Resolve(int64_t date_value, const Value &symbol_value) {
