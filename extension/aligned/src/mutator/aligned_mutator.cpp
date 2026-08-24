@@ -592,18 +592,42 @@ struct SourceReader {
 			return Value(chunk.data[column].GetType());
 		}
 		auto &type = chunk.data[column].GetType();
-		if (type.id() == LogicalTypeId::DOUBLE) {
+		switch (type.id()) {
+		case LogicalTypeId::DOUBLE: {
 			auto data = UnifiedVectorFormat::GetData<double>(fmt);
 			return Value(data[si]);
-		} else if (type.id() == LogicalTypeId::BIGINT) {
+		}
+		case LogicalTypeId::FLOAT: {
+			auto data = UnifiedVectorFormat::GetData<float>(fmt);
+			return Value(data[si]);
+		}
+		case LogicalTypeId::INTEGER: {
+			auto data = UnifiedVectorFormat::GetData<int32_t>(fmt);
+			return Value(data[si]);
+		}
+		case LogicalTypeId::BIGINT: {
 			auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
 			return Value(data[si]);
-		} else if (type.id() == LogicalTypeId::VARCHAR) {
-			// Avoid the generic GetValue type-switch + string copy overhead.
+		}
+		case LogicalTypeId::SMALLINT: {
+			auto data = UnifiedVectorFormat::GetData<int16_t>(fmt);
+			return Value::SMALLINT(data[si]);
+		}
+		case LogicalTypeId::TINYINT: {
+			auto data = UnifiedVectorFormat::GetData<int8_t>(fmt);
+			return Value::TINYINT(data[si]);
+		}
+		case LogicalTypeId::BOOLEAN: {
+			auto data = UnifiedVectorFormat::GetData<bool>(fmt);
+			return Value::BOOLEAN(data[si]);
+		}
+		case LogicalTypeId::VARCHAR: {
 			auto data = UnifiedVectorFormat::GetData<string_t>(fmt);
 			return Value(data[si].GetString());
 		}
-		return chunk.data[column].GetValue(local);
+		default:
+			return chunk.data[column].GetValue(local);
+		}
 	}
 };
 
