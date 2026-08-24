@@ -163,7 +163,18 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 			                       "cannot add column group '%s' to a non-existent table",
 			                       bind.table_name, table_dir, bind.group_name);
 		}
+		// Validate non-index group name is lv1/lv2 (two-level path).
+		auto slash = bind.group_name.find('/');
+		if (slash == string::npos || bind.group_name.find('/', slash + 1) != string::npos ||
+		    slash == 0 || slash + 1 >= bind.group_name.size()) {
+			throw BinderException("aligned_create: non-index group name '%s' must be 'lv1/lv2' (two-level path)",
+			                       bind.group_name);
+		}
 		string group_dir = table_dir + "/" + bind.group_name;
+		if (fs.DirectoryExists(group_dir)) {
+			throw BinderException("aligned_create: group '%s' already exists in table '%s'",
+			                       bind.group_name, bind.table_name);
+		}
 		fs.CreateDirectoriesRecursive(group_dir);
 	} else {
 		// --- Column group extension ---

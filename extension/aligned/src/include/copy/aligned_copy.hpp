@@ -31,21 +31,19 @@ struct AlignedCopyBindData : public TableFunctionData {
 	vector<LogicalType> sql_types;
 
 	// Partition configuration (from the index group).
-	idx_t partition_col_pos = 0;   // position in the *input* chunk
+	idx_t partition_col_pos = DConstants::INVALID_INDEX;   // position in the *input* chunk
 	string partition_template;     // "year=%Y" / "month=%Y-%m" / "date=%Y-%m-%d"
 	string partition_col_name;     // e.g. "date"
 
 	// Physical group directory: root/table_name/group_name
 	string group_path;
 	bool is_new_group = false;
-	bool write_partition_column = true; // true for index group
 
 	// The group's full column schema (from footer or inferred).
 	vector<string> group_columns;
 	vector<LogicalType> group_types;
 
 	// Tuning constants.
-	idx_t row_group_size = 131072;      // ALIGNED_DEFAULT_RG_ROWS
 	idx_t row_groups_per_file = 8;      // → 1048576 rows per part
 
 	// Column mapping: output col i → input col input_col_map[i].
@@ -76,7 +74,6 @@ struct PartitionWriter {
 
 	// Accounting (atomic for cross-thread visibility).
 	std::atomic<idx_t> received_rows {0};   // rows routed to this partition
-	std::atomic<idx_t> flushed_rows {0};    // rows flushed to ParquetWriter
 	std::atomic<idx_t> written_rows {0};    // rows finalized to disk
 
 	bool finalized = false;

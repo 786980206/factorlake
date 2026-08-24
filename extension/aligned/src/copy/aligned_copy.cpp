@@ -55,18 +55,6 @@ AlignedCopyGlobalState::AlignedCopyGlobalState(ClientContext &ctx, FileSystem &f
     : context(ctx), fs(f), bind_data(bd) {
 }
 
-static unique_ptr<ParquetWriter> CreateAlignedParquetWriter(ClientContext &context, FileSystem &fs,
-                                                            const string &path,
-                                                            const vector<string> &col_names,
-                                                            const vector<LogicalType> &col_types) {
-	return make_uniq<ParquetWriter>(
-	    context, fs, path, col_types, col_names,
-	    duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(), ShreddingType(),
-	    vector<pair<string, string>>(), nullptr, optional_idx(),
-	    1073741824ULL, true, 0.01, ZStdFileSystem::DefaultCompressionLevel(),
-	    ParquetVersion::V1, GeoParquetVersion::V1);
-}
-
 PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollection &buffer) {
 	idx_t rows = buffer.Count();
 	if (rows == 0) {
@@ -99,8 +87,8 @@ PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, Colu
 			// Create first part file (temp name with rows=0).
 			new_pw->part_index = 0;
 			string file_path = new_pw->part_dir + "/" + FormatPartName(0, 0);
-			new_pw->writer = CreateAlignedParquetWriter(context, fs, file_path,
-			                                             bind_data.column_names, bind_data.sql_types);
+			new_pw->writer = CreateParquetWriter(context, fs, file_path,
+			                                      bind_data.column_names, bind_data.sql_types);
 
 			pw = new_pw.get();
 			writers[partition_key] = std::move(new_pw);
@@ -115,7 +103,6 @@ PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, Colu
 	pw->writer->Flush(buffer, pw->transform_data);
 	pw->rows_in_current_part += rows;
 	pw->row_groups_in_current_part++;
-	pw->flushed_rows += rows;
 
 	// Rotate part file at the boundary.
 	if (pw->row_groups_in_current_part >= bind_data.row_groups_per_file) {
@@ -124,8 +111,8 @@ PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, Colu
 		pw->written_rows += pw->rows_in_current_part;
 		pw->part_index++;
 		string file_path = pw->part_dir + "/" + FormatPartName(pw->part_index, 0);
-		pw->writer = CreateAlignedParquetWriter(context, fs, file_path,
-		                                         bind_data.column_names, bind_data.sql_types);
+		pw->writer = CreateParquetWriter(context, fs, file_path,
+		                                 bind_data.column_names, bind_data.sql_types);
 		pw->rows_in_current_part = 0;
 		pw->row_groups_in_current_part = 0;
 	}
@@ -239,7 +226,7 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 			break;
 		}
 	}
-	if (bind_data->partition_col_pos >= names.size()) {
+	if (bind_data->partition_col_pos == DConstants::INVALID_INDEX) {
 		throw BinderException("aligned COPY: partition column '%s' not found in the query columns",
 		                     bind_data->partition_col_name);
 	}
@@ -290,7 +277,6 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 		throw BinderException("aligned COPY: no columns from group '%s' found in the query", group_name);
 	}
 
-	bind_data->write_partition_column = StringUtil::CIEquals(group_name, "index");
 	bind_data->input_names = names;
 
 	// Build column mapping: output col i → input col input_col_map[i].

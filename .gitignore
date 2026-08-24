@@ -33,3 +33,5 @@ __pycache__/
 # DuckDB temp storage (never commit)
 .tmp/
 *.tmp
+
+feature_lake/

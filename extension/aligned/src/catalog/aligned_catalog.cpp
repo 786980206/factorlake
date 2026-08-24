@@ -138,8 +138,11 @@ void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
 			}
 			auto entry = make_uniq<AlignedTableEntry>(catalog, *this, info, root);
 			tables.insert(make_pair(tbl, std::move(entry)));
-		} catch (std::exception &) {
-			// Not a valid aligned table layout 鈥?skip it.
+		} catch (IOException &) {
+			// Not a valid aligned table layout — skip it.
+			// Only catch IOException (not a valid layout); let
+			// InternalException / PermissionException / FatalException
+			// propagate so real errors are not silently swallowed.
 		}
 	}
 }
@@ -477,6 +480,9 @@ PhysicalOperator &AlignedCatalog::PlanUpdate(ClientContext &context, PhysicalPla
 			}
 		}
 		set_groups.push_back(grp);
+		if (grp.empty()) {
+			throw BinderException("aligned UPDATE: column '%s' is not part of any column group", name);
+		}
 	}
 	auto &upd = planner.Make<PhysicalAlignedUpdate>(op.types, std::move(set_names), std::move(set_groups), entry.name,
 	                                                entry.GetRoot(), op.estimated_cardinality)
