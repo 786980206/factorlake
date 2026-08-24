@@ -36,8 +36,8 @@ void WriteNullParquet(ClientContext &context, FileSystem &fs, const string &path
 
 //! Opens a ParquetReader for `path`, pushes ALL column ids, collects RG
 //! stats, builds the all-RGs vector, and calls InitializeScan. Returns the
-//! reader and the initialized scan state. Shared by part_rewriter,
-//! aligned_compactor, and ReadPartToCollection.
+//! reader and the initialized scan state. Shared by part_rewriter and
+//! aligned_compactor.
 unique_ptr<ParquetReader> OpenPartReaderAllColumns(ClientContext &context, const string &path,
                                                     ParquetReaderScanState &scan_state);
 
@@ -49,11 +49,6 @@ unique_ptr<ParquetReader> OpenPartReaderNamedColumns(ClientContext &context, con
                                                       const vector<string> &col_names,
                                                       vector<LogicalType> &out_types,
                                                       ParquetReaderScanState &scan_state);
-
-//! Reads ALL columns of a parquet file into a ColumnDataCollection.
-//! Shared by aligned_compactor and part_rewriter (the read-all-columns path).
-unique_ptr<ColumnDataCollection> ReadPartToCollection(ClientContext &context, const string &path,
-                                                       const vector<LogicalType> &col_types);
 
 //! Recursively count files and subdirectories under a path.
 //! Skips the `.aligned_write.lock` file (transient, created by TableWriteLock).

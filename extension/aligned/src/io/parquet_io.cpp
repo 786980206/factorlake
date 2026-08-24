@@ -132,32 +132,6 @@ unique_ptr<ParquetReader> OpenPartReaderNamedColumns(ClientContext &context, con
 	return reader;
 }
 
-unique_ptr<ColumnDataCollection> ReadPartToCollection(ClientContext &context, const string &path,
-                                                       const vector<LogicalType> &col_types) {
-	ParquetReaderScanState scan_state;
-	auto reader = OpenPartReaderAllColumns(context, path, scan_state);
-	auto out = make_uniq<ColumnDataCollection>(context, col_types);
-	ColumnDataAppendState append_state;
-	out->InitializeAppend(append_state);
-	DataChunk chunk;
-	chunk.Initialize(context, col_types);
-	while (true) {
-		auto res = reader->Scan(context, scan_state, chunk);
-		auto async_type = res.GetResultType();
-		if (async_type == AsyncResultType::FINISHED) {
-			break;
-		}
-		if (async_type == AsyncResultType::BLOCKED) {
-			continue;
-		}
-		if (chunk.size() == 0) {
-			continue;
-		}
-		out->Append(append_state, chunk);
-	}
-	return out;
-}
-
 void CountRecursive(FileSystem &fs, const string &path, idx_t &dirs_count, idx_t &files_count) {
 	fs.ListFiles(path, [&](OpenFileInfo &info) {
 		if (StringUtil::CIEquals(info.path, ".aligned_write.lock")) {
