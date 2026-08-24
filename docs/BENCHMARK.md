@@ -1,6 +1,6 @@
-# AlignedTable Benchmark (Phase 6)
+# AlignedTable Benchmark
 
-Date: 2026-08-22  Machine: local Windows (see AGENTS.md 16)
+Date: 2026-08-22  Machine: local Windows (see AGENTS.md §11)
 Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 + ma 21),
 4 daily partitions, factors sparse (non-null 1/7). Aligned layout: 3 independent Parquet column groups.
 
@@ -159,7 +159,7 @@ updates in memory, and rewrites that part. The native path does a `LEFT JOIN` + 
 `COPY TO` which DuckDB's vectorized engine optimizes well (hash join + streaming
 write). The aligned engine's per-part rewrite is O(part_size) regardless of how many
 rows change; native is also O(n) but with a lower constant factor because it avoids
-the aligned assembly + manifest commit overhead.
+the aligned assembly + atomic commit overhead.
 
 **When aligned wins on writes:** when the table has many partitions and the update
 hits few of them — aligned only rewrites the affected parts, while native rewrites

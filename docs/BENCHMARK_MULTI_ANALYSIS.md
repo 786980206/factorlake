@@ -125,7 +125,7 @@ REPEATS=5 QS_OVERRIDE=Q2 FS_OVERRIDE=F2 SS_OVERRIDE=S0 \
 ```
 
 ### 环境依赖
-- `duckdb/build/duckdb`（aligned 扩展，静态链接；构建见 `AGENTS.md §16.2`）
+- `duckdb/build/duckdb`（aligned 扩展，静态链接；构建见 `AGENTS.md §11`）
 - polars 引擎（P-CONCAT / P-JOIN）：`uv venv --python 3.13 .venv-bench` +
   `uv pip install --python .venv-bench/bin/python polars`；缺失时脚本自动跳过 P-*。
 
@@ -137,7 +137,7 @@ REPEATS=5 QS_OVERRIDE=Q2 FS_OVERRIDE=F2 SS_OVERRIDE=S0 \
    时 `cursor - part.start_row` 无符号下溢 → 崩溃。已修（claim 时钳到区间起点）。
 2. **DuckDB 基线日期切分 `(r/N)::INT` 会四舍五入**：把分区分到 N/2 而非 N，导致
    wide/join 与 aligned 的 4 分区错位。改用 floor 除法 `//` 修复（牵连 3 个脚本）。
-3. **数据重生成后 `_table.json` 不匹配**：已改为每次重建。
+3. **数据重生成后 `_table.json` 不匹配**：已改为每次重建（注：`_table.json` 后已删除，此问题不再适用）。
 4. **`--skip-regen` 不校验数据规模/sparsity**：会拿 250K 数据跑 1M 声明。现用
    `.gen-meta` 标记（rows,width,sparsity）校验，不符自动重生成。
 5. **测量方法**：fresh-process 启动抖动污染小数据测量 → 同进程 REPEATS 均值。
