@@ -135,6 +135,8 @@ void AlignedCopyGlobalState::FinalizePartition(PartitionWriter &pw) {
 	if (!pw.writer) {
 		return;
 	}
+	// Lock per-partition to serialize against any late Flush from Combine.
+	std::lock_guard<std::mutex> plock(pw.lock);
 	pw.writer->Finalize();
 	RenamePartFile(pw);
 	pw.written_rows += pw.rows_in_current_part;
@@ -483,8 +485,9 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 
 	for (auto &kv : global_state.writers) {
 		auto &pw = *kv.second;
-		std::lock_guard<std::mutex> lock(global_state.lock);
 		if (pw.writer) {
+			// FinalizePartition acquires its own per-partition lock;
+			// different partitions can finalize in parallel.
 			global_state.FinalizePartition(pw);
 		}
 		// Accounting verification: every received row must be written.
