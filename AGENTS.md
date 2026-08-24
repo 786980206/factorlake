@@ -423,6 +423,10 @@ extension/aligned/src/
   文件。不需要加载 part 内部数据在 RowGroup 级别做二分查找——一旦确定某个 part
   受影响，整个 part 就要被重写。`LoadSinglePart` 只在需要区分 insert vs update 时
   加载单个 part 的键数据（O(1 part)），而非 `LoadPartition`（O(N parts)）。
+- **KeyResolver 缓存标志必须在加载成功后设置**：`loaded` / `boundary_loaded` /
+  `part_loaded` 标志必须在 Scan 循环成功完成后才设为 true。如果在循环前设置，
+  循环抛异常（corrupt parquet、IO error）后标志仍为 true，后续调用跳过加载，
+  使用空/不完整统计 → 键定位错误（所有键被判为 insert，或错误的 part 定位）。
 
 ### 工具链陷阱
 
