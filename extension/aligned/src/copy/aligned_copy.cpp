@@ -324,6 +324,7 @@ static unique_ptr<LocalFunctionData> AlignedCopyInitializeLocal(ExecutionContext
 static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p, GlobalFunctionData &gstate,
                              LocalFunctionData &lstate, DataChunk &input) {
 	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
+	auto &global_state = gstate.Cast<AlignedCopyGlobalState>();
 	auto &local_state = lstate.Cast<AlignedCopyLocalState>();
 
 	if (input.size() == 0) {
@@ -392,10 +393,39 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		runs.push_back({run_start, input.size() - run_start, std::move(current_key)});
 	}
 
-	// For each run: build a reordered chunk and append to local buffer.
+	// For each run: append (with optional column reorder) to local buffer.
+	// Fast path: if input_col_map is identity AND all types match, append
+	// the input chunk directly (zero-copy) instead of building a reordered
+	// chunk. This is the common case when the query column order matches
+	// the group schema order.
+	bool identity_map = true;
+	for (idx_t c = 0; c < bind_data.input_col_map.size(); c++) {
+		if (bind_data.input_col_map[c] != c) {
+			identity_map = false;
+			break;
+		}
+	}
+	bool types_match = identity_map;
+	if (types_match) {
+		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+			if (input.data[c].GetType() != bind_data.sql_types[c]) {
+				types_match = false;
+				break;
+			}
+		}
+	}
+
 	for (auto &run : runs) {
 		idx_t n = run.count;
 		if (n == 0) {
+			continue;
+		}
+
+		auto *pbuf = local_state.GetBuffer(run.key, context.client);
+
+		// Fast path: identity map + types match + full-chunk run → zero-copy append.
+		if (types_match && run.start == 0 && n == input.size()) {
+			pbuf->collection.Append(pbuf->append_state, input);
 			continue;
 		}
 
@@ -433,10 +463,26 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 			}
 		}
 
-		auto *pbuf = local_state.GetBuffer(run.key, context.client);
 		pbuf->collection.Append(pbuf->append_state, chunk);
 	}
-	// NOTE: Sink does NOT flush. Flushing happens only in Combine.
+	// NOTE: Sink flushes per-RG (like native COPY TO PARQUET) to overlap
+	// parquet compression with ingestion and bound CDC size. When a
+	// per-partition local CDC reaches ALIGNED_DEFAULT_RG_ROWS (131072),
+	// flush it to the global writer. Combine handles the final partial
+	// CDC for each partition.
+	constexpr idx_t RG_FLUSH_THRESHOLD = ALIGNED_DEFAULT_RG_ROWS;
+	for (auto &kv : local_state.buffers) {
+		auto &pbuf = *kv.second;
+		if (pbuf.collection.Count() >= RG_FLUSH_THRESHOLD) {
+			idx_t rows = pbuf.collection.Count();
+			PartitionWriter *pw = global_state.Flush(kv.first, pbuf.collection);
+			if (pw) {
+				pw->received_rows += rows;
+			}
+			pbuf.collection.Reset();
+			pbuf.collection.InitializeAppend(pbuf.append_state);
+		}
+	}
 }
 
 //===----------------------------------------------------------------------===//
