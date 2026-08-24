@@ -1263,4 +1263,50 @@ compaction → 数据完整性验证。
 
 提交：`8866bc2`
 
+## 2026-09-01 — COPY TO 性能优化：缩小与 native 的差距
+
+### 性能分析
+
+对 COPY TO (FORMAT aligned) 进行了深度性能分析，发现两个高影响瓶颈：
+
+1. **Sink 中的列重排拷贝**（高）：即使 `input_col_map` 是恒等映射（列顺序
+   匹配），每行都会构建一个完整的重排中间 `DataChunk`，产生全量逐列拷贝。
+   Native COPY TO PARQUET 直接将输入 chunk 追加到 CDC，零拷贝。
+
+2. **Sink 不按 RG 刷新**（高）：aligned 在整个 Sink 过程中累积整个分区的 CDC，
+   直到 Combine 才刷新。Native 在 CDC 达到 RG 大小时立即刷新，重叠压缩与
+   摄取。这导致更大的 CDC 和无流水线。
+
+### 修复
+
+16. **Identity-map 零拷贝快速路径**（`aligned_copy.cpp`）：当 `input_col_map`
+    是恒等映射且类型匹配时，直接将输入 chunk 追加到 CDC，跳过中间重排 chunk。
+    这消除了恒等情况下的全量逐列拷贝。
+
+17. **Sink 中按 RG 刷新**（`aligned_copy.cpp`）：当 per-partition CDC 达到
+    `ALIGNED_DEFAULT_RG_ROWS` (131072) 时，在 Sink 中直接调用
+    `GlobalState::Flush`，重叠 parquet 压缩与摄取（与 native COPY TO PARQUET
+    相同）。Combine 处理每个分区的最后部分 CDC。
+
+18. **分区键单槽快缓存**（`aligned_copy.cpp`）：在 hash map 之前添加单槽
+    快缓存（`fast_cache_date` + `fast_cache_key`），利用有序输入中分区键
+    几乎不变化的特性，消除 ~所有 hash map 查找。
+
+### 基准测试结果（400 symbols, 5.26M rows, 7 cols, ZSTD, 8 threads）
+
+| 配置 | 优化前 | 优化后 | 改善 |
+|------|--------|--------|------|
+| Aligned panel | 0.731s | 0.680s | 7% |
+| Native year-part | 1.230s | 1.142s | — (运行差异) |
+| Native flat | 0.532s | 0.538s | — (运行差异) |
+| Aligned / native flat | 1.37x | 1.26x | 差距缩小 9pp |
+| Aligned / native year-part | 0.59x | 0.60x | 1.67x 更快 |
+
+### 测试
+
+- SQLLogicTest：234/234 PASS
+- PS test suite：ALL PASSED
+
+提交：`fcffc3c`
+
 
