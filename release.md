@@ -520,7 +520,6 @@ SELECT * FROM aligned_groups('cnstk_ixday');
 | `WriteEmptyParquet` / `WriteNullParquet` | 从 aligned_create 移入 |
 | `OpenPartReaderAllColumns` | part_rewriter 内联 reader 初始化 |
 | `OpenPartReaderNamedColumns` | mutator `ReadSourceColumns` + key_resolver 列读取 |
-| `ReadPartToCollection` | part_rewriter 全列读取循环 |
 
 提交：`9d12c0c`、`c31cc2c`
 
@@ -1317,8 +1316,8 @@ compaction → 数据完整性验证。
     `ParquetReader::Scan` 返回 `BLOCKED` 被误判为流结束。改为 `continue` 重试。
 
 20. **系统性修复所有 BLOCKED 处理器**（4 处）：
-    `parquet_io.cpp`（`ReadPartToCollection`）、`aligned_mutator.cpp`、
-    `key_resolver.cpp`（`LoadPartition` + `LoadSinglePart` 2 处）。
+    `aligned_mutator.cpp`、`key_resolver.cpp`（`LoadPartition` + `LoadSinglePart`
+    2 处）、`part_rewriter.cpp`（`FetchOldChunk`）。
     所有 `FINISHED || BLOCKED` → `FINISHED` + `BLOCKED continue`。
     全代码库 8 个 Scan 循环已全部修复。
 
