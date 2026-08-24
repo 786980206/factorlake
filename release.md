@@ -901,4 +901,91 @@ DuckDB 表函数不支持可选位置参数，`aligned_create` 改为 `TableFunc
 
 提交：`b70bfa2`
 
+## 2026-08-28 — COPY TO (FORMAT aligned) 性能优化
+
+### 基准测试
+
+数据：400 标的 × 36 年 = 5,263,600 行，7 列，按年分区（37 分区）。
+环境：8 核 / 25 GB RAM，DuckDB `duckdb_al3.exe -unsigned`。
+
+| 测试 | 列数 | 分区 | 排序 | real | user | 线程 |
+|------|------|------|------|------|------|------|
+| aligned index (默认) | 2 | year | 无 | 1.28s | 1.16s | 1 |
+| aligned index (默认) | 2 | year | ORDER BY | 1.88s | 4.25s | 1 |
+| aligned index (preserve_order=false) | 2 | year | 无 | **0.28s** | 1.59s | ~6 |
+| aligned panel/ma (默认) | 7 | year | 无 | 2.88s | 3.50s | 1 |
+| aligned panel/ma (preserve_order=false) | 7 | year | 无 | **0.71s** | 3.69s | ~5 |
+| native year-part (preserve_order=false) | 7 | year | 无 | 1.18s | 4.89s | ~4 |
+| native flat (preserve_order=false) | 7 | 无 | 无 | 0.50s | 2.84s | ~6 |
+
+### 瓶颈分析
+
+#### 瓶颈 1：`REGULAR_COPY_TO_FILE` 强制单线程
+
+`PhysicalCopyToFile::SinkOrderDependent()` 硬编码返回 `true`，加上
+`preserve_insertion_order` 默认 `true`，导致 pipeline 永远单线程执行。
+DuckDB 原生 parquet 用 `BATCH_COPY_TO_FILE`（`PhysicalBatchCopyToFile`，
+`SinkOrderDependent()=false`）绕过此限制。
+
+**修复**：`execution_mode` 改为当 `preserve_insertion_order=false` 时返回
+`PARALLEL_COPY_TO_FILE`。用户需 `SET preserve_insertion_order = false;` 启用并行。
+效果：aligned index 1.28s → 0.54s（2.4× 加速）。
+
+#### 瓶颈 2：Combine 全局互斥锁串行化所有分区
+
+`AlignedCopyCombine` 在整个 `Flush` 期间持有 `global_state.lock`。
+`ParquetWriter::Flush` 是 I/O + 压缩操作（几十毫秒），锁导致所有线程串行等待。
+37 分区 × 8 线程 → 每个线程约 5 个分区的 Flush 全部串行。
+
+**修复**：改为两阶段锁：
+1. Phase 1：全局锁只用于 PartitionWriter 的创建/查找（毫秒级）。
+2. Phase 2：per-partition 锁保护实际 `ParquetWriter::Flush`。
+   不同分区的 Flush 完全并行。
+
+效果：aligned index 0.54s → 0.28s（1.9× 加速）；
+aligned panel/ma 2.52s → 0.71s（3.5× 加速）。
+
+### 优化后性能对比
+
+| 路径 | 列数 | real | vs native year-part |
+|------|------|------|---------------------|
+| aligned index | 2 | 0.28s | **4.2× 更快** |
+| aligned panel/ma | 7 | 0.71s | **1.7× 更快** |
+| native year-part | 7 | 1.18s | baseline |
+| native flat | 7 | 0.50s | 2.4× 更快 |
+
+aligned 比 native year-partitioned 更快的原因：
+1. aligned 不写分区列到 parquet 文件内（key 列只存 index，非 index 组不写
+   date 列）→ 更少数据 → 更快压缩
+2. per-partition 锁让不同分区完全并行 flush
+3. aligned 直接控制分区目录命名和文件名，不走 DuckDB Hive 分区框架的开销
+
+### 使用建议
+
+```sql
+-- 批量写入时启用并行（不需要排序时）
+SET preserve_insertion_order = false;
+COPY (SELECT * FROM mock) TO 'table' (FORMAT aligned, GROUP 'index');
+
+-- 需要排序时（自动单线程，但保证分区内有序）
+COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'table' (FORMAT aligned, GROUP 'index');
+```
+
+### 改动文件
+
+- `extension/aligned/src/include/copy/aligned_copy.hpp`：
+  `PartitionWriter` 新增 `std::mutex lock`（per-partition 锁）
+- `extension/aligned/src/copy/aligned_copy.cpp`：
+  - `execution_mode`：`preserve_insertion_order=false` → `PARALLEL_COPY_TO_FILE`
+  - `Flush`：两阶段锁（全局锁查 writer → 分区锁 flush）
+  - `Combine`：不再持全局锁调 Flush
+
+### 测试
+
+- SQLLogicTest：141/141 PASS
+- PS test suite：ALL TESTS PASSED
+- Loadable extension 构建通过
+
+提交：`2f3aa48`
+
 

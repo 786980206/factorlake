@@ -62,6 +62,10 @@ struct PartitionWriter {
 	string partition_key; // e.g. "year=1990"
 	string part_dir;      // e.g. ".../index/year=1990"
 
+	// Per-partition lock: allows parallel flushing of *different* partitions.
+	// Only same-partition writes serialize.
+	std::mutex lock;
+
 	// The current part file.
 	unique_ptr<ParquetWriter> writer;
 	unique_ptr<ParquetWriteTransformData> transform_data;

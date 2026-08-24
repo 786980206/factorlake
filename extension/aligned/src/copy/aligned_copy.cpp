@@ -73,40 +73,45 @@ void AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollec
 		return;
 	}
 
-	// Get or create the partition writer.
-	auto it = writers.find(partition_key);
+	// Phase 1: Get or create the partition writer (needs global lock for map access).
 	PartitionWriter *pw;
-	if (it == writers.end()) {
-		auto new_pw = make_uniq<PartitionWriter>();
-		new_pw->partition_key = partition_key;
-		new_pw->part_dir = bind_data.group_path + "/" + partition_key;
+	{
+		std::lock_guard<std::mutex> glock(lock);
+		auto it = writers.find(partition_key);
+		if (it == writers.end()) {
+			auto new_pw = make_uniq<PartitionWriter>();
+			new_pw->partition_key = partition_key;
+			new_pw->part_dir = bind_data.group_path + "/" + partition_key;
 
-		// Clean old files on first write (OVERWRITE semantics).
-		if (cleaned_partitions.find(partition_key) == cleaned_partitions.end()) {
-			cleaned_partitions.insert(partition_key);
-			if (fs.DirectoryExists(new_pw->part_dir)) {
-				fs.ListFiles(new_pw->part_dir, [&](const string &name, bool is_dir) {
-					if (!is_dir && StringUtil::EndsWith(name, ".parquet")) {
-						fs.RemoveFile(new_pw->part_dir + "/" + name);
-					}
-				});
+			// Clean old files on first write (OVERWRITE semantics).
+			if (cleaned_partitions.find(partition_key) == cleaned_partitions.end()) {
+				cleaned_partitions.insert(partition_key);
+				if (fs.DirectoryExists(new_pw->part_dir)) {
+					fs.ListFiles(new_pw->part_dir, [&](const string &name, bool is_dir) {
+						if (!is_dir && StringUtil::EndsWith(name, ".parquet")) {
+							fs.RemoveFile(new_pw->part_dir + "/" + name);
+						}
+					});
+				}
 			}
+			fs.CreateDirectoriesRecursive(new_pw->part_dir);
+
+			// Create first part file (temp name with rows=0).
+			new_pw->part_index = 0;
+			string file_path = new_pw->part_dir + "/" + FormatPartName(0, 0);
+			new_pw->writer = CreateAlignedParquetWriter(context, fs, file_path,
+			                                             bind_data.column_names, bind_data.sql_types);
+
+			pw = new_pw.get();
+			writers[partition_key] = std::move(new_pw);
+		} else {
+			pw = it->second.get();
 		}
-		fs.CreateDirectoriesRecursive(new_pw->part_dir);
-
-		// Create first part file (temp name with rows=0).
-		new_pw->part_index = 0;
-		string file_path = new_pw->part_dir + "/" + FormatPartName(0, 0);
-		new_pw->writer = CreateAlignedParquetWriter(context, fs, file_path,
-		                                             bind_data.column_names, bind_data.sql_types);
-
-		pw = new_pw.get();
-		writers[partition_key] = std::move(new_pw);
-	} else {
-		pw = it->second.get();
 	}
+	// Global lock released — other threads can create/lookup different partitions.
 
-	// Flush one Row Group.
+	// Phase 2: Flush under per-partition lock (different partitions flush in parallel).
+	std::lock_guard<std::mutex> plock(pw->lock);
 	pw->writer->Flush(buffer, pw->transform_data);
 	pw->rows_in_current_part += rows;
 	pw->row_groups_in_current_part++;
@@ -418,11 +423,12 @@ static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_dat
 		if (rows == 0) {
 			continue;
 		}
-		std::lock_guard<std::mutex> lock(global_state.lock);
-		// Flush creates the PartitionWriter if needed, then flushes the
-		// buffer as one or more Row Groups to the ParquetWriter.
+		// Flush manages its own locking (global lock for writer lookup,
+		// per-partition lock for the actual write). Different partitions
+		// can flush in parallel across threads.
 		global_state.Flush(partition_key, pbuf.collection);
 		// Track received rows on the partition writer (for final accounting).
+		std::lock_guard<std::mutex> lock(global_state.lock);
 		auto it = global_state.writers.find(partition_key);
 		if (it != global_state.writers.end()) {
 			it->second->received_rows += rows;
@@ -463,6 +469,9 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 //===----------------------------------------------------------------------===//
 
 static CopyFunctionExecutionMode AlignedCopyExecutionMode(bool preserve_insertion_order, bool supports_batch_index) {
+	if (!preserve_insertion_order) {
+		return CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
+	}
 	return CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE;
 }
 
