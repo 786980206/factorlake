@@ -1676,5 +1676,64 @@ compaction → 数据完整性验证。
 - PS test suite：ALL PASSED (test_aligned, test_dml, test_compaction, test_parallel)
 - 数据正确性：62.64M 行，每分区 240000 行，7 行乱序/分区（0.003%）
 
+提交：`b8db3ad`
+
+## 2026-09-06 — FlushWorker 端全局排序：0 乱序行
+
+### 问题
+
+上一提交的 PARALLEL_COPY_TO_FILE 有 7/240000 行乱序（morsel scheduler 分配顺序
+不确定）。不能有乱序行——分区对齐契约要求分区内按 (symbol, date) 升序排列。
+
+### 修复：FlushWorker 端全局 (symbol, date) 排序
+
+partition affinity 保证同一分区的所有 buffer 只到一个 FlushWorker。FlushWorker
+在 sentinel 到达后（所有数据已到齐）收集每个分区的所有 buffer，合并为一个
+ColumnDataCollection，提取 (symbol, date) 值，创建排序排列，按排列顺序重建
+sorted collection，最后 flush 到 ParquetWriter。
+
+**关键实现细节**：
+- `FlushWorker` 新增 `pending` map：`partition_key → vector<unique_ptr<ColumnDataCollection>>`
+- `WorkerLoop`：收到 buffer 时存入 pending，不再立即 flush；sentinel 到达后遍历
+  pending，对每个分区调 `SortAndFlushPartition`
+- `SortAndFlushPartition`：
+  1. 合并所有 buffer 为一个 merged collection（逐 chunk scan + append）
+  2. 提取 symbol (string_t) 和 date (int64_t/int32_t) 值
+  3. **类型安全**：从实际 Vector 类型判断 INT64（TIMESTAMP）还是 INT32（DATE），
+     不能用 `bind_data.is_timestamp`（反映输入类型，Sink cast 后输出类型可能不同）
+  4. `std::sort` 创建排列
+  5. 缓存所有 source chunk 为 `unique_ptr<DataChunk>`，按 perm 顺序遍历，
+     连续同 chunk 的行组成 SelectionVector → `VectorOperations::Copy` → append
+
+**陷阱修复**：
+- `FlushToPartition` 内部已做 `pp.received_rows += rows`，`SortAndFlushPartition`
+  不再重复加（否则 received_rows 翻倍 → accounting mismatch）
+- `DataChunk` 不可拷贝（删除拷贝构造），用 `unique_ptr<DataChunk>` 缓存
+- 排序重建必须按 perm 顺序全局输出，不能按 source chunk 分组输出（否则
+  跨 chunk 行序错误）
+
+### 性能基准（62.64M rows, 1000 symbols, 261 date 分区, 8 threads, TIMESTAMP）
+
+| 配置 | 时间 | 乱序行 | 备注 |
+|------|------|--------|------|
+| REGULAR_COPY_TO_FILE（单线程 source） | 15.9s | 0 | 基线 |
+| PARALLEL 无 sort（上一提交） | 4.3s | 7/分区 | 不满足契约 |
+| **PARALLEL + FlushWorker 排序（当前）** | **10.4s** | **0** | **1.5× 加速 + 0 乱序** |
+
+### 文件变更
+
+- `extension/aligned/src/copy/aligned_copy.cpp`：
+  - 新增 `SortAndFlushPartition` 方法（合并 + 排序 + 重建 + flush）
+  - `WorkerLoop` 改为 pending buffer 累积 + sentinel 后排序 flush
+- `extension/aligned/src/include/copy/aligned_copy.hpp`：
+  - `FlushWorker` 新增 `pending` map
+  - `AlignedCopyGlobalState` 新增 `SortAndFlushPartition` 方法声明
+
+### 测试结果
+
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED (test_aligned, test_dml, test_compaction, test_parallel)
+- 数据正确性：62.64M 行，每分区 240000 行，**0 乱序行**
+
 提交：`<TBD>`
 

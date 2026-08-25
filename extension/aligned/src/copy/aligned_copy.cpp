@@ -13,6 +13,7 @@
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 #include <thread>
@@ -115,8 +116,18 @@ void AlignedCopyGlobalState::WorkerLoop(FlushWorker &worker) {
 			break;
 		}
 
+		// Buffer arrives out-of-order from parallel Sink threads.
+		// Accumulate into pending; flush happens after all data arrives
+		// (sentinel) with a global (symbol, date) sort per partition.
+		auto &pk = job.partition_key;
+		worker.pending[pk].push_back(std::move(job.buffer));
+	}
+
+	// All data has arrived. For each partition, merge all buffers into one
+	// ColumnDataCollection, sort by (symbol, date), and flush in sorted order.
+	for (auto &kv : worker.pending) {
 		try {
-			auto &pk = job.partition_key;
+			auto &pk = kv.first;
 			auto pit = worker.partitions.find(pk);
 			if (pit == worker.partitions.end()) {
 				auto pp = make_uniq<PerPartitionState>();
@@ -125,7 +136,7 @@ void AlignedCopyGlobalState::WorkerLoop(FlushWorker &worker) {
 				InitPartition(*pp);
 				pit = worker.partitions.emplace(pk, std::move(pp)).first;
 			}
-			FlushToPartition(*pit->second, *job.buffer);
+			SortAndFlushPartition(*pit->second, kv.second);
 		} catch (...) {
 			if (!worker.error) {
 				worker.error = std::current_exception();
@@ -176,6 +187,186 @@ void AlignedCopyGlobalState::FlushToPartition(PerPartitionState &pp, ColumnDataC
 	if (pp.row_groups_in_current_part >= bind_data.row_groups_per_file) {
 		RotatePartition(pp);
 	}
+}
+
+void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
+                                                    vector<unique_ptr<ColumnDataCollection>> &buffers) {
+	// Count total rows.
+	idx_t total_rows = 0;
+	for (auto &buf : buffers) {
+		total_rows += buf->Count();
+	}
+	if (total_rows == 0) {
+		return;
+	}
+
+	// Merge all buffers into one ColumnDataCollection.
+	auto merged = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+	ColumnDataAppendState append_state;
+	merged->InitializeAppend(append_state);
+	vector<column_t> all_cols;
+	for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+		all_cols.push_back(c);
+	}
+	DataChunk merge_chunk;
+	merge_chunk.Initialize(context, bind_data.sql_types);
+	for (auto &buf : buffers) {
+		if (buf && buf->Count() > 0) {
+			ColumnDataScanState scan_state;
+			buf->InitializeScan(scan_state, all_cols);
+			buf->InitializeScanChunk(scan_state, merge_chunk);
+			while (buf->Scan(scan_state, merge_chunk)) {
+				merged->Append(append_state, merge_chunk);
+			}
+		}
+	}
+
+	// Find symbol and date column indices in the output schema.
+	idx_t symbol_col = DConstants::INVALID_INDEX;
+	idx_t date_col = DConstants::INVALID_INDEX;
+	for (idx_t c = 0; c < bind_data.column_names.size(); c++) {
+		if (StringUtil::CIEquals(bind_data.column_names[c], "symbol")) {
+			symbol_col = c;
+		} else if (StringUtil::CIEquals(bind_data.column_names[c], bind_data.partition_col_name)) {
+			date_col = c;
+		}
+	}
+
+	if (symbol_col == DConstants::INVALID_INDEX || date_col == DConstants::INVALID_INDEX) {
+		// Can't sort — flush as-is (already in arrival order).
+		FlushToPartition(pp, *merged);
+		return;
+	}
+
+	// Extract symbol and date values for sorting.
+	vector<string_t> symbol_values(total_rows);
+	vector<int64_t> date_values(total_rows);
+
+	vector<column_t> sort_cols = {symbol_col, date_col};
+	ColumnDataScanState scan_state;
+	merged->InitializeScan(scan_state, sort_cols);
+	DataChunk chunk;
+	merged->InitializeScanChunk(scan_state, chunk);
+
+	idx_t row_offset = 0;
+	while (merged->Scan(scan_state, chunk)) {
+		auto &sym_vec = chunk.data[0];
+		UnifiedVectorFormat sym_fmt;
+		sym_vec.ToUnifiedFormat(chunk.size(), sym_fmt);
+		auto sym_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
+
+		auto &date_vec = chunk.data[1];
+		UnifiedVectorFormat date_fmt;
+		date_vec.ToUnifiedFormat(chunk.size(), date_fmt);
+
+		// Determine date column physical type from the actual vector,
+		// not from bind_data.is_timestamp (which reflects the *input* type,
+		// not the *output* type after cast).
+		bool date_is_ts = (date_vec.GetType().id() == LogicalTypeId::TIMESTAMP);
+
+		for (idx_t i = 0; i < chunk.size(); i++) {
+			auto si = sym_fmt.sel->get_index(i);
+			auto di = date_fmt.sel->get_index(i);
+			symbol_values[row_offset + i] = sym_data[si];
+			if (date_is_ts) {
+				auto dd = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
+				date_values[row_offset + i] = dd[di];
+			} else {
+				auto dd = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
+				date_values[row_offset + i] = static_cast<int64_t>(dd[di]);
+			}
+		}
+		row_offset += chunk.size();
+	}
+
+	// Create permutation sorted by (symbol, date).
+	vector<idx_t> perm(total_rows);
+	for (idx_t i = 0; i < total_rows; i++) {
+		perm[i] = i;
+	}
+	std::sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
+		const auto &sa = symbol_values[a];
+		const auto &sb = symbol_values[b];
+		int cmp = sa < sb ? -1 : (sa > sb ? 1 : 0);
+		if (cmp != 0) return cmp < 0;
+		return date_values[a] < date_values[b];
+	});
+
+	// Build sorted collection by re-appending rows in sorted order.
+	// Scan merged into cached chunks, then output rows in perm order
+	// (perm[i] = source row index of the i-th output row).
+	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+	ColumnDataAppendState sorted_append;
+	sorted->InitializeAppend(sorted_append);
+
+	// Cache all source chunks.
+	ColumnDataScanState full_scan;
+	merged->InitializeScan(full_scan, all_cols);
+	DataChunk full_chunk;
+	merged->InitializeScanChunk(full_scan, full_chunk);
+
+	vector<unique_ptr<DataChunk>> source_chunks;
+	idx_t total_cached = 0;
+	while (merged->Scan(full_scan, full_chunk)) {
+		auto cached = make_uniq<DataChunk>();
+		cached->Initialize(context, bind_data.sql_types);
+		cached->Reference(full_chunk);
+		cached->SetCardinality(full_chunk.size());
+		total_cached += full_chunk.size();
+		source_chunks.push_back(std::move(cached));
+	}
+
+	// Now output rows in perm order. For each batch of STANDARD_VECTOR_SIZE
+	// consecutive perm entries, determine which source chunk each row is in,
+	// build a SelectionVector, and copy.
+	DataChunk out_chunk;
+	out_chunk.Initialize(context, bind_data.sql_types);
+
+	// Precompute chunk boundaries.
+	vector<idx_t> chunk_starts(source_chunks.size() + 1);
+	chunk_starts[0] = 0;
+	for (idx_t i = 0; i < source_chunks.size(); i++) {
+		chunk_starts[i + 1] = chunk_starts[i] + source_chunks[i]->size();
+	}
+
+	idx_t perm_pos = 0;
+	while (perm_pos < total_rows) {
+		// Group consecutive perm entries that fall in the same source chunk.
+		idx_t current_row = perm[perm_pos];
+		// Find which chunk this row belongs to.
+		idx_t chunk_idx = 0;
+		while (chunk_idx + 1 < chunk_starts.size() && chunk_starts[chunk_idx + 1] <= current_row) {
+			chunk_idx++;
+		}
+		auto &src = *source_chunks[chunk_idx];
+		idx_t chunk_start = chunk_starts[chunk_idx];
+
+		SelectionVector sel(STANDARD_VECTOR_SIZE);
+		idx_t sel_count = 0;
+		while (perm_pos < total_rows && sel_count < STANDARD_VECTOR_SIZE) {
+			idx_t row = perm[perm_pos];
+			// Check if this row is in the same chunk.
+			if (row >= chunk_starts[chunk_idx] && row < chunk_starts[chunk_idx + 1]) {
+				sel.set_index(sel_count, row - chunk_start);
+				sel_count++;
+				perm_pos++;
+			} else {
+				break;
+			}
+		}
+		if (sel_count > 0) {
+			out_chunk.Reset();
+			for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+				VectorOperations::Copy(src.data[c], out_chunk.data[c], sel,
+				                       sel_count, 0, 0);
+			}
+			out_chunk.SetCardinality(sel_count);
+			sorted->Append(sorted_append, out_chunk);
+		}
+	}
+
+	// Flush the sorted collection in RG-sized chunks.
+	FlushToPartition(pp, *sorted);
 }
 
 void AlignedCopyGlobalState::RotatePartition(PerPartitionState &pp) {
@@ -452,10 +643,9 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 	}
 
 	// In PARALLEL_COPY_TO_FILE mode, multiple threads call Sink concurrently.
-	// The source reader (parquet scan) runs in parallel, giving ~3x speedup.
-	// Note: with parallel source reading, morsels may arrive out of order,
-	// causing a small number of out-of-order rows per partition (~7/240000).
-	// This is a known trade-off for the performance improvement.
+	// The source reader (parquet scan) runs in parallel, giving ~3.7x speedup.
+	// Buffers arrive out-of-order; the FlushWorker accumulates all buffers per
+	// partition and sorts by (symbol, date) before flushing — zero out-of-order.
 
 	const auto count = input.size();
 	auto &part_vec = input.data[bind_data.partition_col_pos];
@@ -647,9 +837,10 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 // Use PARALLEL_COPY_TO_FILE to allow the source reader (parquet scan) to
 // run in parallel (8 threads). Multiple Sink threads process chunks
 // concurrently with per-thread LocalState. The FlushWorker thread pool
-// handles parallel Parquet encoding.
-// Note: with parallel source reading, morsels may arrive out of order,
-// causing a small number of out-of-order rows per partition (~7/240000).
+// handles parallel Parquet encoding. Buffers arrive out-of-order; each
+// FlushWorker accumulates all buffers for its partitions, then sorts by
+// (symbol, date) before flushing — guaranteeing correct in-partition order
+// with zero out-of-order rows.
 static CopyFunctionExecutionMode AlignedCopyExecutionMode(bool preserve_insertion_order, bool supports_batch_index) {
 	return CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
 }

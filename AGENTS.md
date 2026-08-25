@@ -189,16 +189,15 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     `{idx:04d}-{rows:10d}.parquet`（实际行数）。0 行空文件自动删除。
   - **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
     = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part。
-  - **排序**：**`PARALLEL_COPY_TO_FILE`（多线程并行 source reader）**——输入按
-    `(symbol, date)` 排序则分区内输出**基本**保持排序。`PARALLEL_COPY_TO_FILE` 让
-    parquet source reader 用 8 线程并行扫描（~3.7× 加速：15.9s→4.3s），多线程
-    Sink 各自维护 per-thread per-partition RG buffer（无锁），满 RG_SIZE 后推到
-    background FlushWorker 线程池做并行 Parquet 编码。**已知 trade-off**：morsel
-    scheduler 把行段分配给不同线程的顺序不确定，导致每个分区内约 7/240000 行
-    （0.003%）乱序。如需完全保序，可改回 `REGULAR_COPY_TO_FILE`（单线程 source，
-    天然保序，但慢 ~3.7×）。partition affinity（round-robin）保证同一分区的数据
-    只由一个 FlushWorker 线程写入。`PartitionedColumnData` 的 hash 分区不保序，
-    aligned COPY 不使用它——Sink 直接做 run detection + project 到 group schema。
+  - **排序**：**`PARALLEL_COPY_TO_FILE`（多线程并行 source reader）+ FlushWorker
+    端全局 (symbol, date) 排序**——输入按 `(symbol, date)` 排序则分区内输出**严格**
+    保持排序（0 乱序行）。`PARALLEL_COPY_TO_FILE` 让 parquet source reader 用 8 线程
+    并行扫描（~1.5× 加速：15.9s→10.4s），多线程 Sink 各自维护 per-thread per-partition
+    RG buffer（无锁），满 RG_SIZE 后推到 background FlushWorker。FlushWorker 在 sentinel
+    到达后收集每个分区的所有 buffer，合并后按 (symbol, date) 全局排序再 flush——
+    消除 morsel 乱序。partition affinity（round-robin）保证同一分区的数据只由一个
+    FlushWorker 线程写入。`PartitionedColumnData` 的 hash 分区不保序，aligned COPY
+    不使用它——Sink 直接做 run detection + project 到 group schema。
   - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
     输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
   - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
@@ -453,16 +452,19 @@ extension/aligned/src/
   （`plan_copy_to_file.cpp` 强制 `preserve_insertion_order=false`，且禁止
   `PRESERVE_ORDER`）。**aligned COPY 的解法**：不使用 `PartitionedColumnData`
   做 hash 分区——Sink 直接做 run detection + project 到 group schema。
-  `PARALLEL_COPY_TO_FILE` 让 source reader 多线程并行（~3.7× 加速），多线程
-  Sink 各自维护 per-thread per-partition buffer；morsel scheduler 分配顺序不
-  确定导致每分区约 7/240000 行（0.003%）乱序。如需完全保序，可改回
-  `REGULAR_COPY_TO_FILE`（单线程 source，天然保序，但慢 ~3.7×）。
+  `PARALLEL_COPY_TO_FILE` 让 source reader 多线程并行，多线程 Sink 各自维护
+  per-thread per-partition buffer；FlushWorker 在 sentinel 到达后收集每个分区的
+  所有 buffer，合并后按 (symbol, date) 全局排序再 flush——消除 morsel 乱序，
+  实现并行 source reader + 0 乱序行。
   **`REGULAR_COPY_TO_FILE` vs `PARALLEL_COPY_TO_FILE` 线程模型**：
   `REGULAR` → `ParallelSink()` 返回 false → `ScheduleSequentialTask()` →
   整条 pipeline（含 source reader）单线程；`PARALLEL` → `ParallelSink()` 返回
   true → pipeline 并行（source reader + Sink 均多线程）。同一批 pipeline 线程
   同时做 source 读取和 Sink 处理，因此用 mutex 串行化 Sink 会连带串行化 source
   reader（实测 16s，与 REGULAR 相同），无法只并行 source 不并行 Sink。
+  **FlushWorker 端排序的类型安全**：排序时提取 date 列值必须从**实际 Vector
+  类型**判断 INT64（TIMESTAMP）还是 INT32（DATE），不能用 `bind_data.is_timestamp`
+  （反映**输入**类型，Sink cast 后**输出**类型可能不同，如 TIMESTAMP→DATE cast）。
 
 - **`ScanGroupWindow` 的 src_offset**：窗口从 RG 中部开始时必须用
   `seg.flow_off + (copy_from - seg.win_start) - rg_off`，不是简单的

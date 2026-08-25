@@ -116,6 +116,10 @@ struct FlushWorker {
 	// Thread-local per-partition state (NO locks — only this thread accesses)
 	std::unordered_map<string, unique_ptr<PerPartitionState>> partitions;
 
+	// Per-partition pending buffers: accumulated until all data arrives,
+	// then sorted by (symbol, date) and flushed in order.
+	std::unordered_map<string, vector<unique_ptr<ColumnDataCollection>>> pending;
+
 	// Error capture
 	std::exception_ptr error;
 };
@@ -163,6 +167,11 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 
 	// Helper: flush a buffer to the partition's ParquetWriter.
 	void FlushToPartition(PerPartitionState &pp, ColumnDataCollection &buffer);
+
+	// Helper: merge all pending buffers for a partition into a single
+	// ColumnDataCollection, sort by (symbol, date), and flush.
+	void SortAndFlushPartition(PerPartitionState &pp,
+	                            vector<unique_ptr<ColumnDataCollection>> &buffers);
 
 	// Helper: rotate part file when RG count reaches threshold.
 	void RotatePartition(PerPartitionState &pp);
