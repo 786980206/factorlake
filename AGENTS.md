@@ -174,11 +174,13 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
         ↓
     Sink: run detection → project 到 group schema → 累积到 per-partition RG buffer
         ↓   (单线程 REGULAR_COPY_TO_FILE，保序)
-        ↓   buffer 满 (131072 rows) → GlobalState::Flush (ParquetWriter::Flush = 1 RG)
-    Combine: flush 所有 per-partition 剩余 buffer
+        ↓   buffer 满 (131072 rows) → PushJob 到 background FlushWorker (FIFO queue)
+    Combine: push 剩余 buffer + sentinel
         ↓
-    Finalize: 多线程并行 FinalizePartition (ParquetWriter::Finalize + Rename)
-             → 统计校验 (received == written)
+    FlushWorker (N threads): PopJob → ParquetWriter::Flush (1 RG)
+        ↓   线程私有 PerPartitionState (无锁)，partition affinity (round-robin)
+        ↓   满 row_groups_per_file (8) → 轮转 part 文件
+    Finalize: join threads → 检查 error → 统计校验 (received == written)
     ```
 
   - **per-partition 覆盖**：每个分区目录首次写入时自动清理旧 parquet 文件
@@ -191,8 +193,9 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     天然保序**——输入按 `(symbol, date)` 排序则分区内输出保持排序，无需排序
     开销。`PARALLEL_COPY_TO_FILE` 会打乱行序（多线程并行 Sink 导致
     `PartitionedColumnData` 的 hash 分区不保序），因此始终用单线程 Sink。
-    并行性在 Finalize 阶段：多线程并行 `FinalizePartition`（Parquet
-    编码/压缩是 CPU 密集型瓶颈）。
+    并行性通过 background FlushWorker 线程池实现：Sink 把 RG-sized buffer
+    推到 N 个后台线程，每个线程拥有线程私有的 `PerPartitionState`（无锁热路径），
+    partition affinity（round-robin）保证同一分区的数据只由一个线程写入。
   - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
     输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
   - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
@@ -311,9 +314,10 @@ extension/aligned/src/
 | `resolver/partition_resolver` | `EvaluatePartitionTemplate` / `IsKnownTemplate` | 三种模板求值/校验 |
 | | `DefaultPartitionKey` / `ValidatePartitionKey` | 默认分区键 / 分区键校验 |
 | `copy/aligned_copy` | `GetAlignedCopyFunction` | 注册 FORMAT aligned CopyFunction（Sink/Combine/Finalize pipeline） |
-| | `PartitionWriter` | per-partition ParquetWriter + part-file rotation |
-| | `AlignedCopyGlobalState::Flush` | Sink/Combine 中 flush RG buffer 到 ParquetWriter（1 RG per Flush） |
-| | `AlignedCopyFinalize` | 多线程并行 FinalizePartition（ParquetWriter::Finalize + Rename + 统计校验） |
+| | `FlushWorker` | 后台线程 + 线程私有 PerPartitionState（无锁热路径） |
+| | `AlignedCopyGlobalState` | 拥有 N 个 FlushWorker 线程池 + partition→worker affinity |
+| | `AlignedCopySink` | 单线程扫描 + run detection + project + push RG buffer 到 FlushWorker |
+| | `FlushWorker::WorkerLoop` | PopJob → ParquetWriter::Flush（线程私有，无锁）→ 轮转 part 文件 |
 | `mutator/aligned_mutator` | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
 | | `NextTransactionId` | 共享事务号计数器 |
 | | `ExtractSortedRows` | 向量化提取 (symbol, date) 排序键 |
