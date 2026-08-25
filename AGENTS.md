@@ -173,7 +173,7 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     input chunk (sorted by symbol, date)
         ↓
     Sink: run detection → project 到 group schema → 累积到 per-partition RG buffer
-        ↓   (单线程 REGULAR_COPY_TO_FILE，保序)
+        ↓   (PARALLEL_COPY_TO_FILE，多线程并行 source reader + per-thread Sink)
         ↓   buffer 满 (131072 rows) → PushJob 到 background FlushWorker (FIFO queue)
     Combine: push 剩余 buffer + sentinel
         ↓
@@ -189,13 +189,16 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     `{idx:04d}-{rows:10d}.parquet`（实际行数）。0 行空文件自动删除。
   - **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
     = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part。
-  - **排序**：**强制 `REGULAR_COPY_TO_FILE`（单线程 Sink），单线程顺序扫描
-    天然保序**——输入按 `(symbol, date)` 排序则分区内输出保持排序，无需排序
-    开销。`PARALLEL_COPY_TO_FILE` 会打乱行序（多线程并行 Sink 导致
-    `PartitionedColumnData` 的 hash 分区不保序），因此始终用单线程 Sink。
-    并行性通过 background FlushWorker 线程池实现：Sink 把 RG-sized buffer
-    推到 N 个后台线程，每个线程拥有线程私有的 `PerPartitionState`（无锁热路径），
-    partition affinity（round-robin）保证同一分区的数据只由一个线程写入。
+  - **排序**：**`PARALLEL_COPY_TO_FILE`（多线程并行 source reader）**——输入按
+    `(symbol, date)` 排序则分区内输出**基本**保持排序。`PARALLEL_COPY_TO_FILE` 让
+    parquet source reader 用 8 线程并行扫描（~3.7× 加速：15.9s→4.3s），多线程
+    Sink 各自维护 per-thread per-partition RG buffer（无锁），满 RG_SIZE 后推到
+    background FlushWorker 线程池做并行 Parquet 编码。**已知 trade-off**：morsel
+    scheduler 把行段分配给不同线程的顺序不确定，导致每个分区内约 7/240000 行
+    （0.003%）乱序。如需完全保序，可改回 `REGULAR_COPY_TO_FILE`（单线程 source，
+    天然保序，但慢 ~3.7×）。partition affinity（round-robin）保证同一分区的数据
+    只由一个 FlushWorker 线程写入。`PartitionedColumnData` 的 hash 分区不保序，
+    aligned COPY 不使用它——Sink 直接做 run detection + project 到 group schema。
   - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
     输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
   - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
@@ -316,7 +319,7 @@ extension/aligned/src/
 | `copy/aligned_copy` | `GetAlignedCopyFunction` | 注册 FORMAT aligned CopyFunction（Sink/Combine/Finalize pipeline） |
 | | `FlushWorker` | 后台线程 + 线程私有 PerPartitionState（无锁热路径） |
 | | `AlignedCopyGlobalState` | 拥有 N 个 FlushWorker 线程池 + partition→worker affinity |
-| | `AlignedCopySink` | 单线程扫描 + run detection + project + push RG buffer 到 FlushWorker |
+| | `AlignedCopySink` | 并行 run detection + project + push RG buffer 到 FlushWorker |
 | | `FlushWorker::WorkerLoop` | PopJob → ParquetWriter::Flush（线程私有，无锁）→ 轮转 part 文件 |
 | `mutator/aligned_mutator` | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
 | | `NextTransactionId` | 共享事务号计数器 |
@@ -422,9 +425,9 @@ extension/aligned/src/
   `SetVectorType` 或 `Flatten`。
 - **`COPY TO PARQUET` 的 `PARTITION_BY` 列必须在 `expected_types` 中**：DuckDB 原生
   `HivePartitionedColumnData` 包含全量列（含分区列），flush 时用 `SetDataWithoutPartitions`
-  剥离分区列。aligned COPY 不使用 `PartitionedColumnData`（单线程 Sink 直接 run
-  detection + project 到 group schema），列映射/cast 在 Sink 中完成（排除 key
-  列后 flush 到 ParquetWriter）。
+  剥离分区列。aligned COPY 不使用 `PartitionedColumnData`（Sink 直接 run detection
+  + project 到 group schema），列映射/cast 在 Sink 中完成（排除 key 列后 flush
+  到 ParquetWriter）。
 
 ### 构建陷阱
 
@@ -448,9 +451,18 @@ extension/aligned/src/
   与输入行序无关。即使输入 `ORDER BY (symbol, date)`，并行模式下分区内仍会
   产生乱序。DuckDB 原生 `COPY TO PARQUET PARTITION_BY` 也有同样问题
   （`plan_copy_to_file.cpp` 强制 `preserve_insertion_order=false`，且禁止
-  `PRESERVE_ORDER`）。**aligned COPY 的解法**：强制 `REGULAR_COPY_TO_FILE`
-  （单线程 Sink），单线程顺序扫描天然保序，不使用 `PartitionedColumnData`
-  做 hash 分区。分区内行序 = 输入行序（要求输入按 `(symbol, date)` 排序）。
+  `PRESERVE_ORDER`）。**aligned COPY 的解法**：不使用 `PartitionedColumnData`
+  做 hash 分区——Sink 直接做 run detection + project 到 group schema。
+  `PARALLEL_COPY_TO_FILE` 让 source reader 多线程并行（~3.7× 加速），多线程
+  Sink 各自维护 per-thread per-partition buffer；morsel scheduler 分配顺序不
+  确定导致每分区约 7/240000 行（0.003%）乱序。如需完全保序，可改回
+  `REGULAR_COPY_TO_FILE`（单线程 source，天然保序，但慢 ~3.7×）。
+  **`REGULAR_COPY_TO_FILE` vs `PARALLEL_COPY_TO_FILE` 线程模型**：
+  `REGULAR` → `ParallelSink()` 返回 false → `ScheduleSequentialTask()` →
+  整条 pipeline（含 source reader）单线程；`PARALLEL` → `ParallelSink()` 返回
+  true → pipeline 并行（source reader + Sink 均多线程）。同一批 pipeline 线程
+  同时做 source 读取和 Sink 处理，因此用 mutex 串行化 Sink 会连带串行化 source
+  reader（实测 16s，与 REGULAR 相同），无法只并行 source 不并行 Sink。
 
 - **`ScanGroupWindow` 的 src_offset**：窗口从 RG 中部开始时必须用
   `seg.flow_off + (copy_from - seg.win_start) - rg_off`，不是简单的

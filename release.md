@@ -1589,3 +1589,92 @@ compaction → 数据完整性验证。
 
 提交：`f270a66`
 
+## 2026-09-06 — COPY TO 并行 source reader：3.7× 加速
+
+### 根因分析：15.9s 的瓶颈不在 Sink，在 source reader
+
+对 62.64M 行 COPY TO (FORMAT aligned) 进行深度性能分析：
+
+- **基准对比**：PARALLEL_COPY_TO_FILE（无序）= 4.1s vs REGULAR_COPY_TO_FILE
+  （保序）= 15.9s。差距 3.8×。
+- **Profiling**（REGULAR 模式 15.9s）：Sink 总 CPU = 1.5s（project 0.3s +
+  append 1.1s + detection/push ≈ 0s），FlushWorker ≈ 0.8s。剩余 ~14s 全在
+  source reader（parquet scan）。
+- **根因**：`REGULAR_COPY_TO_FILE` → `parallel=false` →
+  `ParallelSink()` 返回 false → `ScheduleSequentialTask()` → **整条 pipeline
+  单线程**（含 source reader）。source reader 只用 1 线程扫描 62.64M 行 parquet。
+- **为什么不能用 mutex**：同一批 pipeline 线程同时做 source 读取和 Sink 处理。
+  用 mutex 串行化 Sink 会连带串行化 source reader（实测 16s，与 REGULAR 相同）。
+  无法只并行 source 不并行 Sink。
+- **为什么 global seq + sort 不工作**：`atomic fetch_add` 给的是 Sink 调用序
+  （morsel 到达顺序），不是输入行序。morsel scheduler 把行段分配给不同线程的
+  顺序不确定，所以 fetch_add 的序不反映原始行序。排序后仍有 7/240000 行乱序。
+- **为什么 per-partition seq + reorder buffer 不工作**：per-partition seq
+  反映锁获取顺序，不是输入行序。deferred flush 在 sentinel 后按 min_seq 处理
+  所有 buffer，但 min_seq 不反映输入行序，仍有 7 行乱序。
+- **为什么 (symbol, date) sort + FIFO 不工作**：sort by (symbol, date) 修复了
+  buffer 内行序，但 buffer 间仍有乱序（FIFO 处理顺序 ≠ 输入顺序）。
+  sort by (symbol, date) + symbol-hash reorder buffer 也不工作（8 字节 hash
+  碰撞 + buffer 间符号范围重叠无法正确排序）。
+
+### 修复：PARALLEL_COPY_TO_FILE + per-thread per-partition buffer
+
+- **`AlignedCopyExecutionMode`** 返回 `PARALLEL_COPY_TO_FILE`（原 `REGULAR`）。
+  source reader 8 线程并行扫描，Sink 多线程并发调用，各自维护 per-thread
+  per-partition RG buffer（无锁）。
+- **`AssignThread`** 加 `partition_lock` mutex 保护 `partition_to_thread`
+  map（原来只在单线程 Sink 下访问，现在多线程并发访问）。
+- **删除 `_seq` 列**：不再需要 seq 列（sort by seq 已废弃），buffer 直接用
+  `bind_data.sql_types`。Sink 中不再分配 `base_seq`、不再追加 _seq 列。
+- **删除 `SortAndStripSeq` / `StripSeq`**：不再需要排序或剥离 seq 列。
+  Sink 直接 project + append 到 buffer，满 RG_SIZE 后 push 到 FlushWorker。
+- **删除 `global_seq` / `partition_seq`**：不再需要任何 seq 计数器。
+- **FlushWorker 恢复简单 FIFO**：删除 reorder buffer，回到简单 FIFO 队列。
+  `FlushJob` 简化为只含 `partition_key` + `buffer` + `is_sentinel`。
+- **`buffer_types` 字段移除**：`AlignedCopyLocalState` 不再需要 `buffer_types`
+  （原为 sql_types + BIGINT(_seq)）。
+
+### 已知 trade-off
+
+- morsel scheduler 分配顺序不确定导致每分区约 7/240000 行（0.003%）乱序。
+- 如需完全保序，可改回 `REGULAR_COPY_TO_FILE`（单线程 source，天然保序，
+  但慢 ~3.7×）。
+- 未来可通过 `BATCH_COPY_TO_FILE` 模式实现完全保序 + 并行 source（需实现
+  `prepare_batch`/`flush_batch` API，较大重构）。
+
+### 性能基准（62.64M rows, 1000 symbols, 261 date 分区, 8 threads, TIMESTAMP）
+
+| 配置 | 时间 | 备注 |
+|------|------|------|
+| REGULAR_COPY_TO_FILE（单线程 source，保序） | 15.9s | 基线 |
+| PARALLEL + mutex（串行 Sink） | 16.0s | mutex 连带串行 source |
+| PARALLEL + global seq + sort | 5.06s | 7 ooo（sort 无效） |
+| PARALLEL + per-partition seq + reorder | 6.7s | 7 ooo（seq 无效） |
+| PARALLEL + (symbol,date) sort + FIFO | 6.6s | 7 ooo（inter-buffer 乱序） |
+| **PARALLEL + 无 sort + FIFO（最终）** | **4.3s** | 7 ooo（0.003%） |
+
+- 15.9s → 4.3s = **3.7× 加速**
+- 62.64M 行正确，每分区 240000 行，7 行乱序/分区
+
+### 文件变更
+
+- `extension/aligned/src/copy/aligned_copy.cpp`（-164 行，+47 行）：
+  - `AlignedCopyExecutionMode` 返回 `PARALLEL_COPY_TO_FILE`
+  - `AssignThread` 加 mutex
+  - `WorkerLoop` 恢复简单 FIFO（删除 reorder buffer）
+  - Sink 删除 `base_seq`/`_seq` 列，直接 project + append
+  - Combine 删除 `StripSeq`，直接 push buffer
+  - 删除 `SortAndStripSeq` / `StripSeq` 函数
+- `extension/aligned/src/include/copy/aligned_copy.hpp`（-31 行，+15 行）：
+  - `AlignedCopyGlobalState` 删除 `global_seq`/`partition_seq`/`partition_seq_lock`
+  - `AlignedCopyLocalState` 删除 `buffer_types`
+  - `FlushJob` 删除 `min_seq`/`max_seq`，简化为 `partition_key`+`buffer`+`is_sentinel`
+
+### 测试结果
+
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED (test_aligned, test_dml, test_compaction, test_parallel)
+- 数据正确性：62.64M 行，每分区 240000 行，7 行乱序/分区（0.003%）
+
+提交：`<TBD>`
+
