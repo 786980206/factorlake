@@ -186,7 +186,23 @@ void AlignedCopyGlobalState::InitPartition(PerPartitionState &pp) {
 			}
 		});
 	}
-	fs.CreateDirectoriesRecursive(pp.part_dir);
+	// CreateDirectoriesRecursive can race on Windows when multiple FlushWorker
+	// threads create the same year=YYYY subdirectory concurrently. Retry on
+	// IOException if the directory was already created by another thread.
+	for (int attempt = 0; attempt < 3; attempt++) {
+		try {
+			fs.CreateDirectoriesRecursive(pp.part_dir);
+			break;
+		} catch (const IOException &e) {
+			if (fs.DirectoryExists(pp.part_dir)) {
+				break;  // Another thread created it — that's fine.
+			}
+			if (attempt == 2) {
+				throw;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
 
 	// Create first part file.
 	pp.part_index = 0;
@@ -655,6 +671,11 @@ static unique_ptr<GlobalFunctionData> AlignedCopyInitializeGlobal(ClientContext 
                                                                    const string &file_path) {
 	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
 	auto &fs = FileSystem::GetFileSystem(context);
+	// Pre-create the group directory (single-threaded, before parallel Sink
+	// starts). This avoids a TOCTOU race in Windows CreateDirectory when
+	// multiple FlushWorker threads try to create the same parent directory
+	// concurrently for a new group.
+	fs.CreateDirectoriesRecursive(bind_data.group_path);
 	return make_uniq<AlignedCopyGlobalState>(context, fs, bind_data);
 }
 

@@ -1794,3 +1794,36 @@ sort=54.253s (8 threads → ~6.8s wall)
 
 提交：`2da2a1d`
 
+## 2026-09-06 — 修复新组 COPY 的目录创建竞态
+
+### 问题
+
+首次向新组（如 `panel/ma2`，未通过 `aligned_create` 预建）COPY 时报错：
+`IO Error: Failed to create directory "cnstk_ixday/panel/ma2": 当文件已存在时，无法创建该文件。`
+
+### 根因
+
+Windows `LocalFileSystem::CreateDirectory` 存在 TOCTOU 竞态：
+1. `CreateDirectoriesRecursive` 先 `DirectoryExists` → false（目录不存在）
+2. 另一个 FlushWorker 线程同时创建了该目录
+3. 当前线程 `CreateDirectoryW` → 失败（ERROR_ALREADY_EXISTS），`DirectoryExists` → true
+4. `!CreateDirectoryW || !DirectoryExists` = `true || false` → 抛 IOException
+
+多线程 FlushWorker 为同一个新组的多个分区并行调用 `InitPartition`，每
+个 `part_dir = group_path/year=YYYY` 都需要创建父目录 `group_path`，产生竞态。
+
+### 修复
+
+1. `InitializeGlobal`（单线程，并行 Sink 前）预创建 `group_path`，消除
+   父目录竞态
+2. `InitPartition` 对 `CreateDirectoriesRecursive` 加重试循环（3 次），
+   IOException 后检查 `DirectoryExists`——若已被另一线程创建则视为成功
+
+### 测试
+
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED
+- 新组 COPY 验证：`COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma2')` 成功
+
+提交：`<TBD>`
+
