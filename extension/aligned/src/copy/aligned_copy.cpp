@@ -14,7 +14,9 @@
 #include "duckdb/main/client_context.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
+#include <unordered_map>
 
 #include "parquet_writer.hpp"
 #include "zstd_file_system.hpp"
@@ -501,25 +503,15 @@ static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_dat
 // on the merged data to guarantee global (symbol, date) order.
 //===----------------------------------------------------------------------===//
 
-// Sort a ColumnDataCollection by (symbol_col, date_col) ascending.
-// Writes sorted rows into the output collection.  Uses an index-based
-// approach: collects sort keys, sorts an index array, then copies rows
-// in sorted order.
-static void SortPartitionCollection(ClientContext &context,
-                                    const AlignedCopyBindData &bind_data,
-                                    ColumnDataCollection &input,
-                                    ColumnDataCollection &output,
-                                    idx_t symbol_col, idx_t date_col) {
-	idx_t total_rows = input.Count();
+// Check if a ColumnDataCollection is already sorted by (symbol_col, date_col).
+// Returns true if every row >= previous row in (symbol, date) order.
+// O(n) scan, no allocations — used to skip the expensive sort when input
+// is already ordered (common case when user writes ORDER BY symbol, date).
+static bool IsCollectionSorted(ColumnDataCollection &input, idx_t symbol_col, idx_t date_col) {
+	string prev_symbol;
+	int64_t prev_date = std::numeric_limits<int64_t>::min();
+	bool has_prev = false;
 
-	// Collect sort keys.
-	vector<string> symbols;
-	vector<int64_t> dates;
-	symbols.reserve(total_rows);
-	dates.reserve(total_rows);
-
-	// Snapshot all chunks into owning DataChunks for random access.
-	vector<unique_ptr<DataChunk>> chunk_snapshots;
 	for (auto &chunk : input.Chunks()) {
 		UnifiedVectorFormat sym_fmt, date_fmt;
 		chunk.data[symbol_col].ToUnifiedFormat(chunk.size(), sym_fmt);
@@ -527,19 +519,136 @@ static void SortPartitionCollection(ClientContext &context,
 		bool date_is_ts = chunk.data[date_col].GetType().id() == LogicalTypeId::TIMESTAMP;
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			auto si = sym_fmt.sel->get_index(r);
+			string cur_symbol;
 			if (sym_fmt.validity.RowIsValid(si)) {
 				auto &sv = UnifiedVectorFormat::GetData<string_t>(sym_fmt)[si];
-				symbols.emplace_back(sv.GetData(), sv.GetSize());
-			} else {
-				symbols.emplace_back();
+				cur_symbol.assign(sv.GetData(), sv.GetSize());
 			}
 			auto di = date_fmt.sel->get_index(r);
+			int64_t cur_date;
 			if (date_is_ts) {
-				dates.push_back(UnifiedVectorFormat::GetData<int64_t>(date_fmt)[di]);
+				cur_date = UnifiedVectorFormat::GetData<int64_t>(date_fmt)[di];
 			} else {
-				dates.push_back(static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(date_fmt)[di]));
+				cur_date = static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(date_fmt)[di]);
 			}
+			if (has_prev) {
+				if (cur_symbol < prev_symbol ||
+				    (cur_symbol == prev_symbol && cur_date < prev_date)) {
+					return false;
+				}
+			}
+			prev_symbol = std::move(cur_symbol);
+			prev_date = cur_date;
+			has_prev = true;
 		}
+	}
+	return true;
+}
+
+// Sort a ColumnDataCollection by (symbol_col, date_col) ascending.
+// Writes sorted rows into the output collection.
+//
+// Approach: collect sort keys into compact arrays, sort an index array,
+// then append rows in sorted order using SelectionVector copies.
+// Symbol strings are interned into an id array to avoid O(n) string
+// comparisons during sort.
+static void SortPartitionCollection(ClientContext &context,
+                                    const AlignedCopyBindData &bind_data,
+                                    ColumnDataCollection &input,
+                                    ColumnDataCollection &output,
+                                    idx_t symbol_col, idx_t date_col) {
+	idx_t total_rows = input.Count();
+	if (total_rows == 0) {
+		return;
+	}
+
+	// Phase 1: Collect sort keys.
+	// Intern symbol strings into integer ids for fast comparison.
+	vector<string> symbol_table;  // id → string
+	unordered_map<string, idx_t> symbol_to_id;
+	vector<idx_t> sym_ids;        // row → symbol id
+	vector<int64_t> dates;        // row → date/timestamp value
+	sym_ids.reserve(total_rows);
+	dates.reserve(total_rows);
+
+	// Also record (chunk_idx, row_offset) for each row for later access.
+	// We iterate chunks once to collect keys + locations.
+	vector<idx_t> row_chunk_idx(total_rows);
+	vector<idx_t> row_chunk_off(total_rows);
+
+	bool date_is_ts = false;
+	{
+		idx_t row_idx = 0;
+		idx_t chunk_idx = 0;
+		for (auto &chunk : input.Chunks()) {
+			UnifiedVectorFormat sym_fmt, date_fmt;
+			chunk.data[symbol_col].ToUnifiedFormat(chunk.size(), sym_fmt);
+			chunk.data[date_col].ToUnifiedFormat(chunk.size(), date_fmt);
+			date_is_ts = chunk.data[date_col].GetType().id() == LogicalTypeId::TIMESTAMP;
+			for (idx_t r = 0; r < chunk.size(); r++) {
+				auto si = sym_fmt.sel->get_index(r);
+				if (sym_fmt.validity.RowIsValid(si)) {
+					auto &sv = UnifiedVectorFormat::GetData<string_t>(sym_fmt)[si];
+					string sym(sv.GetData(), sv.GetSize());
+					auto it = symbol_to_id.find(sym);
+					if (it == symbol_to_id.end()) {
+						idx_t id = symbol_table.size();
+						symbol_to_id[sym] = id;
+						symbol_table.push_back(std::move(sym));
+						sym_ids.push_back(id);
+					} else {
+						sym_ids.push_back(it->second);
+					}
+				} else {
+					sym_ids.push_back(0);
+				}
+				auto di = date_fmt.sel->get_index(r);
+				if (date_is_ts) {
+					dates.push_back(UnifiedVectorFormat::GetData<int64_t>(date_fmt)[di]);
+				} else {
+					dates.push_back(static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(date_fmt)[di]));
+				}
+				row_chunk_idx[row_idx] = chunk_idx;
+				row_chunk_off[row_idx] = r;
+				row_idx++;
+			}
+			chunk_idx++;
+		}
+	}
+
+	// Phase 2: Sort index array by (symbol, date).
+	// Note: sym_ids are assigned by first-encounter order, NOT
+	// alphabetical.  We must sort the symbol table alphabetically and
+	// remap ids so that id comparison matches string comparison.
+	vector<idx_t> sym_sort_order(symbol_table.size());
+	iota(sym_sort_order.begin(), sym_sort_order.end(), 0);
+	sort(sym_sort_order.begin(), sym_sort_order.end(), [&](idx_t a, idx_t b) {
+		return symbol_table[a] < symbol_table[b];
+	});
+	// Build remap: old_id → new alphabetical_id
+	vector<idx_t> sym_remap(symbol_table.size());
+	for (idx_t i = 0; i < sym_sort_order.size(); i++) {
+		sym_remap[sym_sort_order[i]] = i;
+	}
+	// Remap sym_ids to alphabetical order
+	for (auto &id : sym_ids) {
+		id = sym_remap[id];
+	}
+
+	vector<idx_t> sorted_idx(total_rows);
+	iota(sorted_idx.begin(), sorted_idx.end(), 0);
+	stable_sort(sorted_idx.begin(), sorted_idx.end(), [&](idx_t a, idx_t b) {
+		if (sym_ids[a] != sym_ids[b]) {
+			return sym_ids[a] < sym_ids[b];
+		}
+		return dates[a] < dates[b];
+	});
+
+	// Phase 3: Build sorted output by copying rows in sorted order.
+	// Snapshot all chunks into owning DataChunks for safe access after
+	// the ChunkIterator is gone.
+	vector<unique_ptr<DataChunk>> chunk_snapshots;
+	for (auto &chunk : input.Chunks()) {
 		auto snap = make_uniq<DataChunk>();
 		snap->Initialize(context, bind_data.sql_types);
 		snap->SetCardinality(chunk.size());
@@ -549,31 +658,6 @@ static void SortPartitionCollection(ClientContext &context,
 		chunk_snapshots.push_back(std::move(snap));
 	}
 
-	// Build sorted index array.
-	vector<idx_t> sorted_idx(total_rows);
-	iota(sorted_idx.begin(), sorted_idx.end(), 0);
-	sort(sorted_idx.begin(), sorted_idx.end(), [&](idx_t a, idx_t b) {
-		if (symbols[a] != symbols[b]) {
-			return symbols[a] < symbols[b];
-		}
-		return dates[a] < dates[b];
-	});
-
-	// Build row location map: row_idx → (chunk_idx, offset_in_chunk).
-	vector<pair<idx_t, idx_t>> row_locations(total_rows);
-	{
-		idx_t row_idx = 0;
-		idx_t chunk_idx = 0;
-		for (auto &snap : chunk_snapshots) {
-			for (idx_t r = 0; r < snap->size(); r++) {
-				row_locations[row_idx] = {chunk_idx, r};
-				row_idx++;
-			}
-			chunk_idx++;
-		}
-	}
-
-	// Build sorted output by copying rows in sorted order.
 	ColumnDataAppendState sort_append;
 	output.InitializeAppend(sort_append);
 
@@ -581,24 +665,24 @@ static void SortPartitionCollection(ClientContext &context,
 	while (batch_start < total_rows) {
 		idx_t batch_size = 0;
 		SelectionVector sel(STANDARD_VECTOR_SIZE);
-		idx_t src_chunk_idx = DConstants::INVALID_INDEX;
+		idx_t src_chunk = DConstants::INVALID_INDEX;
 		while (batch_start + batch_size < total_rows &&
 		       batch_size < STANDARD_VECTOR_SIZE) {
 			idx_t row = sorted_idx[batch_start + batch_size];
-			auto &loc = row_locations[row];
-			if (src_chunk_idx == DConstants::INVALID_INDEX) {
-				src_chunk_idx = loc.first;
-			} else if (loc.first != src_chunk_idx) {
+			idx_t ci = row_chunk_idx[row];
+			if (src_chunk == DConstants::INVALID_INDEX) {
+				src_chunk = ci;
+			} else if (ci != src_chunk) {
 				break;
 			}
-			sel.set_index(batch_size, loc.second);
+			sel.set_index(batch_size, row_chunk_off[row]);
 			batch_size++;
 		}
 
 		DataChunk sort_chunk;
 		sort_chunk.Initialize(context, bind_data.sql_types);
 		sort_chunk.SetCardinality(batch_size);
-		auto &src = *chunk_snapshots[src_chunk_idx];
+		auto &src = *chunk_snapshots[src_chunk];
 		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
 			VectorOperations::Copy(src.data[c], sort_chunk.data[c], sel, batch_size, 0, 0);
 		}
@@ -655,7 +739,6 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 		idx_t rows_flushed = 0;
 		idx_t total = flush_col->Count();
 		while (rows_flushed < total) {
-			// Build a chunk of up to RG_SIZE rows from the sorted collection.
 			ColumnDataCollection rg_collection(context, bind_data.sql_types);
 			ColumnDataAppendState rg_append;
 			rg_collection.InitializeAppend(rg_append);
@@ -664,22 +747,18 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 			idx_t rg_rows = MinValue<idx_t>(remaining, RG_SIZE);
 
 			// Iterate all chunks, copying only rows in the [rows_flushed,
-			// rows_flushed + rg_rows) window.  This is O(n) per RG but the
-			// total is O(n * num_RGs) which is acceptable for the write path.
+			// rows_flushed + rg_rows) window.
 			idx_t rows_collected = 0;
 			for (auto &chunk : flush_col->Chunks()) {
 				idx_t chunk_start = rows_collected;
 				idx_t chunk_end = chunk_start + chunk.size();
-				// Skip chunks entirely before the window.
 				if (chunk_end <= rows_flushed) {
 					rows_collected = chunk_end;
 					continue;
 				}
-				// Skip chunks entirely after the window.
 				if (chunk_start >= rows_flushed + rg_rows) {
 					break;
 				}
-				// Copy the overlapping rows.
 				idx_t copy_from = (rows_flushed > chunk_start) ? (rows_flushed - chunk_start) : 0;
 				idx_t copy_to = MinValue<idx_t>(chunk.size(), rows_flushed + rg_rows - chunk_start);
 				idx_t copy_count = copy_to - copy_from;
