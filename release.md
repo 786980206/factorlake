@@ -149,7 +149,7 @@
 
 #### 三模式性能基准 + 扩展发布
 - 扩展发布：`build_loadable_extension` + `EXTENSION_STATIC_BUILD=1`，
-  产物 24.3MB 自包含。INSTALL 机制实证（v1.5.4）。
+  产物 24.3MB 自包含。INSTALL 机制实证（v1.5.5）。
   详见 `docs/EXTENSION_RELEASE.md`。
 - 三模式基准结论：扫描性能无实质差异（±5%）；part 粒度影响固定开销
   （group 的 s25 比 all/none 慢 20~27%）。
@@ -312,7 +312,7 @@ SELECT * FROM aligned_drop('mytable', 'index', root => '...');
   该列组的目录树，index 及其他组不受影响。
 - **并发安全**：删除前获取 `TableWriteLock`，与并发 upsert/delete/compact 互斥。
 - **返回值**：`(dirs_removed, files_removed, txid)` — 删除的目录数、文件数、事务 ID。
-- **DuckDB 1.5.4 限制**：SQL 解析器不支持 `DROP TABLE ... WITH (...)` 语法
+- **DuckDB 1.5.5 限制**：SQL 解析器不支持 `DROP TABLE ... WITH (...)` 语法
   （`ExtraDropInfo` 机制仅用于 SECRETS），因此使用表函数而非标准 DROP TABLE。
 - 新增文件：`compaction/aligned_drop.{cpp,hpp}`（~140 行）。
 - 新增测试：`test/aligned/aligned_drop.test`（11 个断言）。

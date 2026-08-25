@@ -22,7 +22,7 @@
 ## 1. 扩展安装与加载
 
 AlignedTable 扩展是一个 unsigned 的 DuckDB 扩展二进制文件（`.duckdb_extension`），
-基于 DuckDB **v1.5.4** 构建。加载时强校验 DuckDB 版本，必须与构建版本一致。
+基于 DuckDB **v1.5.5** 构建。加载时强校验 DuckDB 版本，必须与构建版本一致。
 
 ### 1.1 获取扩展二进制
 
@@ -53,7 +53,7 @@ SELECT * FROM aligned_scan('mytable');
 **方式 B：INSTALL 到本地缓存 + LOAD 短名**
 
 ```bash
-# 安装（下载或复制到 ~/.duckdb/extensions/v1.5.4/<platform>/）
+# 安装（下载或复制到 ~/.duckdb/extensions/v1.5.5/<platform>/）
 duckdb -unsigned -c "INSTALL '/path/to/aligned.duckdb_extension';"
 # 之后可用短名加载（无需再传路径）
 duckdb -unsigned -c "LOAD aligned; SELECT * FROM aligned_scan('mytable');"
@@ -71,7 +71,7 @@ SELECT * FROM aligned_scan('mytable');
 > - `INSTALL` 会将扩展复制到 DuckDB 本地缓存目录
 >   （`~/.duckdb/extensions/<version>/<platform>/`）。
 > - 更新扩展时用 `FORCE INSTALL '/path/to/aligned.duckdb_extension';` 覆盖旧版本。
-> - CLI 版本必须为 v1.5.4（与扩展构建版本一致），否则加载时报版本不匹配错误。
+> - CLI 版本必须为 v1.5.5（与扩展构建版本一致），否则加载时报版本不匹配错误。
 
 ### 1.3 在 Python（duckdb 库）中加载
 
@@ -99,8 +99,8 @@ print(con.execute("SELECT * FROM al.mytable;").fetchall())
 con.execute("DETACH al;")
 ```
 
-> **版本要求**：Python duckdb 库版本必须与扩展构建版本一致（v1.5.4）。
-> 使用 `pip install duckdb==1.5.4` 安装匹配版本。
+> **版本要求**：Python duckdb 库版本必须与扩展构建版本一致（v1.5.5）。
+> 使用 `pip install duckdb==1.5.5` 安装匹配版本。
 
 ---
 

@@ -256,7 +256,7 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子
 直写 parquet 列组。`DETACH al;` 卸载。
 
-**注意**：v1.5.4 的标准 DML 算子硬绑定 `DuckTableEntry`+`DataTable`，自定义存储
+**注意**：v1.5.5 的标准 DML 算子硬绑定 `DuckTableEntry`+`DataTable`，自定义存储
 引擎无法作为扩展承接标准 DML 写。方案是通过 catalog 的 PlanInsert/PlanDelete/
 PlanUpdate 钩子返回自定义 sink 算子，直接调 mutator 的 C++ API。
 
@@ -270,7 +270,7 @@ Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
 
 ## 9. 技术栈
 
-- Query Engine：**DuckDB Extension**（v1.5.4，SQL/Planner/Table Function/Execution/DataChunk/Parallelism）
+- Query Engine：**DuckDB Extension**（v1.5.5，SQL/Planner/Table Function/Execution/DataChunk/Parallelism）
 - Storage：**Parquet**（Encoding/Compression/Statistics/Column Storage/Row Groups）
 - 语言：**C++ / DuckDB / Parquet**
 
@@ -320,14 +320,14 @@ extension/aligned/src/
 ## 11. 环境与构建
 
 ### Windows（scoop + MSVC）
-- DuckDB v1.5.4 源码 vendored 在 `duckdb/`（gitignored）
+- DuckDB v1.5.5 源码 vendored 在 `duckdb/`（gitignored）
 - 构建整体：`.\scripts\build.ps1`（vcvars64 + ninja）
 - 构建插件：`.\scripts\build_extension.ps1 -Copy`（Release + `-DEXTENSION_STATIC_BUILD=1`）
 - 运行测试：`.\scripts\run_tests.ps1`
 - 产物：`duckdb/build3/duckdb_al3.exe`、`release/aligned.duckdb_extension`
 
 ### Linux（brew + gcc + Ninja）
-- DuckDB v1.5.4 源码在 `duckdb/`（gitignored）
+- DuckDB v1.5.5 源码在 `duckdb/`（gitignored）
 - 构建：`cmake -G Ninja + ninja`（通过 `scripts/aligned_extension_config.cmake` 注册）
 - 产物：`duckdb/build/duckdb`
 

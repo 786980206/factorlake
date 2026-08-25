@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # test_aligned.sh 鈥?Linux equivalent of test_aligned.ps1 (v5 partition-aligned).
 # Requires: test/gen_testdata.sh has been run, $ROOT/duckdb/build/duckdb built.
 # Usage: bash test/test_aligned.sh   (env: DUCKDB, ALIGNED_DATA_ROOT)
@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib_aligned.sh"
 
 # For SQL whose identifiers contain quotes that -c would mangle,
-# pipe via a temp file (DuckDB 1.5.4 rejects backtick identifiers; use double quotes).
+# pipe via a temp file (DuckDB CLI rejects backtick identifiers; use double quotes).
 run_duckdb_file() {
   local tmp
   tmp="$(mktemp)"

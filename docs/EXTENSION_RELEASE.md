@@ -1,6 +1,6 @@
 # DuckDB 扩展发布 / 安装机制（研究结论 + 实施记录）
 
-> 2026-08 · 基于 DuckDB **v1.5.4 源码实证**（`src/main/extension/extension_install.cpp`、
+> 2026-08 · 基于 DuckDB **v1.5.5 源码实证**（`src/main/extension/extension_install.cpp`、
 > `extension_load.cpp`、`extension/extension_build_tools.cmake`）与本地全链路验证。
 > 目标场景：仓库迁移 GitHub 后，打 tag → GitHub Actions 构建 → GitHub Release 发布，
 > 用户通过 `duckdb -unsigned -c "INSTALL '<release-url>'"` 安装使用。
@@ -9,13 +9,13 @@
 
 - `INSTALL '<直接 URL>'` 语法 **可行**（含 `http://` 和 `https://`，不需要搭建仓库结构）。
 - 扩展为 **unsigned**（无官方签名）→ 用户必须 `duckdb -unsigned` 才能 INSTALL 和 LOAD。
-- 扩展内嵌 **DuckDB engine version**（v1.5.4），加载时强校验与 CLI 版本一致（1.5.4 ≠ 1.5.5）。
+- 扩展内嵌 **DuckDB engine version**（v1.5.5），加载时强校验与 CLI 版本一致（版本不匹配会报错）。
 - 本仓库扩展**自包含**（静态链接 DuckDB 核心 + parquet 扩展源码）→ 用户**无需**先装 parquet。
-- 本地已全链路验证：官方 CLI v1.5.4 + `-unsigned` + `INSTALL 'D:/.../aligned.duckdb_extension'`
+- 本地已全链路验证：官方 CLI v1.5.5 + `-unsigned` + `INSTALL 'D:/.../aligned.duckdb_extension'`
   + `LOAD aligned` + `SELECT * FROM aligned_scan('writetest')` → 6000 行、mis=0 ✓；
   不带 `-unsigned` → `IO Error: ... doesn't have a valid signature`（按预期拒绝）。
 
-## 2. INSTALL 的三种输入（v1.5.4 源码路径）
+## 2. INSTALL 的三种输入（v1.5.5 源码路径）
 
 判定函数 `ExtensionHelper::IsFullPath`：**含 `.` 或 `/` 或 `\` 即视为完整路径**
 （`extension_load.cpp:588`）。
@@ -28,9 +28,9 @@
 | `INSTALL name FROM 'repo-url'` | `InstallFromRepository` | URL 模板 = `${repo}/${REVISION}/${PLATFORM}/${NAME}.duckdb_extension[.gz]` |
 | `INSTALL name`（无 repo） | 默认 core 仓库 | `extensions.duckdb.org` |
 
-- `${REVISION}` = `GetVersionDirectoryName()` = `v1.5.4`；`${PLATFORM}` = `DuckDB::Platform()`
+- `${REVISION}` = `GetVersionDirectoryName()` = `v1.5.5`；`${PLATFORM}` = `DuckDB::Platform()`
   （本机 `windows_amd64`）。
-- **GitHub Release 资产平铺、无目录结构** → 放不了 `v1.5.4/windows_amd64/` 布局 →
+- **GitHub Release 资产平铺、无目录结构** → 放不了 `v1.5.5/windows_amd64/` 布局 →
   **repository 方式不适合 GitHub Release，直接 URL 安装是正解**。
 - `FORCE INSTALL` 可覆盖已安装版本；本地缓存目录：
   `~/.duckdb/extensions/<version>/<platform>/<name>.duckdb_extension`（含 `.info` metadata）。
@@ -92,7 +92,7 @@ cmd /c "call ""<vcvars64.bat>"" && ninja -C build-rel aligned_loadable_extension
 
 - 触发：`push tags: v*`
 - `build-windows`（windows-latest + ilammy/msvc-dev-cmd + choco ninja）、
-  `build-linux`（ubuntu-latest + apt ninja）：clone duckdb v1.5.4（--recurse-submodules）+
+  `build-linux`（ubuntu-latest + apt ninja）：clone duckdb v1.5.5（--recurse-submodules）+
   本仓库，`EXTENSION_STATIC_BUILD=1` 构建 `aligned_loadable_extension`
 - `release`（needs 前两者）：`softprops/action-gh-release` 上传
   `aligned-windows_amd64.duckdb_extension` / `aligned-linux_amd64.duckdb_extension`
@@ -100,7 +100,7 @@ cmd /c "call ""<vcvars64.bat>"" && ninja -C build-rel aligned_loadable_extension
 ## 5. 用户安装命令（发布后）
 
 ```sql
--- 一次性安装（下载到 ~/.duckdb/extensions/v1.5.4/<platform>/）
+-- 一次性安装（下载到 ~/.duckdb/extensions/v1.5.5/<platform>/）
 INSTALL 'https://github.com/<org>/<repo>/releases/download/v0.1.0/aligned-windows_amd64.duckdb_extension';
 -- 使用
 LOAD aligned-windows_amd64;   -- 扩展名 = URL 文件 base name
@@ -112,7 +112,7 @@ SELECT * FROM aligned_scan('cnstk_ixday');
 > - 资产名带平台后缀时，安装后的扩展名 = base name（`aligned-windows_amd64`）。
 >   想保持 `LOAD aligned`，发布两个 job 均命名 `aligned.duckdb_extension` 会资产名冲突；
 >   或仅发布单平台资产 `aligned.duckdb_extension`。
-> - CLI 版本必须 v1.5.4（与构建版本一致）；不带 `-unsigned` 会报签名错误。
+> - CLI 版本必须 v1.5.5（与构建版本一致）；不带 `-unsigned` 会报签名错误。
 > - 更新版本用 `FORCE INSTALL '<url>'`。
 
 ## 6. 验证矩阵（本地已完成）
@@ -123,7 +123,7 @@ SELECT * FROM aligned_scan('cnstk_ixday');
 | `-unsigned` + `INSTALL` 本地路径 → `.info` metadata 生成 | ✓ |
 | `LOAD aligned` + 6000 行查询（sum(rowid)=17997000, mis=0） | ✓ |
 | 不带 `-unsigned` INSTALL → 签名拒绝（exit=1） | ✓ |
-| 版本/ABI 校验（v1.5.4 == v1.5.4 CLI） | ✓（未触发错误） |
+| 版本/ABI 校验（v1.5.5 == v1.5.5 CLI） | ✓（未触发错误） |
 
 ## 7. 待办 / 已知边界
 
