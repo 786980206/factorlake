@@ -1891,3 +1891,71 @@ row N == panel/ma row N）错位 → JOIN 验证返回大量不匹配行。
 
 提交：`848114d`
 
+## 2026-09-07 — COPY MERGE 选项（OVERWRITE=false 增量合并写入）
+
+### 背景
+
+`COPY TO (FORMAT aligned)` 默认 `OVERWRITE=true`：覆盖整个分区，写入新数据。
+用户需要增量合并模式：读取受影响分区的已有数据，与新数据按 `(symbol, date)` 主键
+LEFT JOIN，新数据覆盖旧数据（duplicate key wins），合并后按正常逻辑排序写入。
+
+### DuckDB OVERWRITE 选项冲突
+
+DuckDB 的 `OVERWRITE` 是**内置保留 COPY 选项**（`bind_copy.cpp` line 130-148），
+由 DuckDB 的 binder 消费，**不会转发**到自定义 copy function 的 `copy_to_bind`
+（`input.info.options` 中不包含 `OVERWRITE`）。经实验验证：
+- `input.info.options` 只含未知选项（如 `GROUP`），`OVERWRITE` 被移除
+- `input.info.parsed_options` 也为空（binder 解析后清空）
+
+### 解决方案
+
+新增自定义选项 `MERGE`（DuckDB 不识别，作为 unknown option 转发到 `copy_to_bind`）：
+
+- `MERGE true`（或 `OVERWRITE false` 语义）= 读取已有分区数据 + 新数据 merge
+- `MERGE false`（默认）= 当前行为（覆盖整个分区）
+
+```sql
+-- 增量合并：已有数据 LEFT JOIN 新数据，新数据覆盖旧 key
+COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma', MERGE true);
+COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index', MERGE true);
+```
+
+### 实现
+
+- **`AlignedCopyOptions`**：注册 `MERGE` 选项（`BOOLEAN`, `WRITE_ONLY`）
+- **`AlignedCopyBind`**：解析 `MERGE` 选项，`MERGE true` → `overwrite=false`
+- **`ReadExistingPartition`**：
+  - 读取分区目录的已有 parquet 文件
+  - 非 index 组：从 index 组同分区目录读取 `symbol`/`date` 作为 hidden sort key
+  - DATE→TIMESTAMP 类型 cast（index 存 DATE int32，hidden type 可能 TIMESTAMP int64）
+  - 行位置对齐（lockstep scan，`min(group_rows, index_rows)`）
+  - 合并结果标记为 `is_existing=true`，prepend 到 pending
+- **`WorkerLoop`**：`overwrite=false` 时对每个 pending 分区调用
+  `ReadExistingPartition`
+- **`SortAndFlushPartition`**：
+  - 合并所有 pending buffers（existing + new）到 merged CDC
+  - 追踪 `row_is_existing` per row
+  - 排序后 dedup：同 `(symbol, date)` key 组内，新数据（`is_existing=false`）
+    覆盖旧数据（`is_existing=true`）
+- **`BuildTablePlanSkipPartitionCheck`**：`overwrite=false` 时 bind 阶段跳过
+  分区对齐行数校验（合并可能临时打破对齐）
+- **`FlushJob`** 新增 `bool is_existing` 字段
+- **`FlushWorker::pending`** 类型改为 `vector<pair<unique_ptr<CDC>, bool>>`
+
+### 限制
+
+非 index 组的 MERGE 依赖从 index 组读取 `(symbol, date)` 作为 hidden sort key
+（行位置对齐）。**MERGE 非 index 组必须在 MERGE index 组之前**——否则 index
+合并后行序可能改变，导致行位置对齐错位。
+
+### 测试
+
+- 10 symbols × 5 days = 50 行初始，1 symbol × 6 days (5 overlap + 1 new) MERGE
+  → 合并后 51 行（50 + 6 - 5 overlap）
+- 新数据值覆盖旧数据值（000001 1990-01-01: 100→200）
+- 新行正确添加（000001 1990-01-06）
+- 旧数据保留（000002 1990-01-01: 100 原值）
+- SQLLogicTest：271/271 PASS
+- PS test suite：test_aligned 42/42、test_dml 10/10、test_compaction 16/16、
+  test_parallel 8/8 ALL PASSED
+

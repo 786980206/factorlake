@@ -4,6 +4,9 @@
 #include "io/parquet_io.hpp"
 #include "resolver/partition_resolver.hpp"
 
+#include "parquet_reader.hpp"
+#include "parquet_writer.hpp"
+
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -141,7 +144,21 @@ void AlignedCopyGlobalState::WorkerLoop(FlushWorker &worker) {
 		// Accumulate into pending; flush happens after all data arrives
 		// (sentinel) with a global (symbol, date) sort per partition.
 		auto &pk = job.partition_key;
-		worker.pending[pk].push_back(std::move(job.buffer));
+		worker.pending[pk].push_back({std::move(job.buffer), job.is_existing});
+	}
+
+	// OVERWRITE=false: for each partition that has new data, read existing
+	// data from disk and prepend to pending (marked as is_existing=true).
+	if (!bind_data.overwrite) {
+		for (auto &kv : worker.pending) {
+			try {
+				ReadExistingPartition(kv.first, kv.second);
+			} catch (...) {
+				if (!worker.error) {
+					worker.error = std::current_exception();
+				}
+			}
+		}
 	}
 
 	// All data has arrived. For each partition, merge all buffers into one
@@ -177,8 +194,245 @@ void AlignedCopyGlobalState::WorkerLoop(FlushWorker &worker) {
 	}
 }
 
+//===----------------------------------------------------------------------===//
+// ReadExistingPartition: OVERWRITE=false merge
+//
+// Reads all .parquet files from the partition directory into a single CDC.
+// For non-index groups (needs_hidden_sort_keys), also reads symbol/date
+// from the index group's same partition directory and appends them as
+// hidden sort-key columns.
+//
+// The existing buffer is prepended to the pending list (is_existing=true).
+// SortAndFlushPartition will deduplicate by (symbol, date), keeping new
+// data over existing data.
+//===----------------------------------------------------------------------===//
+
+// Helper: read all .parquet files from a directory into a CDC.
+static unique_ptr<ColumnDataCollection> ReadParquetFilesFromDir(
+    ClientContext &ctx, FileSystem &fs, const string &dir,
+    const vector<string> &col_names, const vector<LogicalType> &col_types) {
+	auto out = make_uniq<ColumnDataCollection>(ctx, col_types);
+	ColumnDataAppendState append_state;
+	out->InitializeAppend(append_state);
+
+	vector<string> part_files;
+	if (fs.DirectoryExists(dir)) {
+		fs.ListFiles(dir, [&](const string &name, bool is_dir) {
+			if (!is_dir && StringUtil::EndsWith(name, ".parquet")) {
+				part_files.push_back(dir + "/" + name);
+			}
+		});
+	}
+	if (part_files.empty()) {
+		return nullptr;
+	}
+	std::sort(part_files.begin(), part_files.end());
+
+	for (auto &path : part_files) {
+		auto reader = make_uniq<ParquetReader>(ctx, OpenFileInfo(path), ParquetOptions(ctx));
+		// Map file columns to requested columns by case-insensitive name.
+		vector<idx_t> col_ids;
+		for (auto &cn : col_names) {
+			idx_t found = DConstants::INVALID_INDEX;
+			for (idx_t ci = 0; ci < reader->columns.size(); ci++) {
+				if (StringUtil::CIEquals(reader->columns[ci].name, cn)) {
+					found = ci;
+					break;
+				}
+			}
+			if (found == DConstants::INVALID_INDEX) {
+				throw IOException("aligned COPY OVERWRITE=false: column '%s' not found in existing part '%s'",
+				                  cn, path);
+			}
+			col_ids.push_back(found);
+		}
+		for (auto cid : col_ids) {
+			reader->column_ids.push_back(MultiFileLocalColumnId(cid));
+		}
+		ParquetReaderScanState scan_state;
+		vector<PartitionStatistics> rg_stats;
+		reader->GetPartitionStats(rg_stats);
+		vector<idx_t> all_rgs;
+		for (idx_t i = 0; i < rg_stats.size(); i++) {
+			all_rgs.push_back(i);
+		}
+		reader->InitializeScan(ctx, scan_state, all_rgs);
+		DataChunk chunk;
+		chunk.Initialize(ctx, col_types);
+		while (true) {
+			auto res = reader->Scan(ctx, scan_state, chunk);
+			auto async_type = res.GetResultType();
+			if (async_type == AsyncResultType::FINISHED) {
+				break;
+			}
+			if (async_type == AsyncResultType::BLOCKED) {
+				continue;
+			}
+			if (chunk.size() == 0) {
+				continue;
+			}
+			out->Append(append_state, chunk);
+		}
+	}
+	if (out->Count() == 0) {
+		return nullptr;
+	}
+	return out;
+}
+
+void AlignedCopyGlobalState::ReadExistingPartition(
+    const string &partition_key,
+    vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &pending) {
+
+	// For index groups, we read the group's own partition directory
+	// (which contains symbol, date, and data columns).
+	// For non-index groups, we read the group's partition directory
+	// (data columns only) PLUS the index group's same partition directory
+	// (symbol, date) to provide hidden sort keys.
+
+	string part_dir = bind_data.group_path + "/" + partition_key;
+	string index_part_dir = bind_data.index_group_path + "/" + partition_key;
+
+	// Read the group's own columns.
+	auto group_cols = ReadParquetFilesFromDir(context, fs, part_dir,
+	                                           bind_data.column_names, bind_data.sql_types);
+	if (!group_cols) {
+		// No existing data in this partition — nothing to merge.
+		return;
+	}
+
+	if (!bind_data.needs_hidden_sort_keys) {
+		// Index group (or group that already has symbol/date columns).
+		// group_cols already has all needed columns including sort keys.
+		pending.insert(pending.begin(), {std::move(group_cols), true});
+		return;
+	}
+
+	// Non-index group: the existing parquet files do not contain symbol/date
+	// columns. We read symbol/date from the index group's partition to
+	// provide hidden sort keys for dedup.
+	// IMPORTANT: This reads the index as it currently exists on disk. If the
+	// index was MERGEd before this group, the index row order may have
+	// changed, breaking row-position alignment with the group's existing
+	// data. To avoid this, MERGE non-index groups BEFORE the index group.
+	vector<string> key_names = {"symbol", bind_data.partition_col_name};
+	// Read the index keys in their STORED type (DATE), not the hidden type
+	// (which may be TIMESTAMP). We cast in the merge step below.
+	vector<LogicalType> key_types = {bind_data.hidden_symbol_type, bind_data.hidden_date_type};
+	// For the date column, use the index group's stored type (DATE) if
+	// the hidden type is TIMESTAMP — the parquet file stores DATE.
+	// We detect the actual type from the index group's schema.
+	// For simplicity, read as the hidden type and handle cast in merge.
+	// But if the parquet stores DATE and we request TIMESTAMP, the reader
+	// may not cast correctly. So read as DATE (the stored type) and cast
+	// in the merge step.
+	if (bind_data.hidden_date_type.id() == LogicalTypeId::TIMESTAMP) {
+		key_types[1] = LogicalType::DATE;
+	}
+	auto key_cols = ReadParquetFilesFromDir(context, fs, index_part_dir,
+	                                         key_names, key_types);
+	if (!key_cols) {
+		// No index data for this partition — can't merge. Just use new data.
+		return;
+	}
+
+	// Check row counts: if group has fewer rows than index, only use the
+	// first N rows of the index (row-position aligned). If group has more
+	// rows than index, this is a data corruption — throw.
+	idx_t group_rows = group_cols->Count();
+	idx_t index_rows = key_cols->Count();
+	if (group_rows > index_rows) {
+		throw InternalException(
+		    "aligned COPY MERGE: existing partition '%s' group has %llu rows but index has %llu rows "
+		    "(group cannot have more rows than index)",
+		    partition_key, group_rows, index_rows);
+	}
+	idx_t rows_to_merge = group_rows;  // = min(group_rows, index_rows)
+
+	// Merge: read group_cols and key_cols row-by-row, append key columns
+	// at the end of each row to create a CDC with merged_types.
+	vector<LogicalType> merged_types = bind_data.sql_types;
+	merged_types.push_back(bind_data.hidden_symbol_type);
+	merged_types.push_back(bind_data.hidden_date_type);
+	auto merged = make_uniq<ColumnDataCollection>(context, merged_types);
+	ColumnDataAppendState merged_append;
+	merged->InitializeAppend(merged_append);
+
+	// Scan both collections in lockstep (same row order).
+	vector<column_t> group_all, key_all;
+	for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+		group_all.push_back(c);
+	}
+	for (idx_t c = 0; c < 2; c++) {
+		key_all.push_back(c);
+	}
+
+	ColumnDataScanState group_scan, key_scan;
+	group_cols->InitializeScan(group_scan, group_all);
+	key_cols->InitializeScan(key_scan, key_all);
+	DataChunk group_chunk, key_chunk, merge_chunk;
+	group_chunk.Initialize(context, bind_data.sql_types);
+	key_chunk.Initialize(context, key_types);
+	merge_chunk.Initialize(context, merged_types);
+
+	while (true) {
+		bool g_ok = group_cols->Scan(group_scan, group_chunk);
+		bool k_ok = key_cols->Scan(key_scan, key_chunk);
+		// Use the minimum of both chunk sizes — if one CDC is exhausted
+		// before the other, stop (they should be the same size).
+		idx_t rows = std::min(group_chunk.size(), key_chunk.size());
+		if (rows == 0) {
+			break;
+		}
+		merge_chunk.SetCardinality(rows);
+		// Copy group columns.
+		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+			VectorOperations::Copy(group_chunk.data[c], merge_chunk.data[c],
+			                       rows, 0, 0);
+		}
+		// Copy hidden key columns.
+		// symbol: VARCHAR → VARCHAR (same type, direct copy).
+		VectorOperations::Copy(key_chunk.data[0], merge_chunk.data[bind_data.sql_types.size()],
+		                       rows, 0, 0);
+		// date: may need cast (e.g. parquet DATE int32 → hidden TIMESTAMP int64).
+		auto &src_date_vec = key_chunk.data[1];
+		auto &dst_date_vec = merge_chunk.data[bind_data.sql_types.size() + 1];
+		if (src_date_vec.GetType().id() == dst_date_vec.GetType().id()) {
+			VectorOperations::Copy(src_date_vec, dst_date_vec, rows, 0, 0);
+		} else {
+			// Cast DATE (int32 days) → TIMESTAMP (int64 micros) or vice versa.
+			auto src_type = src_date_vec.GetType().id();
+			auto dst_type = dst_date_vec.GetType().id();
+			if (src_type == LogicalTypeId::DATE && dst_type == LogicalTypeId::TIMESTAMP) {
+				// DATE int32 days → TIMESTAMP int64 micros.
+				auto *src32 = FlatVector::GetData<int32_t>(src_date_vec);
+				auto *dst64 = FlatVector::GetData<int64_t>(dst_date_vec);
+				for (idx_t r = 0; r < rows; r++) {
+					dst64[r] = (int64_t)src32[r] * 86400LL * 1000000LL;
+				}
+			} else if (src_type == LogicalTypeId::TIMESTAMP && dst_type == LogicalTypeId::DATE) {
+				// TIMESTAMP int64 micros → DATE int32 days.
+				auto *src64 = FlatVector::GetData<int64_t>(src_date_vec);
+				auto *dst32 = FlatVector::GetData<int32_t>(dst_date_vec);
+				for (idx_t r = 0; r < rows; r++) {
+					dst32[r] = (int32_t)(src64[r] / (86400LL * 1000000LL));
+				}
+			} else {
+				throw InternalException(
+				    "aligned COPY MERGE: unsupported date type cast %s → %s",
+				    EnumUtil::ToChars(src_type), EnumUtil::ToChars(dst_type));
+			}
+		}
+		merged->Append(merged_append, merge_chunk);
+	}
+
+	pending.insert(pending.begin(), {std::move(merged), true});
+}
+
 void AlignedCopyGlobalState::InitPartition(PerPartitionState &pp) {
-	// Clean old files (OVERWRITE semantics).
+	// OVERWRITE=true (default): clean old files before writing.
+	// OVERWRITE=false: existing files were already read into pending buffers
+	// by ReadExistingPartition; delete them now so the merged data replaces them.
 	if (fs.DirectoryExists(pp.part_dir)) {
 		fs.ListFiles(pp.part_dir, [&](const string &name, bool is_dir) {
 			if (!is_dir && StringUtil::EndsWith(name, ".parquet")) {
@@ -227,19 +481,20 @@ void AlignedCopyGlobalState::FlushToPartition(PerPartitionState &pp, ColumnDataC
 }
 
 void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
-                                                    vector<unique_ptr<ColumnDataCollection>> &buffers) {
+                                                    vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &buffers) {
 	auto t_total = std::chrono::steady_clock::now();
 
 	// Count total rows.
 	idx_t total_rows = 0;
 	for (auto &buf : buffers) {
-		total_rows += buf->Count();
+		total_rows += buf.first->Count();
 	}
 	if (total_rows == 0) {
 		return;
 	}
 
 	// Merge all buffers into one ColumnDataCollection.
+	// Track is_existing per buffer for dedup (new data wins over existing).
 	auto t_merge = std::chrono::steady_clock::now();
 	vector<LogicalType> merged_types = bind_data.sql_types;
 	if (bind_data.needs_hidden_sort_keys) {
@@ -255,13 +510,24 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	}
 	DataChunk merge_chunk;
 	merge_chunk.Initialize(context, merged_types);
-	for (auto &buf : buffers) {
+
+	// Track which rows are from existing data (for dedup).
+	// Each buffer contributes its rows; is_existing marks them.
+	vector<bool> row_is_existing;
+	row_is_existing.reserve(total_rows);
+
+	for (auto &buf_pair : buffers) {
+		auto &buf = buf_pair.first;
+		bool is_existing = buf_pair.second;
 		if (buf && buf->Count() > 0) {
 			ColumnDataScanState scan_state;
 			buf->InitializeScan(scan_state, all_cols);
 			buf->InitializeScanChunk(scan_state, merge_chunk);
 			while (buf->Scan(scan_state, merge_chunk)) {
 				merged->Append(append_state, merge_chunk);
+				for (idx_t i = 0; i < merge_chunk.size(); i++) {
+					row_is_existing.push_back(is_existing);
+				}
 			}
 		}
 	}
@@ -383,6 +649,40 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 
 	int64_t perm_u = elapsed_us(t_perm);
 	if (g_timing_enabled) g_perm_us.fetch_add(perm_u);
+
+	// OVERWRITE=false dedup: for duplicate (symbol, date) keys, keep new
+	// data (is_existing=false) over existing data (is_existing=true).
+	// Since existing buffers were prepended, new data was appended later,
+	// so stable_sort preserves their relative order. We scan perm and for
+	// each key group, if there's any new row, pick the last new row (new
+	// data is authoritative); otherwise pick the first existing row.
+	bool has_existing = false;
+	for (auto e : row_is_existing) {
+		if (e) { has_existing = true; break; }
+	}
+	if (has_existing) {
+		vector<idx_t> dedup_perm;
+		dedup_perm.reserve(perm.size());
+		idx_t i = 0;
+		while (i < perm.size()) {
+			idx_t j = i + 1;
+			while (j < perm.size() &&
+			       symbol_idx[perm[j]] == symbol_idx[perm[i]] &&
+			       date_values[perm[j]] == date_values[perm[i]]) {
+				j++;
+			}
+			idx_t chosen = perm[i];
+			for (idx_t k = i; k < j; k++) {
+				if (!row_is_existing[perm[k]]) {
+					chosen = perm[k];
+				}
+			}
+			dedup_perm.push_back(chosen);
+			i = j;
+		}
+		perm = std::move(dedup_perm);
+		total_rows = perm.size();
+	}
 
 	// Build sorted collection by re-appending rows in sorted order.
 	// Scan merged into cached chunks, then output rows in perm order
@@ -520,6 +820,7 @@ AlignedCopyLocalState::AlignedCopyLocalState(ClientContext &context, const vecto
 
 static void AlignedCopyOptions(ClientContext &context, CopyOptionsInput &input) {
 	input.options["group"] = CopyOption(LogicalType::VARCHAR, CopyOptionMode::WRITE_ONLY);
+	input.options["merge"] = CopyOption(LogicalType::BOOLEAN, CopyOptionMode::WRITE_ONLY);
 }
 
 //===----------------------------------------------------------------------===//
@@ -544,6 +845,34 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 		throw BinderException("aligned COPY: GROUP option is required (e.g. GROUP 'index' or GROUP 'panel/ma')");
 	}
 
+	// Parse OVERWRITE/MERGE option (default overwrite=true for backward compat).
+	// DuckDB's binder consumes OVERWRITE from input.info.options, so we
+	// also support a custom MERGE option (MERGE true = OVERWRITE false = merge).
+	for (auto &option : input.info.options) {
+		if (StringUtil::Lower(option.first) == "overwrite") {
+			if (option.second.empty()) {
+				throw BinderException("aligned COPY: OVERWRITE option requires a boolean value");
+			}
+			bind_data->overwrite = option.second[0].ToString() == "true";
+		} else if (StringUtil::Lower(option.first) == "merge") {
+			if (option.second.empty()) {
+				throw BinderException("aligned COPY: MERGE option requires a boolean value");
+			}
+			// MERGE true = overwrite false (merge with existing data).
+			bind_data->overwrite = !(option.second[0].ToString() == "true");
+		}
+	}
+	// Also check parsed_options (OVERWRITE is consumed by DuckDB's binder
+	// and removed from info.options, but remains in parsed_options).
+	for (auto &opt : input.info.parsed_options) {
+		fprintf(stderr, "[BIND] parsed_option '%s' = '%s'\n", opt.first.c_str(), opt.second->ToString().c_str());
+		if (StringUtil::Lower(opt.first) == "overwrite") {
+			// Evaluate the parsed expression to get the boolean value.
+			auto value = opt.second->ToString();
+			bind_data->overwrite = (value == "true" || value == "TRUE" || value == "True");
+		}
+	}
+
 	// Resolve data root.
 	const Value *root_param = nullptr;
 	auto root_opt = input.info.options.find("root");
@@ -564,8 +893,15 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 	}
 
 	// Discover table structure.
+	// OVERWRITE=false (MERGE): skip partition alignment check — the merge
+	// may temporarily break alignment (e.g. index was just merged but
+	// panel/ma hasn't been yet); the merge will restore alignment.
 	TablePlan plan;
-	BuildTablePlan(context, bind_data->root, bind_data->table_name, plan);
+	if (bind_data->overwrite) {
+		BuildTablePlan(context, bind_data->root, bind_data->table_name, plan);
+	} else {
+		BuildTablePlanSkipPartitionCheck(context, bind_data->root, bind_data->table_name, plan);
+	}
 	if (plan.groups.empty()) {
 		throw IOException("aligned COPY: table '%s' has no column groups", bind_data->table_name);
 	}
@@ -613,6 +949,7 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 		}
 	}
 	bind_data->group_path = bind_data->root + "/" + bind_data->table_name + "/" + group_name;
+	bind_data->index_group_path = bind_data->root + "/" + bind_data->table_name + "/index";
 
 	if (group_plan && !group_plan->column_order.empty()) {
 		bind_data->is_new_group = false;

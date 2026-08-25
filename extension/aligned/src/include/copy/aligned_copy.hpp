@@ -59,7 +59,17 @@ struct AlignedCopyBindData : public TableFunctionData {
 
 	bool is_timestamp = false;  // partition column is TIMESTAMP (not DATE)
 
-	// For non-index groups whose column schema excludes symbol/date, we
+	// OVERWRITE option: true (default) = wipe partition before writing;
+	// false = merge with existing partition data (old rows LEFT JOIN new rows;
+	// new data wins on key conflict).
+	bool overwrite = true;
+
+	// For non-index groups with needs_hidden_sort_keys, we must read
+	// symbol/date from the index group's partition files for the existing
+	// data (which has no symbol/date columns).
+	string index_group_path;  // root/table_name/index
+
+	// For non index groups whose column schema excludes symbol/date, we
 	// append symbol + date as hidden trailing columns in the buffer CDC
 	// so SortAndFlushPartition can sort by (symbol, date). They are stripped
 	// before flushing to ParquetWriter.
@@ -101,6 +111,7 @@ struct FlushJob {
 	string partition_key;
 	unique_ptr<ColumnDataCollection> buffer;
 	bool is_sentinel = false;  // true = stop signal
+	bool is_existing = false;  // true = data from existing partition (OVERWRITE=false merge)
 };
 
 //===----------------------------------------------------------------------===//
@@ -128,7 +139,9 @@ struct FlushWorker {
 
 	// Per-partition pending buffers: accumulated until all data arrives,
 	// then sorted by (symbol, date) and flushed in order.
-	std::unordered_map<string, vector<unique_ptr<ColumnDataCollection>>> pending;
+	// Each entry: (buffer, is_existing) — existing buffers are old data
+	// (OVERWRITE=false merge); new buffers are from the current COPY.
+	std::unordered_map<string, vector<std::pair<unique_ptr<ColumnDataCollection>, bool>>> pending;
 
 	// Error capture
 	std::exception_ptr error;
@@ -178,10 +191,17 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 	// Helper: flush a buffer to the partition's ParquetWriter.
 	void FlushToPartition(PerPartitionState &pp, ColumnDataCollection &buffer);
 
+	// Helper: read existing partition files into buffers (OVERWRITE=false).
+	// Reads all .parquet files from the partition directory, plus
+	// symbol/date from the index group for non-index groups.
+	void ReadExistingPartition(const string &partition_key,
+	                           vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &pending);
+
 	// Helper: merge all pending buffers for a partition into a single
-	// ColumnDataCollection, sort by (symbol, date), and flush.
+	// ColumnDataCollection, sort by (symbol, date), deduplicate (new data
+	// wins over existing), and flush.
 	void SortAndFlushPartition(PerPartitionState &pp,
-	                            vector<unique_ptr<ColumnDataCollection>> &buffers);
+	                            vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &buffers);
 
 	// Helper: rotate part file when RG count reaches threshold.
 	void RotatePartition(PerPartitionState &pp);

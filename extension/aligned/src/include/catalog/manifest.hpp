@@ -117,6 +117,12 @@ struct TablePlan {
 //! valid table — the index group is mandatory and discovered via glob.
 void BuildTablePlan(ClientContext &context, const string &root_path, const string &table_name, TablePlan &plan);
 
+//! Same as BuildTablePlan but skips the partition alignment row-count
+//! check. Used by aligned COPY OVERWRITE=false (MERGE) to allow writing
+//! to groups that are temporarily misaligned (the merge will fix it).
+void BuildTablePlanSkipPartitionCheck(ClientContext &context, const string &root_path,
+                                       const string &table_name, TablePlan &plan);
+
 //! Resolves the data root: uses the `root` named parameter if non-null,
 //! otherwise falls back to the `aligned_data_root` setting. Throws
 //! BinderException if neither is available. Shared by aligned_scan,

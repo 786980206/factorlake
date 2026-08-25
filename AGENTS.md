@@ -184,7 +184,20 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     ```
 
   - **per-partition 覆盖**：每个分区目录首次写入时自动清理旧 parquet 文件
-    （无需 `OVERWRITE true`）。
+    （无需 `OVERWRITE true`）。**`MERGE true` 选项**可改为增量合并模式：读取
+    受影响分区的已有数据，与新数据按 `(symbol, date)` 主键 merge（新数据覆盖
+    旧 key），合并后按正常逻辑排序写入。DuckDB 的 `OVERWRITE` 是内置保留选项，
+    被 binder 消费不转发到自定义 copy function，因此使用自定义选项名 `MERGE`。
+
+    ```sql
+    -- 增量合并（MERGE true = OVERWRITE false 语义）
+    COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma', MERGE true);
+    COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index', MERGE true);
+    ```
+
+    **限制**：非 index 组的 MERGE 依赖从 index 组读取 `(symbol, date)` 作为
+    hidden sort key（行位置对齐）。MERGE 非 index 组必须在 MERGE index 组之前
+    （否则 index 合并后行序可能改变，导致行位置对齐错位）。
   - **自描述文件名**：先以 `0000-0000000000.parquet` 写入，Finalize 后 rename 为
     `{idx:04d}-{rows:10d}.parquet`（实际行数）。0 行空文件自动删除。
   - **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
@@ -408,6 +421,13 @@ extension/aligned/src/
   rotate 路径才会调**：`REGULAR_COPY_TO_FILE`（无 partition/per_thread/rotate）
   不调 `CheckDirectory`，所以 OVERWRITE 选项不会删除目标目录文件。自定义的
   per-partition 覆盖须在 sink/flush 内自行实现。
+- **DuckDB `OVERWRITE` 是内置保留 COPY 选项**（`bind_copy.cpp` line 130-148）：
+  DuckDB 的 binder 消费 `OVERWRITE`/`OVERWRITE_OR_IGNORE`/`APPEND` 并设置
+  `CopyOverwriteMode`，**不转发到**自定义 copy function 的 `copy_to_bind`
+  （`input.info.options` 中不含 `OVERWRITE`，`parsed_options` 也已清空）。自定义
+  copy function 如需类似的语义，必须注册一个 DuckDB 不识别的自定义选项名
+  （如 `MERGE`），由 `copy_options_t` 注册 + `copy_to_bind` 解析。未知选项由
+  `bind_copy.cpp` line 198-199 转发：`stmt.info->options[option.first] = option.second`。
 - **`ParquetWriteTransformData` 是 `class` 不是 `struct`**（parquet_writer.hpp）：
   前向声明必须写 `class`，否则 MSVC 链接器 mangling 不同（`U` vs `V`）→ LNK2019。
 - **Windows `MoveFile` 宏污染**：`windows.h` 把 `MoveFile` 宏定义为 `MoveFileA`，

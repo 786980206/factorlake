@@ -190,7 +190,20 @@ static void AppendPartitionParts(GroupPlan &group, const string &key, const vect
 	group.partitions.push_back(std::move(pi));
 }
 
+static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
+                                const string &table_name, TablePlan &plan, bool skip_partition_check);
+
 void BuildTablePlan(ClientContext &context, const string &root_path, const string &table_name, TablePlan &plan) {
+	BuildTablePlanImpl(context, root_path, table_name, plan, false);
+}
+
+void BuildTablePlanSkipPartitionCheck(ClientContext &context, const string &root_path,
+                                       const string &table_name, TablePlan &plan) {
+	BuildTablePlanImpl(context, root_path, table_name, plan, true);
+}
+
+static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
+                                const string &table_name, TablePlan &plan, bool skip_partition_check) {
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	// Normalize the root path (strip trailing separators)
@@ -424,11 +437,16 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 			// BOTH sides have must agree on its row count. A group may lack
 			// indexes the index has (deletion) — only shared ones are checked.
 			if (pi.row_count != ip.row_count) {
-				throw IOException("Aligned table '%s': group '%s' partition '%s' covers %llu rows but the index "
-				                  "covers %llu rows (partition-aligned contract: shared partitions must agree on the "
-				                  "total row count)",
-				                  table_name, acc.name, key, pi.row_count,
-				                  ip.row_count);
+				if (skip_partition_check) {
+					// OVERWRITE=false (MERGE): partition alignment may be
+					// temporarily violated; the merge will fix it.
+				} else {
+					throw IOException("Aligned table '%s': group '%s' partition '%s' covers %llu rows but the index "
+					                  "covers %llu rows (partition-aligned contract: shared partitions must agree on the "
+					                  "total row count)",
+					                  table_name, acc.name, key, pi.row_count,
+					                  ip.row_count);
+				}
 			}
 			// The index group's indexes are consecutive 0..n-1; build a
 			// lookup of the index's row count per index for this partition.
@@ -441,11 +459,15 @@ void BuildTablePlan(ClientContext &context, const string &root_path, const strin
 				auto &part = group.parts[pi.first_part + k];
 				auto it = index_rows.find(part.partition_index);
 				if (it != index_rows.end() && it->second != part.row_count) {
-					throw IOException("Aligned table '%s': group '%s' partition '%s' part index %llu ('%s') holds "
-					                  "%llu rows but the index holds %llu rows for the same index (shared indexes "
-					                  "must agree on row counts)",
-					                  table_name, acc.name, key,
-					                  part.partition_index, part.part_name, part.row_count, it->second);
+					if (skip_partition_check) {
+						// OVERWRITE=false (MERGE): skip per-part row count check.
+					} else {
+						throw IOException("Aligned table '%s': group '%s' partition '%s' part index %llu ('%s') holds "
+						                  "%llu rows but the index holds %llu rows for the same index (shared indexes "
+						                  "must agree on row counts)",
+						                  table_name, acc.name, key,
+						                  part.partition_index, part.part_name, part.row_count, it->second);
+					}
 				}
 			}
 			has_parts = true;
