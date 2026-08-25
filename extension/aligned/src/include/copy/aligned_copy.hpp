@@ -5,9 +5,12 @@
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -58,13 +61,11 @@ struct AlignedCopyBindData : public TableFunctionData {
 };
 
 //===----------------------------------------------------------------------===//
-// PartitionWriter: owns one partition's ParquetWriter + part-file rotation.
-// Created lazily in Sink. Finalize iterates all writers and finalizes
-// them in parallel via a thread pool.
+// PerPartitionState: owned by exactly one FlushWorker.  No locks needed
+// because each partition is assigned to one worker via affinity.
 //===----------------------------------------------------------------------===//
 
-struct PartitionWriter {
-	// Configuration (set once at creation).
+struct PerPartitionState {
 	string partition_key; // e.g. "year=1990"
 	string part_dir;      // e.g. ".../index/year=1990"
 
@@ -83,8 +84,44 @@ struct PartitionWriter {
 };
 
 //===----------------------------------------------------------------------===//
-// GlobalState: owns all PartitionWriters. Sink calls Flush directly
-// (single-threaded, REGULAR_COPY_TO_FILE). Finalize finalizes in parallel.
+// FlushJob: a buffer to be encoded + written by a background thread.
+//===----------------------------------------------------------------------===//
+
+struct FlushJob {
+	string partition_key;
+	unique_ptr<ColumnDataCollection> buffer;
+	bool is_sentinel = false;  // true = stop signal
+};
+
+//===----------------------------------------------------------------------===//
+// FlushWorker: one background thread + its private state.
+//
+// Each worker owns:
+//  - A FIFO work queue (mutex + condvar for blocking pop)
+//  - Per-partition ParquetWriters (unordered_map, thread-local, NO locks)
+//  - Error capture (exception_ptr)
+//
+// Partition affinity: each partition is assigned to exactly one worker
+// (round-robin via atomic counter in GlobalState).  This guarantees:
+//  - No two threads write to the same partition → no file conflicts
+//  - Buffers for a partition are processed in FIFO order → order preserved
+//===----------------------------------------------------------------------===//
+
+struct FlushWorker {
+	// Work queue (protected by queue_lock + queue_cv)
+	std::mutex queue_lock;
+	std::condition_variable queue_cv;
+	std::deque<FlushJob> queue;
+
+	// Thread-local per-partition state (NO locks — only this thread accesses)
+	std::unordered_map<string, unique_ptr<PerPartitionState>> partitions;
+
+	// Error capture
+	std::exception_ptr error;
+};
+
+//===----------------------------------------------------------------------===//
+// GlobalState: owns the thread pool + partition assignment.
 //===----------------------------------------------------------------------===//
 
 struct AlignedCopyGlobalState : public GlobalFunctionData {
@@ -92,27 +129,52 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 	FileSystem &fs;
 	const AlignedCopyBindData &bind_data;
 
-	std::mutex lock;
-	std::unordered_map<string, unique_ptr<PartitionWriter>> writers;
-	std::set<string> cleaned_partitions;
+	// Thread pool
+	std::vector<unique_ptr<FlushWorker>> workers;
+	std::vector<std::thread> threads;
+	std::atomic<idx_t> next_thread_id {0};
+	idx_t num_workers = 0;
+
+	// Sink-thread-only: partition -> worker assignment (no lock needed,
+	// only accessed from the single Sink thread)
+	std::unordered_map<string, idx_t> partition_to_thread;
 
 	explicit AlignedCopyGlobalState(ClientContext &ctx, FileSystem &f, const AlignedCopyBindData &bd);
+	~AlignedCopyGlobalState();
 
-	// Flush a ColumnDataCollection to a partition's ParquetWriter.
-	// Called from Sink (single-threaded). Creates the writer + cleans old
-	// files on first use. Handles RG rotation.
-	void Flush(const string &partition_key, ColumnDataCollection &buffer);
+	// Assign a partition to a worker (round-robin).  Called from Sink thread.
+	idx_t AssignThread(const string &partition_key);
 
-	// Finalize a single partition writer: flush footer, rename file,
-	// update written_rows.
-	void FinalizePartition(PartitionWriter &pw);
+	// Push a flush job to the assigned worker's queue.
+	void PushJob(FlushJob &&job, idx_t worker_id);
 
-	// Rename the temp file to the self-describing name.
-	void RenamePartFile(PartitionWriter &pw);
+	// Push a sentinel (stop signal) to all workers.  Called from Combine.
+	void PushSentinels();
+
+	// Join all background threads.  Called from Finalize.
+	void JoinThreads();
+
+	// Background worker loop.
+	void WorkerLoop(FlushWorker &worker);
+
+	// Helper: initialize a partition (clean old files, create dir, writer).
+	void InitPartition(PerPartitionState &pp);
+
+	// Helper: flush a buffer to the partition's ParquetWriter.
+	void FlushToPartition(PerPartitionState &pp, ColumnDataCollection &buffer);
+
+	// Helper: rotate part file when RG count reaches threshold.
+	void RotatePartition(PerPartitionState &pp);
+
+	// Helper: finalize the last part file (footer + rename).
+	void FinalizePartition(PerPartitionState &pp);
+
+	// Helper: rename temp file to self-describing name.
+	void RenamePartFile(PerPartitionState &pp);
 };
 
 //===----------------------------------------------------------------------===//
-// LocalState: per-thread state. In REGULAR_COPY_TO_FILE mode only one
+// LocalState: per-thread state.  In REGULAR_COPY_TO_FILE mode only one
 // thread calls Sink, so this is essentially the single execution context.
 //===----------------------------------------------------------------------===//
 
@@ -123,9 +185,16 @@ struct AlignedCopyLocalState : public LocalFunctionData {
 	DataChunk projected_chunk;
 
 	// Per-partition RG buffer.  Keyed by partition key string.
-	// Accumulates projected rows until RG_SIZE is reached, then flushed.
+	// Accumulates projected rows until RG_SIZE is reached, then flushed
+	// (pushed to a background worker).
 	std::unordered_map<string, unique_ptr<ColumnDataCollection>> rg_buffers;
 	std::unordered_map<string, unique_ptr<ColumnDataAppendState>> rg_appends;
+
+	// Partition key cache: avoids calling EvaluatePartitionTemplate for
+	// every row.  Since input is sorted by date, consecutive rows usually
+	// have the same partition key.  Cache hit = integer compare only.
+	int64_t cached_date_val = std::numeric_limits<int64_t>::min();
+	string cached_pk;
 };
 
 //===----------------------------------------------------------------------===//
