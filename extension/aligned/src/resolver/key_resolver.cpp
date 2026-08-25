@@ -242,7 +242,7 @@ KeyLocation KeyResolver::Resolve(int64_t date_value, const Value &symbol_value) 
 	KeyLocation loc;
 	string key;
 	if (!templates.empty()) {
-		if (!EvaluatePartitionTemplate(templates[0].template_str, date_value, key)) {
+		if (!EvaluatePartitionTemplate(templates[0].template_str, date_value, is_timestamp, key)) {
 			throw IOException("Aligned table '%s': cannot evaluate partition template '%s' for key resolution",
 			                  plan.table_name, templates[0].template_str);
 		}

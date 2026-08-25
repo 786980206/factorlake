@@ -60,13 +60,28 @@ bool EvaluatePartitionTemplate(const string &template_str, int64_t value, string
 	// int64_t key value can be either a date_t (for DATE columns) or a
 	// timestamp_t (for TIMESTAMP columns). Convert to date_t for template
 	// evaluation — the partition is always by date, not by timestamp.
+	//
+	// Heuristic: 0..200000 covers date_t values for 1970-01-01..~2517 AD.
+	// Values outside this range are treated as timestamp_t (microseconds).
+	// This misclassifies pre-1970 dates (negative date_t) and timestamps
+	// within 200000µs of epoch, but financial data (1990+) is unaffected.
+	// Prefer the is_timestamp overload when the caller knows the type.
 	date_t d;
 	if (value >= 0 && value <= 200000) {
-		// Value is in date_t range (days since epoch: 0 = 1970-01-01, 200000 = ~2517 AD)
 		d = date_t(static_cast<int32_t>(value));
 	} else {
-		// Value is a timestamp_t (microseconds since epoch)
 		d = Timestamp::GetDate(timestamp_t(value));
+	}
+	return EvaluatePartitionTemplate(template_str, d, result);
+}
+
+bool EvaluatePartitionTemplate(const string &template_str, int64_t value, bool is_timestamp,
+                               string &result) {
+	date_t d;
+	if (is_timestamp) {
+		d = Timestamp::GetDate(timestamp_t(value));
+	} else {
+		d = date_t(static_cast<int32_t>(value));
 	}
 	return EvaluatePartitionTemplate(template_str, d, result);
 }

@@ -1050,7 +1050,7 @@ static vector<SortedRow> ExtractSortedRows(ClientContext &context, const ColumnD
 				auto dptr = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
 				d = static_cast<int64_t>(dptr[di]);
 			}
-			if (!template_str.empty() && !EvaluatePartitionTemplate(template_str, d, row.partition_key)) {
+			if (!template_str.empty() && !EvaluatePartitionTemplate(template_str, d, is_timestamp, row.partition_key)) {
 				throw IOException("Aligned table: cannot evaluate partition template '%s'", template_str);
 			}
 			auto si = sym_sel->get_index(i);

@@ -13,7 +13,17 @@ namespace duckdb {
 bool EvaluatePartitionTemplate(const string &template_str, date_t value, string &result);
 //! Overload that accepts a raw int64_t key value (date_t or timestamp_t).
 //! For timestamp_t values, extracts the date part before evaluation.
+//! WARNING: this overload uses a heuristic (0..200000 → date_t, else
+//! timestamp_t) that misclassifies pre-1970 dates (negative date_t) and
+//! timestamps within 200000µs of epoch. Prefer the is_timestamp overload
+//! when the caller knows the column type.
 bool EvaluatePartitionTemplate(const string &template_str, int64_t value, string &result);
+//! Type-safe overload: the caller explicitly states whether the int64_t
+//! value is a DATE (days since epoch) or a TIMESTAMP (microseconds since
+//! epoch). This avoids the heuristic's misclassification of pre-1970
+//! dates and early timestamps.
+bool EvaluatePartitionTemplate(const string &template_str, int64_t value, bool is_timestamp,
+                               string &result);
 
 //! True when `template_str` is one of the three supported kinds:
 //! "date=%Y-%m-%d", "month=%Y-%m", "year=%Y".

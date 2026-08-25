@@ -378,7 +378,7 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 				pk_ptr = &cache_it->second;
 			} else {
 				string pk;
-				if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val, pk)) {
+				if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val, is_timestamp, pk)) {
 					throw IOException("aligned COPY: cannot evaluate partition template '%s'",
 					                  bind_data.partition_template);
 				}

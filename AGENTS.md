@@ -436,7 +436,9 @@ extension/aligned/src/
 - **`EvaluatePartitionTemplate` int64_t 版本的 date/timestamp 启发式**：
   `value >= 0 && value <= 200000` 判为 date_t，否则判为 timestamp_t。1970 年
   之前的日期（负 date_t）和 epoch 后 200000 微秒内的 timestamp_t 会被误判。
-  金融数据（1990 年后）不受影响，但使用前需注意此假设。
+  **已修复**：新增 `is_timestamp` 类型安全重载，所有调用方（`key_resolver`、
+  `aligned_mutator`、`aligned_copy`）都已改用类型安全版本。旧的启发式重载
+  保留向后兼容但已弃用。
 - **读路径列匹配必须大小写不敏感**：`OpenPart` 和 `ComputeRowGroupWindow` 中
   查找 parquet reader 列名必须用 `StringUtil::CIEquals`，与 `parquet_io.cpp`
   一致。跨 part 列名大小写不一致（如 `Symbol` vs `symbol`）不应被静默 NULL 填充。
