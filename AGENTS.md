@@ -172,10 +172,10 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     ```
     input chunk
         ↓
-    Sink: 按 partition key 分流 → per-partition local buffer (ColumnDataCollection)
+    Sink: part_data->Append → AlignedPartitionedColumnData (hash 分区)
         ↓                          (Sink 不碰 ParquetWriter)
-    Combine: 每个 partition buffer → GlobalState::Flush (FlushManager, 唯一写入入口)
-        ↓
+    Combine: FlushAppendState → 遍历 partitions → project 到 group schema
+        ↓    → GlobalState::Flush (FlushManager, 唯一写入入口)
     Flush: PartitionWriter → ParquetWriter::Flush (写一个 RG)
            满足 row_groups_per_file (8) → 轮转 part 文件 (rename 临时名 → 自描述名)
         ↓
@@ -400,6 +400,21 @@ extension/aligned/src/
 - **`generate_series(DATE, DATE, INTERVAL)` 返回 TIMESTAMP 不是 DATE**：sink 中
   分区列读取时必须检查 `part_vec.GetType().id() == TIMESTAMP`，用 `int64_t`
   读取；DATE 列用 `int32_t`。类型不匹配时 `VectorOperations::Copy` 会崩溃。
+- **`PartitionedColumnData::ComputePartitionIndices` 必须在注册新分区时创建
+  partition collection**：基类 `Append` 不负责创建 partition——`ComputePartitionIndices`
+  调用 `RegisterPartition` 时必须同步初始化 `partitions[id]`、`partition_append_states[id]`、
+  `partition_buffers[id]`（参照 `HivePartitionedColumnData::AddNewPartition`）。
+  否则 `AppendInternal` 访问空 `partitions[id]` → "Attempted to access index 0
+  within vector of size 0" 崩溃。
+- **`PartitionedColumnDataAppendState::partition_indices` 容量 = STANDARD_VECTOR_SIZE
+  (2048)**：构造为 `Vector(LogicalType::UBIGINT)`，默认 FLAT_VECTOR，buffer 有 2048
+  槽。`ComputePartitionIndices` 可直接 `FlatVector::GetData<idx_t>` 写入，无需
+  `SetVectorType` 或 `Flatten`。但**不要在 Sink 中 cast 输入列**——`PartitionedColumnData`
+  存储完整输入 schema，列映射/cast 延迟到 Combine（project 到 group schema 时）。
+- **`COPY TO PARQUET` 的 `PARTITION_BY` 列必须在 `expected_types` 中**：DuckDB 原生
+  `HivePartitionedColumnData` 包含全量列（含分区列），flush 时用 `SetDataWithoutPartitions`
+  剥离分区列。aligned COPY 同理：`AlignedPartitionedColumnData` 用 input types（全量列），
+  Combine 中 project 到 group schema（排除 key 列）再 flush。
 
 ### 构建陷阱
 

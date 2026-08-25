@@ -1512,4 +1512,67 @@ compaction → 数据完整性验证。
 
 提交：`c6d5bcb`、`d42bd3a`、`a915a87`
 
+## 2026-09-05 — Round 26：PartitionedColumnData 重构 COPY Sink
+
+### 根因分析：261 date 分区慢
+- 原基准测试 (250M rows, 4000 symbols, 261 date 分区) 耗时 528s+
+- 根因：benchmark 数据生成时 `CROSS JOIN tmins × symbols` 不保证输出顺序
+- Parquet 每个 Row Group 包含全年 261 天数据 → Sink 收到的数据 partition key
+  几乎每行都变 → `run_count ≈ 行数` (30M runs/thread)
+- 每行创建一个 DataChunk + SelectionVector + column copy → 巨大开销
+- **不是代码 bug，是 benchmark 数据排序问题**：`ORDER BY symbol, date` 修复后
+  run_count 从 30M → 18K/thread（~9.5 runs/chunk，符合预期）
+
+### 性能瓶颈定位
+- 使用 `std::chrono` instrumentation 确认：
+  - `run_split_time` (run detection + DataChunk copy) = ~50% CPU
+  - `combine_time` (Flush) = ~48% CPU
+- Mode 0 (Sink flush) vs Mode 1 (Combine flush) 无差异：每个 partition CDC
+  从未达到 RG threshold (131072)，所以 Sink flush 从未触发
+
+### 架构重构：用 PartitionedColumnData 替代手动 run detection
+- 新增 `AlignedPartitionedColumnData`：继承 DuckDB 的 `PartitionedColumnData`
+- `ComputePartitionIndices` 通过 `EvaluatePartitionTemplate` 计算分区索引
+- 哈希分区 + 固定大小 buffer（128 rows），由基类管理 selection vector 和
+  partition buffer lifecycle
+- Sink 只需一行 `part_data->Append(state, input)` — 无手动 run detection
+- Combine 中 `FlushAppendState` + 遍历 partitions，project 到 group schema 后
+  调用 `GlobalState::Flush`
+- 列映射/类型转换移至 Combine（使用零拷贝 `Reference` 当类型匹配时）
+
+### 性能对比（500 symbols × 261 days × 240 min = 31.32M rows, 8 threads）
+| 场景 | 旧 (手动 run detection) | 新 (PartitionedColumnData) |
+|------|------------------------|---------------------------|
+| index group (7 cols, identity) | ~4.6s | **3.2s** |
+| panel group (7→5 cols projection) | ~4.6s | **5.1s** |
+| 原生 COPY TO PARQUET PARTITION_BY | — | 50s |
+
+- index group 快 30%（identity map → 零拷贝 Reference → Combine 无额外开销）
+- panel group 稍慢（Combine 中需 project 7→5 列，每次 chunk 都要 copy）
+- **比原生 COPY TO PARQUET PARTITION_BY 快 15×**
+
+### 关键优势
+- **对乱序数据鲁棒**：hash 分区不依赖输入顺序，即使数据完全乱序也不会退化
+  到"每行一个 run"的最坏情况
+- **代码量减少**：删除 ~200 行手动 run detection / flush mode / instrumentation 代码
+- **复用 DuckDB 基础设施**：partition buffer lifecycle、selection vector、
+  hash map 管理全部由 PartitionedColumnData 基类处理
+
+### 文件变更
+- `extension/aligned/src/include/copy/aligned_copy.hpp`：
+  - 新增 `AlignedPartitionedColumnData` 类
+  - `AlignedCopyLocalState` 重构：移除 `buffers`/`dirty_buffers`/`fast_cache`/
+    instrumentation counters，替换为 `part_data`/`part_append_state`
+  - `AlignedCopyBindData` 新增 `input_types` 字段
+- `extension/aligned/src/copy/aligned_copy.cpp`：
+  - 新增 `AlignedPartitionedColumnData::ComputePartitionIndices` /
+    `RegisterPartition` 实现
+  - Sink 简化为单行 `Append` 调用
+  - Combine 重构为 `FlushAppendState` + partition projection + Flush
+  - 删除 `GetFlushMode` / `ALIGNED_FLUSH_MODE` 环境变量
+
+### 测试结果
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED (test_aligned 42/42, test_dml 10/10,
+  test_compaction 16/16, test_parallel 8/8)
 

@@ -25,26 +25,105 @@
 namespace duckdb {
 
 //===----------------------------------------------------------------------===//
+// AlignedPartitionedColumnData
+//===----------------------------------------------------------------------===//
+
+AlignedPartitionedColumnData::AlignedPartitionedColumnData(ClientContext &context, vector<LogicalType> types,
+                                                            idx_t partition_col_pos, string partition_template,
+                                                            bool is_timestamp)
+    : PartitionedColumnData(PartitionedColumnDataType::HIVE, context, std::move(types)),
+      partition_col_pos(partition_col_pos), partition_template(std::move(partition_template)),
+      is_timestamp(is_timestamp) {
+	CreateAllocator();
+}
+
+idx_t AlignedPartitionedColumnData::RegisterPartition(const string &key,
+                                                       PartitionedColumnDataAppendState &state) {
+	auto it = key_to_id.find(key);
+	if (it != key_to_id.end()) {
+		return it->second;
+	}
+	idx_t id = key_to_id.size();
+	key_to_id[key] = id;
+	partition_keys[id] = key;
+
+	// Create the partition collection, append state, and buffer — mirroring
+	// HivePartitionedColumnData::AddNewPartition.
+	if (state.partition_append_states.size() <= id) {
+		state.partition_append_states.resize(id + 1);
+		state.partition_buffers.resize(id + 1);
+		partitions.resize(id + 1);
+	}
+	state.partition_append_states[id] = make_uniq<ColumnDataAppendState>();
+	state.partition_buffers[id] = CreatePartitionBuffer();
+	partitions[id] = CreatePartitionCollection(0);
+	partitions[id]->InitializeAppend(*state.partition_append_states[id]);
+
+	return id;
+}
+
+std::vector<idx_t> AlignedPartitionedColumnData::GetActivePartitionIds() const {
+	std::vector<idx_t> ids;
+	for (auto &kv : partition_keys) {
+		if (partitions.size() > kv.first && partitions[kv.first] && partitions[kv.first]->Count() > 0) {
+			ids.push_back(kv.first);
+		}
+	}
+	return ids;
+}
+
+void AlignedPartitionedColumnData::ComputePartitionIndices(PartitionedColumnDataAppendState &state,
+                                                           DataChunk &input) {
+	const auto count = input.size();
+	auto &part_vec = input.data[partition_col_pos];
+	UnifiedVectorFormat part_fmt;
+	part_vec.ToUnifiedFormat(count, part_fmt);
+
+	// partition_indices was initialized as a FLAT UBIGINT vector with
+	// STANDARD_VECTOR_SIZE capacity. We write directly into its buffer.
+	auto partition_indices = FlatVector::GetData<idx_t>(state.partition_indices);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto si = part_fmt.sel->get_index(i);
+		if (!part_fmt.validity.RowIsValid(si)) {
+			throw IOException("aligned COPY: NULL in partition column at row %llu", i);
+		}
+		int64_t date_val;
+		if (is_timestamp) {
+			date_val = UnifiedVectorFormat::GetData<int64_t>(part_fmt)[si];
+		} else {
+			date_val = static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(part_fmt)[si]);
+		}
+
+		// Cache: single-slot fast cache for sorted-by-date input
+		const string *pk_ptr;
+		if (date_val == fast_cache_date && !fast_cache_key.empty()) {
+			pk_ptr = &fast_cache_key;
+		} else {
+			auto cache_it = key_cache.find(date_val);
+			if (cache_it != key_cache.end()) {
+				pk_ptr = &cache_it->second;
+			} else {
+				string pk;
+				if (!EvaluatePartitionTemplate(partition_template, date_val, is_timestamp, pk)) {
+					throw IOException("aligned COPY: cannot evaluate partition template '%s'",
+					                  partition_template);
+				}
+				pk_ptr = &key_cache.emplace(date_val, std::move(pk)).first->second;
+			}
+			fast_cache_date = date_val;
+			fast_cache_key = *pk_ptr;
+		}
+
+		partition_indices[i] = RegisterPartition(*pk_ptr, state);
+	}
+}
+
+//===----------------------------------------------------------------------===//
 // LocalState
 //===----------------------------------------------------------------------===//
 
-AlignedCopyLocalState::AlignedCopyLocalState(ClientContext &context, const vector<LogicalType> &types)
-    : types(types) {
-}
-
-AlignedCopyLocalState::PartitionBuffer *AlignedCopyLocalState::GetBuffer(const string &partition_key,
-                                                                          ClientContext &context) {
-	auto it = buffers.find(partition_key);
-	if (it != buffers.end()) {
-		return it->second.get();
-	}
-	auto pb = make_uniq<PartitionBuffer>(PartitionBuffer{
-	    ColumnDataCollection(context, types), ColumnDataAppendState()});
-	pb->collection.SetPartitionIndex(0);
-	pb->collection.InitializeAppend(pb->append_state);
-	auto *ptr = pb.get();
-	buffers[partition_key] = std::move(pb);
-	return ptr;
+AlignedCopyLocalState::AlignedCopyLocalState(ClientContext &context, const vector<LogicalType> &types) {
 }
 
 //===----------------------------------------------------------------------===//
@@ -55,13 +134,45 @@ AlignedCopyGlobalState::AlignedCopyGlobalState(ClientContext &ctx, FileSystem &f
     : context(ctx), fs(f), bind_data(bd) {
 }
 
-PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollection &buffer) {
+PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollection &buffer,
+                                               std::unordered_map<string, PartitionWriter *> *writer_cache) {
 	idx_t rows = buffer.Count();
 	if (rows == 0) {
 		return nullptr;
 	}
 
-	// Phase 1: Get or create the partition writer (needs global lock for map access).
+	// Fast path: check the calling thread's local writer cache first.
+	// This avoids acquiring the global lock on every Flush call for
+	// partitions that have already been seen. The cache is populated
+	// on first encounter of each partition key.
+	if (writer_cache) {
+		auto cache_it = writer_cache->find(partition_key);
+		if (cache_it != writer_cache->end()) {
+			PartitionWriter *pw = cache_it->second;
+			// Phase 2: Flush under per-partition lock (different partitions flush in parallel).
+			std::lock_guard<std::mutex> plock(pw->lock);
+			pw->writer->Flush(buffer, pw->transform_data);
+			pw->rows_in_current_part += rows;
+			pw->row_groups_in_current_part++;
+
+			// Rotate part file at the boundary.
+			if (pw->row_groups_in_current_part >= bind_data.row_groups_per_file) {
+				pw->writer->Finalize();
+				RenamePartFile(*pw);
+				pw->written_rows += pw->rows_in_current_part;
+				pw->part_index++;
+				string file_path = pw->part_dir + "/" + FormatPartName(pw->part_index, 0);
+				pw->writer = CreateParquetWriter(context, fs, file_path,
+				                                 bind_data.column_names, bind_data.sql_types);
+				pw->rows_in_current_part = 0;
+				pw->row_groups_in_current_part = 0;
+			}
+			return pw;
+		}
+	}
+
+	// Slow path: first time this thread sees this partition — acquire
+	// global lock to create/lookup the PartitionWriter.
 	PartitionWriter *pw;
 	{
 		std::lock_guard<std::mutex> glock(lock);
@@ -96,7 +207,10 @@ PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, Colu
 			pw = it->second.get();
 		}
 	}
-	// Global lock released — other threads can create/lookup different partitions.
+	// Cache the writer pointer for future calls from this thread.
+	if (writer_cache) {
+		(*writer_cache)[partition_key] = pw;
+	}
 
 	// Phase 2: Flush under per-partition lock (different partitions flush in parallel).
 	std::lock_guard<std::mutex> plock(pw->lock);
@@ -278,6 +392,7 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 	}
 
 	bind_data->input_names = names;
+	bind_data->input_types = sql_types;
 
 	// Build column mapping: output col i → input col input_col_map[i].
 	bind_data->input_col_map.resize(bind_data->column_names.size(), DConstants::INVALID_INDEX);
@@ -313,99 +428,65 @@ static unique_ptr<GlobalFunctionData> AlignedCopyInitializeGlobal(ClientContext 
 
 static unique_ptr<LocalFunctionData> AlignedCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data_p) {
 	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
-	return make_uniq<AlignedCopyLocalState>(context.client, bind_data.sql_types);
+	auto result = make_uniq<AlignedCopyLocalState>(context.client, bind_data.sql_types);
+
+	// AlignedPartitionedColumnData uses the FULL INPUT schema (all columns
+	// from the query, including symbol/date), so partition_col_pos (an input
+	// position) is directly valid. In Combine, we project out only the group
+	// schema columns before flushing to ParquetWriter.
+	bool is_timestamp = false;
+	if (bind_data.partition_col_pos < bind_data.input_types.size()) {
+		is_timestamp = bind_data.input_types[bind_data.partition_col_pos].id() == LogicalTypeId::TIMESTAMP;
+	}
+
+	result->part_data = make_uniq<AlignedPartitionedColumnData>(
+	    context.client, bind_data.input_types, bind_data.partition_col_pos,
+	    bind_data.partition_template, is_timestamp);
+	result->part_append_state = make_uniq<PartitionedColumnDataAppendState>();
+	result->part_data->InitializeAppendState(*result->part_append_state);
+	return std::move(result);
 }
 
 //===----------------------------------------------------------------------===//
-// Sink: partition rows into per-partition local buffers. Does NOT touch
-// any ParquetWriter. Only appends to local ColumnDataCollections.
+// Sink: append input chunk to PartitionedColumnData. All partitioning,
+// buffering, and selection vector management is handled by the
+// PartitionedColumnData base class — no manual run detection.
+//
+// The input chunk is appended directly (all input columns, in input order).
+// Column mapping/casting to group schema happens in Combine when projecting
+// before flushing to ParquetWriter.
 //===----------------------------------------------------------------------===//
 
 static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p, GlobalFunctionData &gstate,
                              LocalFunctionData &lstate, DataChunk &input) {
-	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
-	auto &global_state = gstate.Cast<AlignedCopyGlobalState>();
 	auto &local_state = lstate.Cast<AlignedCopyLocalState>();
 
 	if (input.size() == 0) {
 		return;
 	}
 
-	local_state.received_rows += input.size();
+	local_state.part_data->Append(*local_state.part_append_state, input);
+}
 
-	// Extract partition key for each row.
-	idx_t part_col = bind_data.partition_col_pos;
-	auto &part_vec = input.data[part_col];
-	UnifiedVectorFormat part_fmt;
-	part_vec.ToUnifiedFormat(input.size(), part_fmt);
-	bool is_timestamp = part_vec.GetType().id() == LogicalTypeId::TIMESTAMP;
+//===----------------------------------------------------------------------===//
+// Combine: flush all partitioned data to ParquetWriter via GlobalState.
+// PartitionedColumnData::FlushAppendState finalizes per-partition buffers,
+// then we iterate the partitions and flush each to the global writer.
+//===----------------------------------------------------------------------===//
 
-	// Group row indices by partition key using run-length detection.
-	// Since input is typically sorted by (symbol, date), consecutive rows
-	// usually share the same partition key. We detect partition boundaries
-	// and batch-copy contiguous ranges, avoiding per-row map overhead.
-	// We still use the partition_key_cache to avoid re-evaluating the
-	// partition template for repeated date values.
-	struct PartitionRun {
-		idx_t start;
-		idx_t count;
-		string key;
-	};
-	vector<PartitionRun> runs;
-	string current_key;
-	idx_t run_start = 0;
+static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_data_p, GlobalFunctionData &gstate,
+                                LocalFunctionData &lstate) {
+	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
+	auto &global_state = gstate.Cast<AlignedCopyGlobalState>();
+	auto &local_state = lstate.Cast<AlignedCopyLocalState>();
 
-	for (idx_t i = 0; i < input.size(); i++) {
-		auto si = part_fmt.sel->get_index(i);
-		if (!part_fmt.validity.RowIsValid(si)) {
-			throw IOException("aligned COPY: NULL in partition column '%s' at row %llu",
-			                  bind_data.partition_col_name, i);
-		}
-		int64_t date_val;
-		if (is_timestamp) {
-			date_val = UnifiedVectorFormat::GetData<int64_t>(part_fmt)[si];
-		} else {
-			date_val = static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(part_fmt)[si]);
-		}
-		// Cache lookup: single-slot fast cache for sorted-by-date input
-		// (the common case), then hash map fallback.
-		const string *pk_ptr;
-		if (date_val == local_state.fast_cache_date && !local_state.fast_cache_key.empty()) {
-			pk_ptr = &local_state.fast_cache_key;
-		} else {
-			auto cache_it = local_state.partition_key_cache.find(date_val);
-			if (cache_it != local_state.partition_key_cache.end()) {
-				pk_ptr = &cache_it->second;
-			} else {
-				string pk;
-				if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val, is_timestamp, pk)) {
-					throw IOException("aligned COPY: cannot evaluate partition template '%s'",
-					                  bind_data.partition_template);
-				}
-				pk_ptr = &local_state.partition_key_cache.emplace(date_val, std::move(pk)).first->second;
-			}
-			// Update fast cache.
-			local_state.fast_cache_date = date_val;
-			local_state.fast_cache_key = *pk_ptr;
-		}
-		if (*pk_ptr != current_key) {
-			if (i > run_start) {
-				runs.push_back({run_start, i - run_start, std::move(current_key)});
-			}
-			current_key = *pk_ptr;
-			run_start = i;
-		}
-	}
-	// Final run
-	if (input.size() > run_start) {
-		runs.push_back({run_start, input.size() - run_start, std::move(current_key)});
-	}
+	// Flush remaining data from append state buffers into partition collections.
+	local_state.part_data->FlushAppendState(*local_state.part_append_state);
 
-	// For each run: append (with optional column reorder) to local buffer.
-	// Fast path: if input_col_map is identity AND all types match, append
-	// the input chunk directly (zero-copy) instead of building a reordered
-	// chunk. This is the common case when the query column order matches
-	// the group schema order.
+	auto &partitions = local_state.part_data->GetPartitions();
+
+	// Check if input already matches group schema (identity map + types match).
+	// When true, the projection uses zero-copy Reference instead of full Copy.
 	bool identity_map = true;
 	for (idx_t c = 0; c < bind_data.input_col_map.size(); c++) {
 		if (bind_data.input_col_map[c] != c) {
@@ -416,114 +497,54 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 	bool types_match = identity_map;
 	if (types_match) {
 		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
-			if (input.data[c].GetType() != bind_data.sql_types[c]) {
+			if (bind_data.input_types[c] != bind_data.sql_types[c]) {
 				types_match = false;
 				break;
 			}
 		}
 	}
 
-	for (auto &run : runs) {
-		idx_t n = run.count;
-		if (n == 0) {
+	for (idx_t i = 0; i < partitions.size(); i++) {
+		if (!partitions[i] || partitions[i]->Count() == 0) {
 			continue;
 		}
+		const string &partition_key = local_state.part_data->GetPartitionKey(i);
+		idx_t rows = partitions[i]->Count();
 
-		auto *pbuf = local_state.GetBuffer(run.key, context.client);
+		// Project from input schema (all columns) to group schema (only
+		// group columns, reordered + cast). The PartitionedColumnData stores
+		// all input columns; the ParquetWriter expects only group schema
+		// columns.
+		ColumnDataCollection projected(context.client, bind_data.sql_types);
+		ColumnDataAppendState proj_append;
+		projected.InitializeAppend(proj_append);
 
-		// Fast path: identity map + types match + full-chunk run → zero-copy append.
-		if (types_match && run.start == 0 && n == input.size()) {
-			pbuf->collection.Append(pbuf->append_state, input);
-			continue;
-		}
+		for (auto &chunk : partitions[i]->Chunks()) {
+			DataChunk mapped;
+			mapped.Initialize(context.client, bind_data.sql_types);
+			mapped.SetCardinality(chunk.size());
 
-		DataChunk chunk;
-		chunk.Initialize(context.client, bind_data.sql_types);
-		chunk.SetCardinality(n);
-
-		bool full_chunk = (run.start == 0 && n == input.size());
-		SelectionVector sel(n);
-		if (!full_chunk) {
-			// Partial run: build sequential selection vector for this range
-			for (idx_t i = 0; i < n; i++) {
-				sel.set_index(i, run.start + i);
-			}
-		}
-		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
-			idx_t src_col = bind_data.input_col_map[c];
-			auto &src_vec = input.data[src_col];
-			auto &tgt_vec = chunk.data[c];
-			if (src_vec.GetType() == tgt_vec.GetType()) {
-				if (full_chunk) {
-					// Full-chunk run: copy entire vector (no selection vector needed)
-					VectorOperations::Copy(src_vec, tgt_vec, n, 0, 0);
+			for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+				idx_t src_col = bind_data.input_col_map[c];
+				auto &src_vec = chunk.data[src_col];
+				auto &tgt_vec = mapped.data[c];
+				if (src_vec.GetType() == tgt_vec.GetType()) {
+					// Zero-copy reference when types match.
+					tgt_vec.Reference(src_vec);
 				} else {
-					VectorOperations::Copy(src_vec, tgt_vec, sel, n, 0, 0);
+					Vector temp(src_vec.GetType(), chunk.size());
+					VectorOperations::Copy(src_vec, temp, chunk.size(), 0, 0);
+					VectorOperations::Cast(context.client, temp, tgt_vec, chunk.size());
 				}
-			} else {
-				Vector temp(src_vec.GetType(), n);
-				if (full_chunk) {
-					VectorOperations::Copy(src_vec, temp, n, 0, 0);
-				} else {
-					VectorOperations::Copy(src_vec, temp, sel, n, 0, 0);
-				}
-				VectorOperations::Cast(context.client, temp, tgt_vec, n);
 			}
+			projected.Append(proj_append, mapped);
 		}
 
-		pbuf->collection.Append(pbuf->append_state, chunk);
-	}
-	// NOTE: Sink flushes per-RG (like native COPY TO PARQUET) to overlap
-	// parquet compression with ingestion and bound CDC size. When a
-	// per-partition local CDC reaches ALIGNED_DEFAULT_RG_ROWS (131072),
-	// flush it to the global writer. Combine handles the final partial
-	// CDC for each partition.
-	constexpr idx_t RG_FLUSH_THRESHOLD = ALIGNED_DEFAULT_RG_ROWS;
-	for (auto &kv : local_state.buffers) {
-		auto &pbuf = *kv.second;
-		if (pbuf.collection.Count() >= RG_FLUSH_THRESHOLD) {
-			idx_t rows = pbuf.collection.Count();
-			PartitionWriter *pw = global_state.Flush(kv.first, pbuf.collection);
-			if (pw) {
-				pw->received_rows += rows;
-			}
-			pbuf.collection.Reset();
-			pbuf.collection.InitializeAppend(pbuf.append_state);
-		}
-	}
-}
-
-//===----------------------------------------------------------------------===//
-// Combine: hand each partition's local buffer to the GlobalState FlushManager.
-// This is the ONLY place that calls GlobalState::Flush (besides Finalize
-// for the last partial data).
-//===----------------------------------------------------------------------===//
-
-static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_data_p, GlobalFunctionData &gstate,
-                                LocalFunctionData &lstate) {
-	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
-	auto &global_state = gstate.Cast<AlignedCopyGlobalState>();
-	auto &local_state = lstate.Cast<AlignedCopyLocalState>();
-
-	for (auto &kv : local_state.buffers) {
-		auto &partition_key = kv.first;
-		auto &pbuf = *kv.second;
-		idx_t rows = pbuf.collection.Count();
-		if (rows == 0) {
-			continue;
-		}
-		// Flush manages its own locking (global lock for writer lookup,
-		// per-partition lock for the actual write). Different partitions
-		// can flush in parallel across threads.
-		PartitionWriter *pw = global_state.Flush(partition_key, pbuf.collection);
-		// Track received rows on the partition writer (for final accounting).
-		// received_rows is atomic — no lock needed. Flush returns the writer.
+		PartitionWriter *pw = global_state.Flush(partition_key, projected,
+		                                            &local_state.writer_cache);
 		if (pw) {
 			pw->received_rows += rows;
 		}
-		// Reset the buffer (defensive — Combine is called once per thread).
-		pbuf.collection.Reset();
-		pbuf.collection.InitializeAppend(pbuf.append_state);
 	}
 }
 

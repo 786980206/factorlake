@@ -3,6 +3,7 @@
 #include "duckdb.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/common/types/column/partitioned_column_data.hpp"
 
 #include <atomic>
 #include <limits>
@@ -50,6 +51,7 @@ struct AlignedCopyBindData : public TableFunctionData {
 	// Column mapping: output col i → input col input_col_map[i].
 	vector<idx_t> input_col_map;
 	vector<string> input_names;
+	vector<LogicalType> input_types;  // types of all input columns
 };
 
 //===----------------------------------------------------------------------===//
@@ -92,7 +94,7 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 	const AlignedCopyBindData &bind_data;
 
 	std::mutex lock;
-	std::map<string, unique_ptr<PartitionWriter>> writers;
+	std::unordered_map<string, unique_ptr<PartitionWriter>> writers;
 	std::set<string> cleaned_partitions;
 
 	explicit AlignedCopyGlobalState(ClientContext &ctx, FileSystem &f, const AlignedCopyBindData &bd);
@@ -109,7 +111,12 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 	// Returns the PartitionWriter* (never null after a successful flush).
 	// Thread safety: uses global lock for writer lookup, per-partition lock
 	// for the actual write.  Different partitions flush in parallel.
-	PartitionWriter *Flush(const string &partition_key, ColumnDataCollection &buffer);
+	//
+	// `writer_cache` is an optional per-thread cache of partition key →
+	// PartitionWriter* pointers. When provided, it eliminates the global
+	// lock acquisition for partitions that this thread has already seen.
+	PartitionWriter *Flush(const string &partition_key, ColumnDataCollection &buffer,
+	                       std::unordered_map<string, PartitionWriter *> *writer_cache = nullptr);
 
 	// Finalize a single partition writer: flush footer, rename file,
 	// update written_rows.  Called only from Finalize.
@@ -120,34 +127,64 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 };
 
 //===----------------------------------------------------------------------===//
-// LocalState: per-thread partition buffers.  Sink only appends here; it
-// never touches PartitionWriter or ParquetWriter.
+// AlignedPartitionedColumnData: custom PartitionedColumnData that computes
+// partition indices by evaluating a partition template on a date/timestamp
+// column. Replaces manual run detection + per-partition CDC buffers.
+//===----------------------------------------------------------------------===//
+
+class AlignedPartitionedColumnData : public PartitionedColumnData {
+public:
+	AlignedPartitionedColumnData(ClientContext &context, vector<LogicalType> types,
+	                              idx_t partition_col_pos, string partition_template,
+	                              bool is_timestamp);
+
+	void ComputePartitionIndices(PartitionedColumnDataAppendState &state, DataChunk &input) override;
+
+	//! Get the partition key string for a partition index (for flush lookup).
+	const string &GetPartitionKey(idx_t partition_id) const {
+		auto it = partition_keys.find(partition_id);
+		if (it != partition_keys.end()) {
+			return it->second;
+		}
+		throw InternalException("AlignedPartitionedColumnData: unknown partition id %llu", partition_id);
+	}
+
+	//! Get all partition ids that have data.
+	std::vector<idx_t> GetActivePartitionIds() const;
+
+private:
+	idx_t RegisterPartition(const string &key, PartitionedColumnDataAppendState &state);
+
+	idx_t partition_col_pos;
+	string partition_template;
+	bool is_timestamp;
+
+	// Partition key string → partition id
+	std::unordered_map<string, idx_t> key_to_id;
+	// Partition id → partition key string
+	std::map<idx_t, string> partition_keys;
+
+	// Per-row partition key cache (date_val → partition key string)
+	std::unordered_map<int64_t, string> key_cache;
+	int64_t fast_cache_date = std::numeric_limits<int64_t>::min();
+	string fast_cache_key;
+};
+
+//===----------------------------------------------------------------------===//
+// LocalState: per-thread partition buffers using PartitionedColumnData.
 //===----------------------------------------------------------------------===//
 
 struct AlignedCopyLocalState : public LocalFunctionData {
 	explicit AlignedCopyLocalState(ClientContext &context, const vector<LogicalType> &types);
 
-	struct PartitionBuffer {
-		ColumnDataCollection collection;
-		ColumnDataAppendState append_state;
-	};
+	// PartitionedColumnData: handles all partitioning internally.
+	unique_ptr<AlignedPartitionedColumnData> part_data;
+	unique_ptr<PartitionedColumnDataAppendState> part_append_state;
 
-	std::map<string, unique_ptr<PartitionBuffer>> buffers;
-	const vector<LogicalType> &types;
-	idx_t received_rows = 0; // local accounting
-
-	// Partition key cache: date value → partition key string.
-	// Avoids re-evaluating the partition template for every row when
-	// consecutive rows share the same date (common with sorted input).
-	std::unordered_map<int64_t, string> partition_key_cache;
-	// Single-slot fast cache: with sorted-by-date input, the partition key
-	// almost never changes between consecutive rows. Checking this before
-	// the hash map eliminates ~all hash lookups.
-	int64_t fast_cache_date = std::numeric_limits<int64_t>::min();
-	string fast_cache_key;
-
-	// Get or create the buffer for a partition key.
-	PartitionBuffer *GetBuffer(const string &partition_key, ClientContext &context);
+	// Thread-local cache of partition writer pointers. Avoids acquiring
+	// the global lock on every Flush call for partitions that have already
+	// been seen by this thread. Keyed by partition key string.
+	std::unordered_map<string, PartitionWriter *> writer_cache;
 };
 
 //===----------------------------------------------------------------------===//
