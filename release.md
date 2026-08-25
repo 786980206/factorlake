@@ -1516,19 +1516,12 @@ compaction → 数据完整性验证。
 
 ### 根因分析：261 date 分区慢
 - 原基准测试 (250M rows, 4000 symbols, 261 date 分区) 耗时 528s+
-- 根因：benchmark 数据生成时 `CROSS JOIN tmins × symbols` 不保证输出顺序
-- Parquet 每个 Row Group 包含全年 261 天数据 → Sink 收到的数据 partition key
-  几乎每行都变 → `run_count ≈ 行数` (30M runs/thread)
-- 每行创建一个 DataChunk + SelectionVector + column copy → 巨大开销
-- **不是代码 bug，是 benchmark 数据排序问题**：`ORDER BY symbol, date` 修复后
-  run_count 从 30M → 18K/thread（~9.5 runs/chunk，符合预期）
-
-### 性能瓶颈定位
-- 使用 `std::chrono` instrumentation 确认：
-  - `run_split_time` (run detection + DataChunk copy) = ~50% CPU
-  - `combine_time` (Flush) = ~48% CPU
-- Mode 0 (Sink flush) vs Mode 1 (Combine flush) 无差异：每个 partition CDC
-  从未达到 RG threshold (131072)，所以 Sink flush 从未触发
+- 根因：benchmark 数据生成时 `CROSS JOIN tmins × symbols` 不保证输出顺序，
+  Parquet 每个 Row Group 包含全年 261 天数据 → Sink 收到的数据 partition key
+  几乎每行都变 → `run_count ≈ 行数` (30M runs/thread)，每行创建一个 DataChunk
+  + SelectionVector + column copy
+- `ORDER BY symbol, date` 修复数据排序后 run_count 从 30M → 18K/thread（~9.5
+  runs/chunk），但手动 run detection 仍有 ~50% CPU 开销
 
 ### 架构重构：用 PartitionedColumnData 替代手动 run detection
 - 新增 `AlignedPartitionedColumnData`：继承 DuckDB 的 `PartitionedColumnData`
@@ -1539,24 +1532,7 @@ compaction → 数据完整性验证。
 - Combine 中 `FlushAppendState` + 遍历 partitions，project 到 group schema 后
   调用 `GlobalState::Flush`
 - 列映射/类型转换移至 Combine（使用零拷贝 `Reference` 当类型匹配时）
-
-### 性能对比（500 symbols × 261 days × 240 min = 31.32M rows, 8 threads）
-| 场景 | 旧 (手动 run detection) | 新 (PartitionedColumnData) |
-|------|------------------------|---------------------------|
-| index group (7 cols, identity) | ~4.6s | **3.2s** |
-| panel group (7→5 cols projection) | ~4.6s | **5.1s** |
-| 原生 COPY TO PARQUET PARTITION_BY | — | 50s |
-
-- index group 快 30%（identity map → 零拷贝 Reference → Combine 无额外开销）
-- panel group 稍慢（Combine 中需 project 7→5 列，每次 chunk 都要 copy）
-- **比原生 COPY TO PARQUET PARTITION_BY 快 15×**
-
-### 关键优势
-- **对乱序数据鲁棒**：hash 分区不依赖输入顺序，即使数据完全乱序也不会退化
-  到"每行一个 run"的最坏情况
-- **代码量减少**：删除 ~200 行手动 run detection / flush mode / instrumentation 代码
-- **复用 DuckDB 基础设施**：partition buffer lifecycle、selection vector、
-  hash map 管理全部由 PartitionedColumnData 基类处理
+- 删除 `GetFlushMode` / `ALIGNED_FLUSH_MODE` 环境变量及所有 instrumentation
 
 ### 文件变更
 - `extension/aligned/src/include/copy/aligned_copy.hpp`：
@@ -1569,10 +1545,47 @@ compaction → 数据完整性验证。
     `RegisterPartition` 实现
   - Sink 简化为单行 `Append` 调用
   - Combine 重构为 `FlushAppendState` + partition projection + Flush
-  - 删除 `GetFlushMode` / `ALIGNED_FLUSH_MODE` 环境变量
+
+### 性能基准（分钟级 TIMESTAMP 数据, date=%Y-%m-%d 分区）
+
+**500 symbols × 261 days × 240 min = 31.32M rows, 8 threads:**
+
+| 场景 | 旧 (手动 run detection) | 新 (PartitionedColumnData) | 原生 PARTITION_BY |
+|------|------------------------|---------------------------|-------------------|
+| index group (identity) | ~4.6s | **3.2s** | 50s |
+| panel group (7→5 col projection) | ~4.6s | **5.1s** | — |
+
+**1000 symbols × 261 days × 240 min = 62.64M rows, 8 threads:**
+
+| 场景 | 时间 | 吞吐 | 倍率 vs 原生 |
+|------|------|------|-------------|
+| aligned index group (identity) | **6.2s** | 10.1M rows/s | — |
+| aligned panel group (7→5 col projection) | **10.5s** | 6.0M rows/s | — |
+| 原生 COPY TO PARQUET PARTITION_BY | **52.1s** | 1.2M rows/s | **8.4× 慢** |
+
+**扩展性与分区基数（62.64M rows, 8 threads, index group）:**
+
+| 配置 | 时间 |
+|------|------|
+| 4 threads | 8.0s |
+| 8 threads | 6.2s |
+| 16 threads | 6.3s (IO 瓶颈) |
+| month 分区 (12 分区) | 5.4s |
+| date 分区 (261 分区) | 6.2s |
+| 乱序 (ORDER BY date, 单线程排序) | 26.3s |
+| 乱序 (无 ORDER BY, 并行 RG 扫描) | 6.2s |
+
+- 日分区 (261) vs 月分区 (12) 仅差 15%，高基数分区扩展性优秀
+- panel group 投影开销：7→5 列 `Reference` + `ColumnDataCollection::Append` 占
+  Combine 主要时间
+- 8 线程已接近最优，16 线程受磁盘 IO 限制
+- hash 分区对乱序数据鲁棒：不依赖输入顺序，不退化到 O(rows) 最坏情况
 
 ### 测试结果
 - SQLLogicTest：271/271 PASS
 - PS test suite：ALL PASSED (test_aligned 42/42, test_dml 10/10,
   test_compaction 16/16, test_parallel 8/8)
+- 数据正确性：62.64M 行，0 NULL，行数和分布与源完全一致
+
+提交：`f270a66`
 

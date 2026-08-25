@@ -188,8 +188,10 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     `{idx:04d}-{rows:10d}.parquet`（实际行数）。0 行空文件自动删除。
   - **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
     = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part。
-  - **排序**：用户在 query 中 `ORDER BY (symbol, date)` 保证分区内有序；
-    `REGULAR_COPY_TO_FILE` 执行模式保留输入顺序。
+  - **排序**：用户在 query 中 `ORDER BY (symbol, date)` 保证分区内有序。
+    `preserve_insertion_order=false` 时用 `PARALLEL_COPY_TO_FILE`（多线程并行，
+    数据可能乱序到达 Sink），`PartitionedColumnData` 的 hash 分区不依赖输入顺序；
+    `preserve_insertion_order=true` 时用 `REGULAR_COPY_TO_FILE`（单线程，保序）。
   - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
     输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
   - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
@@ -308,6 +310,7 @@ extension/aligned/src/
 | `resolver/partition_resolver` | `EvaluatePartitionTemplate` / `IsKnownTemplate` | 三种模板求值/校验 |
 | | `DefaultPartitionKey` / `ValidatePartitionKey` | 默认分区键 / 分区键校验 |
 | `copy/aligned_copy` | `GetAlignedCopyFunction` | 注册 FORMAT aligned CopyFunction（Sink/Combine/Finalize pipeline） |
+| | `AlignedPartitionedColumnData` | 继承 PartitionedColumnData，按模板求值分区索引 |
 | `mutator/aligned_mutator` | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
 | | `NextTransactionId` | 共享事务号计数器 |
 | | `ExtractSortedRows` | 向量化提取 (symbol, date) 排序键 |

@@ -257,10 +257,10 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday'
 ```
 input chunk
     ↓
-Sink: 按 partition key 分流 → per-partition local buffer (ColumnDataCollection)
+Sink: part_data->Append → AlignedPartitionedColumnData (hash 分区)
     ↓                          (Sink 不碰 ParquetWriter)
-Combine: 每个 partition buffer → GlobalState::Flush (FlushManager，唯一写入入口)
-    ↓
+Combine: FlushAppendState → 遍历 partitions → project 到 group schema
+    ↓    → GlobalState::Flush (FlushManager，唯一写入入口)
 Flush: PartitionWriter → ParquetWriter::Flush (写一个 RG)
        满足 row_groups_per_file (8) → 轮转 part 文件 (rename 临时名 → 自描述名)
     ↓
