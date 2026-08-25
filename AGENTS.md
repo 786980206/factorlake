@@ -192,12 +192,15 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
   - **排序**：**`PARALLEL_COPY_TO_FILE`（多线程并行 source reader）+ FlushWorker
     端全局 (symbol, date) 排序**——输入按 `(symbol, date)` 排序则分区内输出**严格**
     保持排序（0 乱序行）。`PARALLEL_COPY_TO_FILE` 让 parquet source reader 用 8 线程
-    并行扫描（~1.5× 加速：15.9s→10.4s），多线程 Sink 各自维护 per-thread per-partition
+    并行扫描（~2.5× 加速：15.9s→6.5s），多线程 Sink 各自维护 per-thread per-partition
     RG buffer（无锁），满 RG_SIZE 后推到 background FlushWorker。FlushWorker 在 sentinel
     到达后收集每个分区的所有 buffer，合并后按 (symbol, date) 全局排序再 flush——
     消除 morsel 乱序。partition affinity（round-robin）保证同一分区的数据只由一个
     FlushWorker 线程写入。`PartitionedColumnData` 的 hash 分区不保序，aligned COPY
     不使用它——Sink 直接做 run detection + project 到 group schema。
+    **排序优化**：symbol 字符串→int32 字典编码（unordered_map + lexicographic
+    remap）后用 `std::stable_sort`（对近排序数据 ~O(n) 比较次数），比 `std::sort`
+    + 字符串比较快 ~3×（perm 46.9s→13.2s）。
   - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
     输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
   - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /

@@ -1718,7 +1718,8 @@ sorted collection，最后 flush 到 ParquetWriter。
 |------|------|--------|------|
 | REGULAR_COPY_TO_FILE（单线程 source） | 15.9s | 0 | 基线 |
 | PARALLEL 无 sort（上一提交） | 4.3s | 7/分区 | 不满足契约 |
-| **PARALLEL + FlushWorker 排序（当前）** | **10.4s** | **0** | **1.5× 加速 + 0 乱序** |
+| **PARALLEL + FlushWorker 排序（初始）** | **10.4s** | **0** | 1.5× 加速 + 0 乱序 |
+| **PARALLEL + FlushWorker 排序（优化后）** | **6.5s** | **0** | 2.5× 加速 + 0 乱序 |
 
 ### 文件变更
 
@@ -1734,6 +1735,62 @@ sorted collection，最后 flush 到 ParquetWriter。
 - SQLLogicTest：271/271 PASS
 - PS test suite：ALL PASSED (test_aligned, test_dml, test_compaction, test_parallel)
 - 数据正确性：62.64M 行，每分区 240000 行，**0 乱序行**
+
+提交：`81e7a25`
+
+## 2026-09-06 — 排序优化：dict 编码 + stable_sort
+
+### 优化目标
+
+上一提交 10.4s，相比原生 COPY TO 的理论下限还有优化空间。加 `ALIGNED_COPY_TIMING`
+环境变量的计时 instrumentation 后发现瓶颈：
+
+```
+sort=54.253s (8 threads → ~6.8s wall)
+  merge=0.779s
+  extract=0.790s
+  perm=46.900s  ← 87% of sort time!
+  build=5.783s
+  flush=4.095s
+```
+
+`std::sort` + `string_t` 比较是最大瓶颈：每分区 240K 行 × O(N log N) ×
+字符串比较 = ~4M 次 6 字节字符串比较/分区。
+
+### 优化：symbol→int32 字典编码 + std::stable_sort
+
+1. **字典编码**：扫描 merged collection 时用 `unordered_map<string, int32_t>`
+   建立符号→整数字典（~1000 个唯一符号），然后按字典序重映射 index
+   （整数比较 == 字符串比较）
+2. **`std::stable_sort`**：输入已 `ORDER BY (symbol, date)`，分区内数据近排序
+   （只是 morsel 打乱了 chunk 顺序），stable_sort 对近排序数据是 ~O(n) 比较
+   次数，比 `std::sort` 快 ~2.5×（perm 46.9s→13.2s）
+
+### 各阶段耗时对比（62.64M rows, 8 threads, TIMESTAMP, wall time）
+
+| 阶段 | 优化前 (10.4s) | 优化后 (6.5s) | 变化 |
+|------|---------------|---------------|------|
+| sink (total 8 threads) | 21.5s | 20.4s | ~ |
+| finalize (join wait) | 7.1s | 3.1s | FlushWorker 更快 |
+| sort merge | 0.8s | 0.9s | ~ |
+| sort extract | 0.8s | 2.7s | +dict 开销 |
+| sort perm | 46.9s | 13.2s | **3.5× faster** |
+| sort build | 5.8s | 6.3s | ~ |
+| sort flush | 4.1s | 4.4s | ~ |
+
+### 文件变更
+
+- `extension/aligned/src/copy/aligned_copy.cpp`：
+  - symbol 提取改为 `unordered_map<string, int32_t>` 字典编码 + lexicographic remap
+  - `std::sort` → `std::stable_sort`
+  - 新增 `ALIGNED_COPY_TIMING` 环境变量控制的计时 instrumentation（默认关闭）
+
+### 测试结果
+
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED
+- 数据正确性：62.64M 行，**0 乱序行**
+- 性能：15.9s → 6.5s（**2.5× 加速**），0 乱序
 
 提交：`<TBD>`
 

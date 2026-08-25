@@ -15,8 +15,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <limits>
 #include <thread>
+#include <unordered_map>
 
 #include "parquet_writer.hpp"
 #include "zstd_file_system.hpp"
@@ -30,6 +32,25 @@
 namespace duckdb {
 
 static constexpr idx_t RG_SIZE = 131072;
+
+// Timing instrumentation (guarded by env var ALIGNED_COPY_TIMING).
+static bool g_timing_enabled = false;
+static std::chrono::steady_clock::time_point g_sink_start;
+static std::atomic<idx_t> g_sink_chunks {0};
+static std::atomic<idx_t> g_sink_rows {0};
+static std::atomic<int64_t> g_sink_us {0};
+static std::atomic<int64_t> g_combine_us {0};
+static std::atomic<int64_t> g_sort_us {0};
+static std::atomic<int64_t> g_merge_us {0};
+static std::atomic<int64_t> g_extract_us {0};
+static std::atomic<int64_t> g_perm_us {0};
+static std::atomic<int64_t> g_build_us {0};
+static std::atomic<int64_t> g_flush_us {0};
+
+static inline int64_t elapsed_us(const std::chrono::steady_clock::time_point &start) {
+	auto end = std::chrono::steady_clock::now();
+	return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
 
 //===----------------------------------------------------------------------===//
 // GlobalState
@@ -191,6 +212,8 @@ void AlignedCopyGlobalState::FlushToPartition(PerPartitionState &pp, ColumnDataC
 
 void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
                                                     vector<unique_ptr<ColumnDataCollection>> &buffers) {
+	auto t_total = std::chrono::steady_clock::now();
+
 	// Count total rows.
 	idx_t total_rows = 0;
 	for (auto &buf : buffers) {
@@ -201,6 +224,7 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	}
 
 	// Merge all buffers into one ColumnDataCollection.
+	auto t_merge = std::chrono::steady_clock::now();
 	auto merged = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
 	ColumnDataAppendState append_state;
 	merged->InitializeAppend(append_state);
@@ -221,6 +245,9 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		}
 	}
 
+	int64_t merge_us = elapsed_us(t_merge);
+	if (g_timing_enabled) g_merge_us.fetch_add(merge_us);
+
 	// Find symbol and date column indices in the output schema.
 	idx_t symbol_col = DConstants::INVALID_INDEX;
 	idx_t date_col = DConstants::INVALID_INDEX;
@@ -238,9 +265,18 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		return;
 	}
 
+	auto t_extract = std::chrono::steady_clock::now();
+
 	// Extract symbol and date values for sorting.
-	vector<string_t> symbol_values(total_rows);
+	// Build a small string→int32 dictionary for fast integer comparisons
+	// during std::stable_sort. unordered_map for O(1) lookup, then remap
+	// indices to lexicographic order. stable_sort is ~O(n) on near-sorted
+	// data (input was ORDER BY).
+	vector<int32_t> symbol_idx(total_rows);
 	vector<int64_t> date_values(total_rows);
+	unordered_map<string, int32_t> sym_lookup;
+	sym_lookup.reserve(2048);
+	int32_t next_idx = 0;
 
 	vector<column_t> sort_cols = {symbol_col, date_col};
 	ColumnDataScanState scan_state;
@@ -267,7 +303,15 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		for (idx_t i = 0; i < chunk.size(); i++) {
 			auto si = sym_fmt.sel->get_index(i);
 			auto di = date_fmt.sel->get_index(i);
-			symbol_values[row_offset + i] = sym_data[si];
+			auto sym_str = sym_data[si].GetString();
+			auto dit = sym_lookup.find(sym_str);
+			if (dit == sym_lookup.end()) {
+				sym_lookup[sym_str] = next_idx;
+				symbol_idx[row_offset + i] = next_idx;
+				next_idx++;
+			} else {
+				symbol_idx[row_offset + i] = dit->second;
+			}
 			if (date_is_ts) {
 				auto dd = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
 				date_values[row_offset + i] = dd[di];
@@ -279,22 +323,43 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		row_offset += chunk.size();
 	}
 
+	// Reassign dictionary indices in lexicographic order so that
+	// integer comparison of symbol_idx == string comparison of symbols.
+	vector<string> sorted_syms;
+	sorted_syms.reserve(sym_lookup.size());
+	for (auto &kv : sym_lookup) {
+		sorted_syms.push_back(kv.first);
+	}
+	std::sort(sorted_syms.begin(), sorted_syms.end());
+	vector<int32_t> remap(next_idx);
+	for (idx_t i = 0; i < sorted_syms.size(); i++) {
+		remap[sym_lookup[sorted_syms[i]]] = static_cast<int32_t>(i);
+	}
+	for (idx_t i = 0; i < total_rows; i++) {
+		symbol_idx[i] = remap[symbol_idx[i]];
+	}
+
+	int64_t extract_u = elapsed_us(t_extract);
+	if (g_timing_enabled) g_extract_us.fetch_add(extract_u);
+
 	// Create permutation sorted by (symbol, date).
+	auto t_perm = std::chrono::steady_clock::now();
 	vector<idx_t> perm(total_rows);
 	for (idx_t i = 0; i < total_rows; i++) {
 		perm[i] = i;
 	}
-	std::sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
-		const auto &sa = symbol_values[a];
-		const auto &sb = symbol_values[b];
-		int cmp = sa < sb ? -1 : (sa > sb ? 1 : 0);
-		if (cmp != 0) return cmp < 0;
+	std::stable_sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
+		if (symbol_idx[a] != symbol_idx[b]) return symbol_idx[a] < symbol_idx[b];
 		return date_values[a] < date_values[b];
 	});
+
+	int64_t perm_u = elapsed_us(t_perm);
+	if (g_timing_enabled) g_perm_us.fetch_add(perm_u);
 
 	// Build sorted collection by re-appending rows in sorted order.
 	// Scan merged into cached chunks, then output rows in perm order
 	// (perm[i] = source row index of the i-th output row).
+	auto t_build = std::chrono::steady_clock::now();
 	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
 	ColumnDataAppendState sorted_append;
 	sorted->InitializeAppend(sorted_append);
@@ -366,7 +431,14 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	}
 
 	// Flush the sorted collection in RG-sized chunks.
+	auto t_flush = std::chrono::steady_clock::now();
 	FlushToPartition(pp, *sorted);
+
+	if (g_timing_enabled) {
+		g_build_us.fetch_add(elapsed_us(t_build));
+		g_flush_us.fetch_add(elapsed_us(t_flush));
+		g_sort_us.fetch_add(elapsed_us(t_total));
+	}
 }
 
 void AlignedCopyGlobalState::RotatePartition(PerPartitionState &pp) {
@@ -642,6 +714,14 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		return;
 	}
 
+	if (!g_timing_enabled) {
+		const char *env = std::getenv("ALIGNED_COPY_TIMING");
+		g_timing_enabled = (env != nullptr);
+		if (g_timing_enabled) g_sink_start = std::chrono::steady_clock::now();
+	}
+
+	auto t0 = std::chrono::steady_clock::now();
+
 	// In PARALLEL_COPY_TO_FILE mode, multiple threads call Sink concurrently.
 	// The source reader (parquet scan) runs in parallel, giving ~3.7x speedup.
 	// Buffers arrive out-of-order; the FlushWorker accumulates all buffers per
@@ -769,6 +849,12 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 
 	// Flush the last run.
 	append_run(run_pk_str, run_start, count - run_start);
+
+	if (g_timing_enabled) {
+		g_sink_chunks.fetch_add(1);
+		g_sink_rows.fetch_add(count);
+		g_sink_us.fetch_add(elapsed_us(t0));
+	}
 }
 
 //===----------------------------------------------------------------------===//
@@ -782,6 +868,8 @@ static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_dat
 	auto &global_state = gstate.Cast<AlignedCopyGlobalState>();
 	auto &local_state = lstate.Cast<AlignedCopyLocalState>();
 
+	auto t0 = std::chrono::steady_clock::now();
+
 	// Push all remaining per-thread buffers to their assigned workers.
 	for (auto &kv : local_state.rg_buffers) {
 		if (kv.second && kv.second->Count() > 0) {
@@ -794,6 +882,10 @@ static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_dat
 	}
 	local_state.rg_buffers.clear();
 	local_state.rg_appends.clear();
+
+	if (g_timing_enabled) {
+		g_combine_us.fetch_add(elapsed_us(t0));
+	}
 }
 
 //===----------------------------------------------------------------------===//
@@ -805,11 +897,16 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
 	auto &global_state = gstate.Cast<AlignedCopyGlobalState>();
 
+	auto t0 = std::chrono::steady_clock::now();
+
 	// Push sentinels to stop all worker loops.
 	global_state.PushSentinels();
 
 	// Wait for all threads to finish.
 	global_state.JoinThreads();
+
+	auto t_join_end = std::chrono::steady_clock::now();
+	int64_t join_us = std::chrono::duration_cast<std::chrono::microseconds>(t_join_end - t0).count();
 
 	// Check for errors from background threads.
 	for (auto &worker : global_state.workers) {
@@ -829,6 +926,35 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 				                        (unsigned long long)pp.written_rows);
 			}
 		}
+	}
+
+	int64_t finalize_us = std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now() - t0).count();
+
+	if (g_timing_enabled) {
+		int64_t total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now() - g_sink_start).count();
+		double total_s = total_us / 1e6;
+		double finalize_s = finalize_us / 1e6;
+		double join_s = join_us / 1e6;
+		double sink_s = g_sink_us.load() / 1e6;
+		double combine_s = g_combine_us.load() / 1e6;
+		double sort_s = g_sort_us.load() / 1e6;
+		double merge_s = g_merge_us.load() / 1e6;
+		double extract_s = g_extract_us.load() / 1e6;
+		double perm_s = g_perm_us.load() / 1e6;
+		double build_s = g_build_us.load() / 1e6;
+		double flush_s = g_flush_us.load() / 1e6;
+		fprintf(stderr,
+		        "[ALIGNED_COPY_TIMING] total=%.3fs | sink=%.3fs (chunks=%zu, rows=%zu) | "
+		        "combine=%.3fs | finalize=%.3fs (join_wait=%.3fs) | "
+		        "sort=%.3fs [merge=%.3fs extract=%.3fs perm=%.3fs build=%.3fs flush=%.3fs]\n",
+		        total_s,
+		        sink_s, (size_t)g_sink_chunks.load(), (size_t)g_sink_rows.load(),
+		        combine_s,
+		        finalize_s, join_s,
+		        sort_s,
+		        merge_s, extract_s, perm_s, build_s, flush_s);
 	}
 }
 
