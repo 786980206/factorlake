@@ -147,6 +147,10 @@ AlignedTableScan
 ```
 aligned_scan(table, root=...)                    → (table columns)
 aligned_groups(table, root=...)                  → (group_name, columns, partition_count)
+  # 注意：aligned_groups 的 columns 输出用分号 `;` 分隔列名（避免与
+  # SQLLogicTest 的逗号分隔输出格式混淆），而 groups 选项映射字符串和
+  # aligned_create 的 columns 参数用逗号 `,` 分隔列名。两个分隔符不同
+  # 是设计选择，不是 bug。
 aligned_create(table, group, columns, root=..., partition_template=...)  → (dirs_created, files_created, txid)
 aligned_create(table, group, root=..., partition_template=...)            → (dirs_created, files_created, txid)  -- 2-arg 空组
 aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
