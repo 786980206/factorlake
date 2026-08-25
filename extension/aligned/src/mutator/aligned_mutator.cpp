@@ -746,11 +746,74 @@ struct BatchAppender {
 	               SourceReader &src, idx_t src_row) {
 		idx_t row_idx = scratch.size();
 		scratch.SetCardinality(row_idx + 1);
-		scratch.SetValue(0, row_idx, Value::BIGINT(NumericCast<int64_t>(pos)));
+
+		// Position column (BIGINT) — direct write, no Value construction.
+		FlatVector::GetData<int64_t>(scratch.data[0])[row_idx] = NumericCast<int64_t>(pos);
+		FlatVector::Validity(scratch.data[0]).SetValid(row_idx);
+
+		// Value columns: direct flat-vector writes for primitive types,
+		// avoiding per-column Value construction + SetValue overhead.
+		// This is critical for wide tables (10k+ columns).
+		src.EnsureChunk(src_row);
+		idx_t local = src_row % STANDARD_VECTOR_SIZE;
 		for (idx_t c = 0; c < src_pos.size(); c++) {
-			Value v = src.GetValue(src_pos[c], src_row);
-			scratch.SetValue(1 + c, row_idx, v);
+			auto &fmt = src.fmts[src_pos[c]];
+			auto si = fmt.sel->get_index(local);
+			auto &tgt_vec = scratch.data[1 + c];
+			if (!fmt.validity.RowIsValid(si)) {
+				FlatVector::Validity(tgt_vec).SetInvalid(row_idx);
+				continue;
+			}
+			FlatVector::Validity(tgt_vec).SetValid(row_idx);
+			auto &type = src.chunk.data[src_pos[c]].GetType();
+			switch (type.id()) {
+			case LogicalTypeId::DOUBLE: {
+				auto src_data = UnifiedVectorFormat::GetData<double>(fmt);
+				FlatVector::GetData<double>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			case LogicalTypeId::FLOAT: {
+				auto src_data = UnifiedVectorFormat::GetData<float>(fmt);
+				FlatVector::GetData<float>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			case LogicalTypeId::INTEGER: {
+				auto src_data = UnifiedVectorFormat::GetData<int32_t>(fmt);
+				FlatVector::GetData<int32_t>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			case LogicalTypeId::BIGINT: {
+				auto src_data = UnifiedVectorFormat::GetData<int64_t>(fmt);
+				FlatVector::GetData<int64_t>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			case LogicalTypeId::SMALLINT: {
+				auto src_data = UnifiedVectorFormat::GetData<int16_t>(fmt);
+				FlatVector::GetData<int16_t>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			case LogicalTypeId::TINYINT: {
+				auto src_data = UnifiedVectorFormat::GetData<int8_t>(fmt);
+				FlatVector::GetData<int8_t>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			case LogicalTypeId::BOOLEAN: {
+				auto src_data = UnifiedVectorFormat::GetData<bool>(fmt);
+				FlatVector::GetData<bool>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			case LogicalTypeId::VARCHAR: {
+				auto src_data = UnifiedVectorFormat::GetData<string_t>(fmt);
+				FlatVector::GetData<string_t>(tgt_vec)[row_idx] = src_data[si];
+				break;
+			}
+			default:
+				// Fallback: Value construction for non-primitive types.
+				scratch.SetValue(1 + c, row_idx, src.GetValue(src_pos[c], src_row));
+				break;
+			}
 		}
+
 		if (scratch.size() >= STANDARD_VECTOR_SIZE) {
 			Flush();
 		}
