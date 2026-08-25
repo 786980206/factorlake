@@ -1481,4 +1481,35 @@ compaction → 数据完整性验证。
 
 提交：`bca59f8`
 
+## 2026-09-04 — Round 23-25：类型安全修复 + 向量化 + 文档
+
+### 类型安全 EvaluatePartitionTemplate 修复
+- 新增 `EvaluatePartitionTemplate(template, value, is_timestamp, result)`
+  类型安全重载，消除 `int64_t` 启发式的误分类问题（1970 前日期、epoch 附近
+  timestamp）
+- 所有 3 个调用方（`key_resolver`、`aligned_mutator`、`aligned_copy`）改用
+  类型安全版本——调用方已知列类型，无需启发式猜测
+- 旧启发式重载保留向后兼容，AGENTS.md 更新标注已修复
+
+### aligned_groups 分隔符文档化
+- `aligned_groups` 输出用 `;` 分隔列名（避免 SQLLogicTest 逗号混淆）
+- `groups` 选项映射字符串用 `,` 分隔列名
+- 两个分隔符不同是设计选择，已在 AGENTS.md 函数签名中注释说明
+
+### BatchAppender::AppendRow 向量化
+- 原实现：每列构造 `Value` + `SetValue`（对 10k+ 列宽表是主要瓶颈）
+- 新实现：直接 `FlatVector::GetData<T>` 写入，支持 DOUBLE/FLOAT/INTEGER/
+  BIGINT/SMALLINT/TINYINT/BOOLEAN/VARCHAR 8 种基本类型
+- NULL 通过 `Validity::SetInvalid/SetValid` 处理
+- 非基本类型回退到 `SetValue`
+- `SourceReader::EnsureChunk` 复用已缓存的 UnifiedVectorFormat
+
+### 测试结果
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED
+- 基准测试：aligned 0.69s vs native year-part 1.11s = 1.62x faster
+- Feature Lake 脚本：109,600 行，对齐校验通过
+
+提交：`c6d5bcb`、`d42bd3a`、`a915a87`
+
 
