@@ -1846,5 +1846,48 @@ Windows `LocalFileSystem::CreateDirectory` 存在 TOCTOU 竞态：
 - SQLLogicTest：271/271 PASS
 - PS test suite：ALL PASSED
 
-提交：`<TBD>`
+提交：`0dbb2e1`
+
+## 2026-09-06 — 非 index 组追加隐藏排序键，消除 row alignment 错位
+
+### 问题
+
+非 index 组（如 `panel/ma`）的 group schema 不含 `symbol`/`date` 列（key 只存
+一份在 index）。`SortAndFlushPartition` 在 CDC 中找不到 symbol/date 列时跳过
+排序（line 278-282），数据按 arrival order flush。而 index 组按 `(symbol, date)`
+排序。两个组的行序不一致 → `aligned_scan` 的 position-based alignment（index
+row N == panel/ma row N）错位 → JOIN 验证返回大量不匹配行。
+
+根因：`PARALLEL_COPY_TO_FILE` 下 morsel 乱序导致 buffer 到达 FlushWorker 的
+顺序不确定。index 组有排序键可全局排序消除乱序，非 index 组没有排序键只能按
+到达顺序 flush——两个组排序/不排序的行序不一致。
+
+### 修复
+
+对不含 `symbol`/`date` 列的组，在 buffer CDC 末尾追加 **hidden sort key**
+列（symbol + date，来自输入 chunk），`SortAndFlushPartition` 按它们排序后再
+剥离 hidden key，只 flush group schema 列到 ParquetWriter。
+
+- **bind**：检测 `column_names` 是否含 symbol/date，不含则设
+  `needs_hidden_sort_keys`，记录 `hidden_symbol_input_col`/`hidden_date_input_col`
+  和类型
+- **ProjectRows**：对 `needs_hidden_sort_keys` 的组，在 `projected_chunk` 尾部
+  追加 symbol/date 列（来自 `input.data[hidden_*_input_col]`）
+- **Sink CDC**：用扩展类型（`sql_types + hidden types`）创建 buffer
+- **SortAndFlushPartition**：
+  - merged CDC 用扩展类型；`all_cols` scan 后按 `chunk.data[symbol_col]`/
+    `chunk.data[date_col]` 提取排序键（不用 column subset scan，避免 DuckDB
+    `InitializeScan` column_id 问题）
+  - sorted CDC 只含 `sql_types`（copy loop 只拷 `sql_types.size()` 列，
+    自动剥离 hidden key）
+- **InitializeLocal**：`projected_chunk` 用扩展类型初始化
+
+### 测试
+
+- 40 symbols × 36 年日期 × 4 OHLC 列 = 526,360 行，无 `ORDER BY` 输入，
+  `aligned_scan JOIN mock` 验证 **0 乱序行**
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED
+
+提交：`848114d`
 

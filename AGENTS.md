@@ -201,6 +201,10 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     **排序优化**：symbol 字符串→int32 字典编码（unordered_map + lexicographic
     remap）后用 `std::stable_sort`（对近排序数据 ~O(n) 比较次数），比 `std::sort`
     + 字符串比较快 ~3×（perm 46.9s→13.2s）。
+    **非 index 组隐藏排序键**：非 index 组（如 `panel/ma`）的 group schema 不含
+    symbol/date 列（key 只存一份）。为使非 index 组也按 `(symbol, date)` 排序以
+    保持 row alignment，Sink 在 buffer CDC 末尾追加 hidden sort key 列（symbol +
+    date），SortAndFlushPartition 排序后剥离 hidden key，只 flush group schema 列。
   - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
     输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
   - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
@@ -445,6 +449,12 @@ extension/aligned/src/
   前向声明。按值返回/传参会触发 `vector` 的拷贝/移动构造，需要完整类型定义
   → MSVC C2036 编译错误。必须用输出参数（`ColumnDataCollection &output`）或
   `unique_ptr` 传递。
+- **`ColumnDataCollection::InitializeScan` column_id subset 不可靠**：
+  `InitializeScan(state, {4, 5})` 后 `chunk.data[0]` 可能不是第 4 列的类型。
+  DuckDB v1.5.5 的 column subset scan 对非连续/非零起始的 column_ids 存在
+  类型映射问题（INTERNAL Error: Expected VARCHAR, found DOUBLE）。**解法**：
+  用 `InitializeScan(state, all_cols)` 扫描全部列，然后直接用
+  `chunk.data[symbol_col]` / `chunk.data[date_col]` 索引到目标列。
 
 ### 数据正确性陷阱
 
