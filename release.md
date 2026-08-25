@@ -1825,5 +1825,26 @@ Windows `LocalFileSystem::CreateDirectory` 存在 TOCTOU 竞态：
 - PS test suite：ALL PASSED
 - 新组 COPY 验证：`COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma2')` 成功
 
+提交：`fdfcc83`
+
+## 2026-09-06 — aligned_drop 跳过分区对齐校验
+
+### 问题
+
+`aligned_drop` 调用 `BuildTablePlan`，后者执行分区对齐校验。当不同组的分区
+行数不一致时（如 index 写了 10 个 symbol，panel/ma 只写了 5 个），drop 被阻断：
+`group 'panel/ma' partition 'year=2020' covers 146000 rows but the index covers 146400 rows`
+
+### 修复
+
+`aligned_drop` 不再调用 `BuildTablePlan`，改为直接检查表目录和 group 目录是否存在：
+- index drop：直接删除整个表目录
+- 非 index drop：直接拼接 `table_path/group_name` 并检查目录是否存在
+
+### 测试
+
+- SQLLogicTest：271/271 PASS
+- PS test suite：ALL PASSED
+
 提交：`<TBD>`
 

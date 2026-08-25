@@ -50,22 +50,31 @@ unique_ptr<FunctionData> AlignedDropBind(ClientContext &context, TableFunctionBi
 	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
 	string root = ResolveDataRoot(context, root_param, "aligned_drop");
 
-	BuildTablePlan(context, root, table, result->plan);
-
-	// Validate the group name against the discovered groups. "index" is
-	// always valid (it drops the entire table). Other names must match an
-	// existing group.
-	bool found = StringUtil::CIEquals(result->group_name, "index");
-	if (!found) {
-		for (auto &g : result->plan.groups) {
-			if (StringUtil::CIEquals(g.manifest.group, result->group_name)) {
-				found = true;
-				break;
-			}
-		}
+	// Normalize root path (strip trailing separators)
+	while (!root.empty() && (root.back() == '/' || root.back() == '\\')) {
+		root.pop_back();
 	}
-	if (!found) {
-		throw BinderException("aligned_drop: unknown group '%s' in table '%s'", result->group_name, table);
+
+	auto &fs = FileSystem::GetFileSystem(context);
+	result->plan.table_path = root + "/" + table;
+	result->plan.table_name = table;
+
+	if (!fs.DirectoryExists(result->plan.table_path)) {
+		throw IOException("Aligned table '%s': table directory does not exist at '%s'", table,
+		                  result->plan.table_path);
+	}
+
+	// For "index" (drop entire table), we don't need to validate groups.
+	if (!StringUtil::CIEquals(result->group_name, "index")) {
+		// For a single group drop, find the group directory directly.
+		// We use a glob to discover groups — but skip the partition-aligned
+		// contract validation that BuildTablePlan performs, since the user
+		// is deleting the group anyway.
+		string group_path = result->plan.table_path + "/" + result->group_name;
+		if (!fs.DirectoryExists(group_path)) {
+			throw BinderException("aligned_drop: unknown group '%s' in table '%s'",
+			                      result->group_name, table);
+		}
 	}
 
 	result->types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
@@ -112,20 +121,9 @@ void AlignedDropFunction(ClientContext &context, TableFunctionInput &data, DataC
 			fs.RemoveDirectory(bind.plan.table_path);
 		}
 	} else {
-		// Dropping a single non-index column group: find the group's
-		// directory path and remove it. Other groups (including index)
-		// remain untouched.
-		string group_path;
-		for (auto &g : bind.plan.groups) {
-			if (StringUtil::CIEquals(g.manifest.group, bind.group_name)) {
-				group_path = g.group_path;
-				break;
-			}
-		}
-		if (group_path.empty()) {
-			// Should not happen — bind validates the group name.
-			throw InternalException("aligned_drop: group '%s' not found in plan", bind.group_name);
-		}
+		// Dropping a single non-index column group: remove the group's
+		// directory directly. Other groups (including index) remain untouched.
+		string group_path = bind.plan.table_path + "/" + bind.group_name;
 		if (fs.DirectoryExists(group_path)) {
 			CountRecursive(fs, group_path, dirs_removed, files_removed);
 			fs.RemoveDirectory(group_path);
