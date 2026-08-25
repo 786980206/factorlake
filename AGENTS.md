@@ -175,11 +175,10 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     Sink: part_data->Append → AlignedPartitionedColumnData (hash 分区)
         ↓                          (Sink 不碰 ParquetWriter)
     Combine: FlushAppendState → 遍历 partitions → project 到 group schema
-        ↓    → GlobalState::Flush (FlushManager, 唯一写入入口)
-    Flush: PartitionWriter → ParquetWriter::Flush (写一个 RG)
-           满足 row_groups_per_file (8) → 轮转 part 文件 (rename 临时名 → 自描述名)
-        ↓
-    Finalize: 逐分区 Finalize + Rename + 统计校验 (received == written)
+        ↓    → GlobalState::Accumulate (累积到 per-partition 全局 collection, 不写盘)
+    Finalize: 逐分区 sort by (symbol, date) → 切分 131072-row RG → ParquetWriter::Flush
+             → 满足 row_groups_per_file (8) → 轮转 part 文件
+             → Finalize + Rename + 统计校验 (received == written)
     ```
 
   - **per-partition 覆盖**：每个分区目录首次写入时自动清理旧 parquet 文件
@@ -188,10 +187,12 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
     `{idx:04d}-{rows:10d}.parquet`（实际行数）。0 行空文件自动删除。
   - **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
     = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part。
-  - **排序**：用户在 query 中 `ORDER BY (symbol, date)` 保证分区内有序。
-    `preserve_insertion_order=false` 时用 `PARALLEL_COPY_TO_FILE`（多线程并行，
-    数据可能乱序到达 Sink），`PartitionedColumnData` 的 hash 分区不依赖输入顺序；
-    `preserve_insertion_order=true` 时用 `REGULAR_COPY_TO_FILE`（单线程，保序）。
+  - **排序**：**Finalize 阶段强制按 (symbol, date) 升序排列**，保证主键契约
+    （§4: "分区内按 (symbol, date) 升序排列"）。`PartitionedColumnData` 的 hash
+    分区不保证行序，多线程并行 (`PARALLEL_COPY_TO_FILE`) 下即使输入有序也会
+    产生分区内乱序——因此在 Finalize 中对每个分区的累积数据做全局排序后再
+    写盘。**输入数据不需要预先排序**（排序在 Finalize 中保证）。非 index 组
+    （不含 symbol/date 列）跳过排序。
   - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排。
     输入列类型 ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
   - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
@@ -311,6 +312,7 @@ extension/aligned/src/
 | | `DefaultPartitionKey` / `ValidatePartitionKey` | 默认分区键 / 分区键校验 |
 | `copy/aligned_copy` | `GetAlignedCopyFunction` | 注册 FORMAT aligned CopyFunction（Sink/Combine/Finalize pipeline） |
 | | `AlignedPartitionedColumnData` | 继承 PartitionedColumnData，按模板求值分区索引 |
+| | `SortPartitionCollection` | Finalize 中按 (symbol, date) 排序 per-partition 累积 collection |
 | `mutator/aligned_mutator` | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
 | | `NextTransactionId` | 共享事务号计数器 |
 | | `ExtractSortedRows` | 向量化提取 (symbol, date) 排序键 |
@@ -428,7 +430,21 @@ extension/aligned/src/
 - **`git stash` 会把子模块本地补丁也 stash 进子模块自己的 stash 队列**：主仓
   stash list 看不到。避免在含子模块补丁的仓库用 `git stash`。
 
+- **`ColumnDataCollection` 不能按值返回**：`ColumnDataCollection` 含
+  `vector<ColumnDataCopyFunction>` 成员，`ColumnDataCopyFunction` 在头文件中仅
+  前向声明。按值返回/传参会触发 `vector` 的拷贝/移动构造，需要完整类型定义
+  → MSVC C2036 编译错误。必须用输出参数（`ColumnDataCollection &output`）或
+  `unique_ptr` 传递。
+
 ### 数据正确性陷阱
+
+- **`PartitionedColumnData` 不保证分区内行序**：hash 分区的 `AppendInternal`
+  按 partition 遍历（不是按行序），128-row buffer 跨 chunk 累积后 flush 顺序
+  与输入行序无关。即使输入 `ORDER BY (symbol, date)`，并行模式下分区内仍会
+  产生乱序。**必须在 Finalize 中对 per-partition 累积数据做全局排序**，不能
+  依赖输入排序或 `preserve_insertion_order`。DuckDB 原生 `COPY TO PARQUET
+  PARTITION_BY` 也有同样问题（`plan_copy_to_file.cpp` 强制
+  `preserve_insertion_order=false`，且禁止 `PRESERVE_ORDER`）。
 
 - **`ScanGroupWindow` 的 src_offset**：窗口从 RG 中部开始时必须用
   `seg.flow_off + (copy_from - seg.win_start) - rg_off`，不是简单的

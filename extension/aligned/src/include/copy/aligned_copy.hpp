@@ -37,6 +37,10 @@ struct AlignedCopyBindData : public TableFunctionData {
 	string partition_template;     // "year=%Y" / "month=%Y-%m" / "date=%Y-%m-%d"
 	string partition_col_name;     // e.g. "date"
 
+	// Symbol column position in the *input* chunk (for per-partition sort).
+	// -1 = symbol column not present in input (non-index group without key cols).
+	idx_t symbol_col_pos = DConstants::INVALID_INDEX;
+
 	// Physical group directory: root/table_name/group_name
 	string group_path;
 	bool is_new_group = false;
@@ -60,6 +64,10 @@ struct AlignedCopyBindData : public TableFunctionData {
 //===----------------------------------------------------------------------===//
 
 struct PartitionWriter {
+	~PartitionWriter() {
+		delete accumulated;
+	}
+
 	// Configuration (set once at creation).
 	string partition_key; // e.g. "year=1990"
 	string part_dir;      // e.g. ".../index/year=1990"
@@ -80,6 +88,12 @@ struct PartitionWriter {
 	std::atomic<idx_t> written_rows {0};    // rows finalized to disk
 
 	bool finalized = false;
+
+	// Per-partition accumulated buffer.  Threads append their sorted
+	// partition data here in Combine; Finalize sorts + flushes each to
+	// ParquetWriter.  This ensures global sort order across all threads.
+	ColumnDataCollection *accumulated = nullptr;  // lazily created
+	std::mutex accum_lock;
 };
 
 //===----------------------------------------------------------------------===//
@@ -99,24 +113,10 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 
 	explicit AlignedCopyGlobalState(ClientContext &ctx, FileSystem &f, const AlignedCopyBindData &bd);
 
-	// The **sole** entry point for flushing data to a partition's writer.
-	// Called only from Combine (after local buffers are merged) and from
-	// Finalize (for the last partial RG).  Sink never calls this directly.
-	//
-	// Responsibilities:
-	//   1. Create the PartitionWriter on first use (cleans old files = OVERWRITE).
-	//   2. writer->Flush(buffer) — writes one Row Group.
-	//   3. Rotate part file at row_groups_per_file boundary.
-	//
-	// Returns the PartitionWriter* (never null after a successful flush).
-	// Thread safety: uses global lock for writer lookup, per-partition lock
-	// for the actual write.  Different partitions flush in parallel.
-	//
-	// `writer_cache` is an optional per-thread cache of partition key →
-	// PartitionWriter* pointers. When provided, it eliminates the global
-	// lock acquisition for partitions that this thread has already seen.
-	PartitionWriter *Flush(const string &partition_key, ColumnDataCollection &buffer,
-	                       std::unordered_map<string, PartitionWriter *> *writer_cache = nullptr);
+	// Accumulate sorted partition data from a thread's Combine.
+	// Does NOT call ParquetWriter — data is buffered for Finalize.
+	void Accumulate(const string &partition_key, ColumnDataCollection &sorted_data,
+	                idx_t rows);
 
 	// Finalize a single partition writer: flush footer, rename file,
 	// update written_rows.  Called only from Finalize.
@@ -180,11 +180,6 @@ struct AlignedCopyLocalState : public LocalFunctionData {
 	// PartitionedColumnData: handles all partitioning internally.
 	unique_ptr<AlignedPartitionedColumnData> part_data;
 	unique_ptr<PartitionedColumnDataAppendState> part_append_state;
-
-	// Thread-local cache of partition writer pointers. Avoids acquiring
-	// the global lock on every Flush call for partitions that have already
-	// been seen by this thread. Keyed by partition key string.
-	std::unordered_map<string, PartitionWriter *> writer_cache;
 };
 
 //===----------------------------------------------------------------------===//

@@ -13,6 +13,9 @@
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <algorithm>
+#include <numeric>
+
 #include "parquet_writer.hpp"
 #include "zstd_file_system.hpp"
 
@@ -134,45 +137,10 @@ AlignedCopyGlobalState::AlignedCopyGlobalState(ClientContext &ctx, FileSystem &f
     : context(ctx), fs(f), bind_data(bd) {
 }
 
-PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, ColumnDataCollection &buffer,
-                                               std::unordered_map<string, PartitionWriter *> *writer_cache) {
-	idx_t rows = buffer.Count();
-	if (rows == 0) {
-		return nullptr;
-	}
-
-	// Fast path: check the calling thread's local writer cache first.
-	// This avoids acquiring the global lock on every Flush call for
-	// partitions that have already been seen. The cache is populated
-	// on first encounter of each partition key.
-	if (writer_cache) {
-		auto cache_it = writer_cache->find(partition_key);
-		if (cache_it != writer_cache->end()) {
-			PartitionWriter *pw = cache_it->second;
-			// Phase 2: Flush under per-partition lock (different partitions flush in parallel).
-			std::lock_guard<std::mutex> plock(pw->lock);
-			pw->writer->Flush(buffer, pw->transform_data);
-			pw->rows_in_current_part += rows;
-			pw->row_groups_in_current_part++;
-
-			// Rotate part file at the boundary.
-			if (pw->row_groups_in_current_part >= bind_data.row_groups_per_file) {
-				pw->writer->Finalize();
-				RenamePartFile(*pw);
-				pw->written_rows += pw->rows_in_current_part;
-				pw->part_index++;
-				string file_path = pw->part_dir + "/" + FormatPartName(pw->part_index, 0);
-				pw->writer = CreateParquetWriter(context, fs, file_path,
-				                                 bind_data.column_names, bind_data.sql_types);
-				pw->rows_in_current_part = 0;
-				pw->row_groups_in_current_part = 0;
-			}
-			return pw;
-		}
-	}
-
-	// Slow path: first time this thread sees this partition — acquire
-	// global lock to create/lookup the PartitionWriter.
+void AlignedCopyGlobalState::Accumulate(const string &partition_key, ColumnDataCollection &sorted_data,
+                                        idx_t rows) {
+	// Find or create the PartitionWriter (same logic as Flush's writer
+	// lookup, but we don't call ParquetWriter::Flush — just accumulate).
 	PartitionWriter *pw;
 	{
 		std::lock_guard<std::mutex> glock(lock);
@@ -194,44 +162,23 @@ PartitionWriter *AlignedCopyGlobalState::Flush(const string &partition_key, Colu
 				}
 			}
 			fs.CreateDirectoriesRecursive(new_pw->part_dir);
-
-			// Create first part file (temp name with rows=0).
-			new_pw->part_index = 0;
-			string file_path = new_pw->part_dir + "/" + FormatPartName(0, 0);
-			new_pw->writer = CreateParquetWriter(context, fs, file_path,
-			                                      bind_data.column_names, bind_data.sql_types);
-
+			// Don't create the ParquetWriter yet — Finalize will do that.
 			pw = new_pw.get();
 			writers[partition_key] = std::move(new_pw);
 		} else {
 			pw = it->second.get();
 		}
 	}
-	// Cache the writer pointer for future calls from this thread.
-	if (writer_cache) {
-		(*writer_cache)[partition_key] = pw;
+
+	// Append sorted data to the per-partition accumulated collection.
+	{
+		std::lock_guard<std::mutex> plock(pw->accum_lock);
+		if (!pw->accumulated) {
+			pw->accumulated = new ColumnDataCollection(context, bind_data.sql_types);
+		}
+		pw->accumulated->Combine(sorted_data);
 	}
-
-	// Phase 2: Flush under per-partition lock (different partitions flush in parallel).
-	std::lock_guard<std::mutex> plock(pw->lock);
-	pw->writer->Flush(buffer, pw->transform_data);
-	pw->rows_in_current_part += rows;
-	pw->row_groups_in_current_part++;
-
-	// Rotate part file at the boundary.
-	if (pw->row_groups_in_current_part >= bind_data.row_groups_per_file) {
-		pw->writer->Finalize();
-		RenamePartFile(*pw);
-		pw->written_rows += pw->rows_in_current_part;
-		pw->part_index++;
-		string file_path = pw->part_dir + "/" + FormatPartName(pw->part_index, 0);
-		pw->writer = CreateParquetWriter(context, fs, file_path,
-		                                 bind_data.column_names, bind_data.sql_types);
-		pw->rows_in_current_part = 0;
-		pw->row_groups_in_current_part = 0;
-	}
-
-	return pw;
+	pw->received_rows += rows;
 }
 
 void AlignedCopyGlobalState::FinalizePartition(PartitionWriter &pw) {
@@ -343,6 +290,15 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 	if (bind_data->partition_col_pos == DConstants::INVALID_INDEX) {
 		throw BinderException("aligned COPY: partition column '%s' not found in the query columns",
 		                     bind_data->partition_col_name);
+	}
+
+	// Find symbol column position in the input (for per-partition sort).
+	auto &symbol_col_name = index_group.symbol_column;
+	for (idx_t i = 0; i < names.size(); i++) {
+		if (StringUtil::CIEquals(names[i], symbol_col_name)) {
+			bind_data->symbol_col_pos = i;
+			break;
+		}
 	}
 
 	// Find the group plan (if the group exists with parts).
@@ -485,25 +441,6 @@ static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_dat
 
 	auto &partitions = local_state.part_data->GetPartitions();
 
-	// Check if input already matches group schema (identity map + types match).
-	// When true, the projection uses zero-copy Reference instead of full Copy.
-	bool identity_map = true;
-	for (idx_t c = 0; c < bind_data.input_col_map.size(); c++) {
-		if (bind_data.input_col_map[c] != c) {
-			identity_map = false;
-			break;
-		}
-	}
-	bool types_match = identity_map;
-	if (types_match) {
-		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
-			if (bind_data.input_types[c] != bind_data.sql_types[c]) {
-				types_match = false;
-				break;
-			}
-		}
-	}
-
 	for (idx_t i = 0; i < partitions.size(); i++) {
 		if (!partitions[i] || partitions[i]->Count() == 0) {
 			continue;
@@ -540,31 +477,249 @@ static void AlignedCopyCombine(ExecutionContext &context, FunctionData &bind_dat
 			projected.Append(proj_append, mapped);
 		}
 
-		PartitionWriter *pw = global_state.Flush(partition_key, projected,
-		                                            &local_state.writer_cache);
-		if (pw) {
-			pw->received_rows += rows;
-		}
+		// Accumulate the projected data into the global per-partition
+		// collection.  Sorting + flushing happens in Finalize, after all
+		// threads' data is merged, to guarantee global (symbol, date) order
+		// across all threads.
+		global_state.Accumulate(partition_key, projected, rows);
 	}
 }
 
 //===----------------------------------------------------------------------===//
-// Finalize: finalize all partition writers.  The destructor does nothing
-// — all business logic lives here.
+// Finalize: sort + flush each partition's accumulated collection.
+//
+// For each partition:
+//   1. Sort the accumulated ColumnDataCollection by (symbol, date) ascending.
+//   2. Split into Row Group-sized chunks (131072 rows) and flush each to
+//      ParquetWriter.
+//   3. Rotate part files at row_groups_per_file (8) boundary.
+//   4. Finalize the writer + rename files.
+//   5. Verify accounting (received == written).
+//
+// Sorting is done here (not in Combine) because data from different threads
+// is accumulated into the same partition collection — sorting must happen
+// on the merged data to guarantee global (symbol, date) order.
 //===----------------------------------------------------------------------===//
+
+// Sort a ColumnDataCollection by (symbol_col, date_col) ascending.
+// Writes sorted rows into the output collection.  Uses an index-based
+// approach: collects sort keys, sorts an index array, then copies rows
+// in sorted order.
+static void SortPartitionCollection(ClientContext &context,
+                                    const AlignedCopyBindData &bind_data,
+                                    ColumnDataCollection &input,
+                                    ColumnDataCollection &output,
+                                    idx_t symbol_col, idx_t date_col) {
+	idx_t total_rows = input.Count();
+
+	// Collect sort keys.
+	vector<string> symbols;
+	vector<int64_t> dates;
+	symbols.reserve(total_rows);
+	dates.reserve(total_rows);
+
+	// Snapshot all chunks into owning DataChunks for random access.
+	vector<unique_ptr<DataChunk>> chunk_snapshots;
+	for (auto &chunk : input.Chunks()) {
+		UnifiedVectorFormat sym_fmt, date_fmt;
+		chunk.data[symbol_col].ToUnifiedFormat(chunk.size(), sym_fmt);
+		chunk.data[date_col].ToUnifiedFormat(chunk.size(), date_fmt);
+		bool date_is_ts = chunk.data[date_col].GetType().id() == LogicalTypeId::TIMESTAMP;
+		for (idx_t r = 0; r < chunk.size(); r++) {
+			auto si = sym_fmt.sel->get_index(r);
+			if (sym_fmt.validity.RowIsValid(si)) {
+				auto &sv = UnifiedVectorFormat::GetData<string_t>(sym_fmt)[si];
+				symbols.emplace_back(sv.GetData(), sv.GetSize());
+			} else {
+				symbols.emplace_back();
+			}
+			auto di = date_fmt.sel->get_index(r);
+			if (date_is_ts) {
+				dates.push_back(UnifiedVectorFormat::GetData<int64_t>(date_fmt)[di]);
+			} else {
+				dates.push_back(static_cast<int64_t>(UnifiedVectorFormat::GetData<int32_t>(date_fmt)[di]));
+			}
+		}
+		auto snap = make_uniq<DataChunk>();
+		snap->Initialize(context, bind_data.sql_types);
+		snap->SetCardinality(chunk.size());
+		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+			VectorOperations::Copy(chunk.data[c], snap->data[c], chunk.size(), 0, 0);
+		}
+		chunk_snapshots.push_back(std::move(snap));
+	}
+
+	// Build sorted index array.
+	vector<idx_t> sorted_idx(total_rows);
+	iota(sorted_idx.begin(), sorted_idx.end(), 0);
+	sort(sorted_idx.begin(), sorted_idx.end(), [&](idx_t a, idx_t b) {
+		if (symbols[a] != symbols[b]) {
+			return symbols[a] < symbols[b];
+		}
+		return dates[a] < dates[b];
+	});
+
+	// Build row location map: row_idx → (chunk_idx, offset_in_chunk).
+	vector<pair<idx_t, idx_t>> row_locations(total_rows);
+	{
+		idx_t row_idx = 0;
+		idx_t chunk_idx = 0;
+		for (auto &snap : chunk_snapshots) {
+			for (idx_t r = 0; r < snap->size(); r++) {
+				row_locations[row_idx] = {chunk_idx, r};
+				row_idx++;
+			}
+			chunk_idx++;
+		}
+	}
+
+	// Build sorted output by copying rows in sorted order.
+	ColumnDataAppendState sort_append;
+	output.InitializeAppend(sort_append);
+
+	idx_t batch_start = 0;
+	while (batch_start < total_rows) {
+		idx_t batch_size = 0;
+		SelectionVector sel(STANDARD_VECTOR_SIZE);
+		idx_t src_chunk_idx = DConstants::INVALID_INDEX;
+		while (batch_start + batch_size < total_rows &&
+		       batch_size < STANDARD_VECTOR_SIZE) {
+			idx_t row = sorted_idx[batch_start + batch_size];
+			auto &loc = row_locations[row];
+			if (src_chunk_idx == DConstants::INVALID_INDEX) {
+				src_chunk_idx = loc.first;
+			} else if (loc.first != src_chunk_idx) {
+				break;
+			}
+			sel.set_index(batch_size, loc.second);
+			batch_size++;
+		}
+
+		DataChunk sort_chunk;
+		sort_chunk.Initialize(context, bind_data.sql_types);
+		sort_chunk.SetCardinality(batch_size);
+		auto &src = *chunk_snapshots[src_chunk_idx];
+		for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+			VectorOperations::Copy(src.data[c], sort_chunk.data[c], sel, batch_size, 0, 0);
+		}
+		output.Append(sort_append, sort_chunk);
+		batch_start += batch_size;
+	}
+}
 
 static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_p, GlobalFunctionData &gstate) {
 	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
 	auto &global_state = gstate.Cast<AlignedCopyGlobalState>();
 
+	// Determine if sorting is needed (index group with symbol + date columns).
+	idx_t proj_symbol_col = DConstants::INVALID_INDEX;
+	idx_t proj_date_col = DConstants::INVALID_INDEX;
+	if (bind_data.symbol_col_pos != DConstants::INVALID_INDEX) {
+		for (idx_t c = 0; c < bind_data.input_col_map.size(); c++) {
+			if (bind_data.input_col_map[c] == bind_data.symbol_col_pos) {
+				proj_symbol_col = c;
+			}
+			if (bind_data.input_col_map[c] == bind_data.partition_col_pos) {
+				proj_date_col = c;
+			}
+		}
+	}
+	bool need_sort = (proj_symbol_col != DConstants::INVALID_INDEX &&
+	                 proj_date_col != DConstants::INVALID_INDEX);
+
+	static constexpr idx_t RG_SIZE = 131072;
+
 	for (auto &kv : global_state.writers) {
 		auto &pw = *kv.second;
+
+		if (!pw.accumulated || pw.accumulated->Count() == 0) {
+			// No data for this partition — skip.
+			continue;
+		}
+
+		// Sort the accumulated collection by (symbol, date).
+		ColumnDataCollection *flush_col = pw.accumulated;
+		ColumnDataCollection sorted(context, bind_data.sql_types);
+		if (need_sort) {
+			SortPartitionCollection(context, bind_data, *pw.accumulated, sorted,
+			                        proj_symbol_col, proj_date_col);
+			flush_col = &sorted;
+		}
+
+		// Create the ParquetWriter (deferred from Accumulate).
+		string file_path = pw.part_dir + "/" + FormatPartName(0, 0);
+		pw.writer = CreateParquetWriter(context, global_state.fs, file_path,
+		                                bind_data.column_names, bind_data.sql_types);
+
+		// Flush in Row Group-sized chunks.
+		idx_t rows_flushed = 0;
+		idx_t total = flush_col->Count();
+		while (rows_flushed < total) {
+			// Build a chunk of up to RG_SIZE rows from the sorted collection.
+			ColumnDataCollection rg_collection(context, bind_data.sql_types);
+			ColumnDataAppendState rg_append;
+			rg_collection.InitializeAppend(rg_append);
+
+			idx_t remaining = total - rows_flushed;
+			idx_t rg_rows = MinValue<idx_t>(remaining, RG_SIZE);
+
+			// Iterate all chunks, copying only rows in the [rows_flushed,
+			// rows_flushed + rg_rows) window.  This is O(n) per RG but the
+			// total is O(n * num_RGs) which is acceptable for the write path.
+			idx_t rows_collected = 0;
+			for (auto &chunk : flush_col->Chunks()) {
+				idx_t chunk_start = rows_collected;
+				idx_t chunk_end = chunk_start + chunk.size();
+				// Skip chunks entirely before the window.
+				if (chunk_end <= rows_flushed) {
+					rows_collected = chunk_end;
+					continue;
+				}
+				// Skip chunks entirely after the window.
+				if (chunk_start >= rows_flushed + rg_rows) {
+					break;
+				}
+				// Copy the overlapping rows.
+				idx_t copy_from = (rows_flushed > chunk_start) ? (rows_flushed - chunk_start) : 0;
+				idx_t copy_to = MinValue<idx_t>(chunk.size(), rows_flushed + rg_rows - chunk_start);
+				idx_t copy_count = copy_to - copy_from;
+				if (copy_count > 0) {
+					DataChunk rg_chunk;
+					rg_chunk.Initialize(context, bind_data.sql_types);
+					rg_chunk.SetCardinality(copy_count);
+					for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+						VectorOperations::Copy(chunk.data[c], rg_chunk.data[c], copy_to, copy_from, 0);
+					}
+					rg_collection.Append(rg_append, rg_chunk);
+				}
+				rows_collected = chunk_end;
+			}
+
+			pw.writer->Flush(rg_collection, pw.transform_data);
+			pw.rows_in_current_part += rg_rows;
+			pw.row_groups_in_current_part++;
+			rows_flushed += rg_rows;
+
+			// Rotate part file at boundary.
+			if (pw.row_groups_in_current_part >= bind_data.row_groups_per_file) {
+				pw.writer->Finalize();
+				global_state.RenamePartFile(pw);
+				pw.written_rows += pw.rows_in_current_part;
+				pw.part_index++;
+				string next_path = pw.part_dir + "/" + FormatPartName(pw.part_index, 0);
+				pw.writer = CreateParquetWriter(context, global_state.fs, next_path,
+				                                bind_data.column_names, bind_data.sql_types);
+				pw.rows_in_current_part = 0;
+				pw.row_groups_in_current_part = 0;
+			}
+		}
+
+		// Finalize the last (partial) part file.
 		if (pw.writer) {
-			// FinalizePartition acquires its own per-partition lock;
-			// different partitions can finalize in parallel.
 			global_state.FinalizePartition(pw);
 		}
-		// Accounting verification: every received row must be written.
+
+		// Accounting verification.
 		idx_t received = pw.received_rows.load();
 		idx_t written = pw.written_rows.load();
 		if (received != written) {
