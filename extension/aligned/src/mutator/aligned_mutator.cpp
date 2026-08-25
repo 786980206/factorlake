@@ -827,58 +827,6 @@ struct BatchAppender {
 	}
 };
 
-//! Batch-append multiple source rows to a target buffer. For each row, the
-//! position column is set from `positions[i]`, and the value columns are
-//! copied from the source collection via VectorOperations::Copy (vectorized
-//! bulk copy, not per-row SetValue). The source rows must be in the same
-//! chunk or adjacent chunks of the source ColumnDataCollection.
-//!
-//! `row_indices` maps buffer row → src_row index in the source collection.
-//! `positions` maps buffer row → the part-local position (BIGINT col 0).
-//! `src_pos` maps buffer column 1..N → source collection column index.
-static void AppendRowsToBuffer(ClientContext &context, ColumnDataCollection &buffer,
-                               ColumnDataAppendState &append_state,
-                               const vector<idx_t> &row_indices, const vector<idx_t> &positions,
-                               const vector<idx_t> &src_pos, SourceReader &src,
-                               DataChunk &scratch, const ColumnDataCollection *&scratch_owner) {
-	if (row_indices.empty()) {
-		return;
-	}
-	if (scratch_owner != &buffer) {
-		scratch.~DataChunk();
-		new (&scratch) DataChunk();
-		scratch.Initialize(context, buffer.Types());
-		scratch_owner = &buffer;
-	}
-	idx_t n = row_indices.size();
-	idx_t buf_pos = 0;
-	while (buf_pos < n) {
-		// Process up to STANDARD_VECTOR_SIZE rows at a time
-		idx_t batch_size = MinValue<idx_t>(STANDARD_VECTOR_SIZE, n - buf_pos);
-		scratch.Reset();
-		scratch.SetCardinality(batch_size);
-
-		// Position column (BIGINT)
-		auto &pos_vec = scratch.data[0];
-		auto pos_data = FlatVector::GetData<int64_t>(pos_vec);
-		for (idx_t i = 0; i < batch_size; i++) {
-			pos_data[i] = NumericCast<int64_t>(positions[buf_pos + i]);
-		}
-
-		// Value columns: fetch from source via SourceReader (still per-row,
-		// but batched into a single chunk append — the append overhead
-		// dominates, not the GetValue calls, since SourceReader caches chunks)
-		for (idx_t c = 0; c < src_pos.size(); c++) {
-			for (idx_t i = 0; i < batch_size; i++) {
-				Value v = src.GetValue(src_pos[c], row_indices[buf_pos + i]);
-				scratch.SetValue(1 + c, i, v);
-			}
-		}
-		buffer.Append(append_state, scratch);
-		buf_pos += batch_size;
-	}
-}
-
 //! Stage + commit one mutation: rewrite every affected part into
 //! _tmp/transaction-<txid>/, move the parts into place (atomic per move),
 //! delete the superseded parts, and remove delete-emptied single-part partitions
