@@ -58,6 +58,16 @@ struct AlignedCopyBindData : public TableFunctionData {
 	vector<LogicalType> input_types;  // types of all input columns
 
 	bool is_timestamp = false;  // partition column is TIMESTAMP (not DATE)
+
+	// For non-index groups whose column schema excludes symbol/date, we
+	// append symbol + date as hidden trailing columns in the buffer CDC
+	// so SortAndFlushPartition can sort by (symbol, date). They are stripped
+	// before flushing to ParquetWriter.
+	bool needs_hidden_sort_keys = false;
+	idx_t hidden_symbol_input_col = DConstants::INVALID_INDEX;  // input col index
+	idx_t hidden_date_input_col = DConstants::INVALID_INDEX;    // input col index
+	LogicalType hidden_symbol_type;
+	LogicalType hidden_date_type;
 };
 
 //===----------------------------------------------------------------------===//

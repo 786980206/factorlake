@@ -241,15 +241,20 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 
 	// Merge all buffers into one ColumnDataCollection.
 	auto t_merge = std::chrono::steady_clock::now();
-	auto merged = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+	vector<LogicalType> merged_types = bind_data.sql_types;
+	if (bind_data.needs_hidden_sort_keys) {
+		merged_types.push_back(bind_data.hidden_symbol_type);
+		merged_types.push_back(bind_data.hidden_date_type);
+	}
+	auto merged = make_uniq<ColumnDataCollection>(context, merged_types);
 	ColumnDataAppendState append_state;
 	merged->InitializeAppend(append_state);
 	vector<column_t> all_cols;
-	for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+	for (idx_t c = 0; c < merged_types.size(); c++) {
 		all_cols.push_back(c);
 	}
 	DataChunk merge_chunk;
-	merge_chunk.Initialize(context, bind_data.sql_types);
+	merge_chunk.Initialize(context, merged_types);
 	for (auto &buf : buffers) {
 		if (buf && buf->Count() > 0) {
 			ColumnDataScanState scan_state;
@@ -264,14 +269,20 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	int64_t merge_us = elapsed_us(t_merge);
 	if (g_timing_enabled) g_merge_us.fetch_add(merge_us);
 
-	// Find symbol and date column indices in the output schema.
+	// Find symbol and date column indices in the merged CDC.
+	// For groups with hidden sort keys, they are the last 2 columns.
 	idx_t symbol_col = DConstants::INVALID_INDEX;
 	idx_t date_col = DConstants::INVALID_INDEX;
-	for (idx_t c = 0; c < bind_data.column_names.size(); c++) {
-		if (StringUtil::CIEquals(bind_data.column_names[c], "symbol")) {
-			symbol_col = c;
-		} else if (StringUtil::CIEquals(bind_data.column_names[c], bind_data.partition_col_name)) {
-			date_col = c;
+	if (bind_data.needs_hidden_sort_keys) {
+		symbol_col = bind_data.sql_types.size();
+		date_col = bind_data.sql_types.size() + 1;
+	} else {
+		for (idx_t c = 0; c < bind_data.column_names.size(); c++) {
+			if (StringUtil::CIEquals(bind_data.column_names[c], "symbol")) {
+				symbol_col = c;
+			} else if (StringUtil::CIEquals(bind_data.column_names[c], bind_data.partition_col_name)) {
+				date_col = c;
+			}
 		}
 	}
 
@@ -294,20 +305,21 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	sym_lookup.reserve(2048);
 	int32_t next_idx = 0;
 
-	vector<column_t> sort_cols = {symbol_col, date_col};
+	// Scan ALL columns (not a column subset) to avoid InitializeScan
+	// column_id issues, then index into chunk.data[symbol_col]/[date_col].
 	ColumnDataScanState scan_state;
-	merged->InitializeScan(scan_state, sort_cols);
+	merged->InitializeScan(scan_state, all_cols);
 	DataChunk chunk;
 	merged->InitializeScanChunk(scan_state, chunk);
 
 	idx_t row_offset = 0;
 	while (merged->Scan(scan_state, chunk)) {
-		auto &sym_vec = chunk.data[0];
+		auto &sym_vec = chunk.data[symbol_col];
 		UnifiedVectorFormat sym_fmt;
 		sym_vec.ToUnifiedFormat(chunk.size(), sym_fmt);
 		auto sym_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
 
-		auto &date_vec = chunk.data[1];
+		auto &date_vec = chunk.data[date_col];
 		UnifiedVectorFormat date_fmt;
 		date_vec.ToUnifiedFormat(chunk.size(), date_fmt);
 
@@ -375,12 +387,14 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	// Build sorted collection by re-appending rows in sorted order.
 	// Scan merged into cached chunks, then output rows in perm order
 	// (perm[i] = source row index of the i-th output row).
+	// The sorted CDC contains only group schema columns — hidden sort keys
+	// are stripped (copy loop only copies sql_types.size() columns).
 	auto t_build = std::chrono::steady_clock::now();
 	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
 	ColumnDataAppendState sorted_append;
 	sorted->InitializeAppend(sorted_append);
 
-	// Cache all source chunks.
+	// Cache all source chunks (with hidden sort keys for sorting reference).
 	ColumnDataScanState full_scan;
 	merged->InitializeScan(full_scan, all_cols);
 	DataChunk full_chunk;
@@ -390,7 +404,7 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	idx_t total_cached = 0;
 	while (merged->Scan(full_scan, full_chunk)) {
 		auto cached = make_uniq<DataChunk>();
-		cached->Initialize(context, bind_data.sql_types);
+		cached->Initialize(context, merged_types);
 		cached->Reference(full_chunk);
 		cached->SetCardinality(full_chunk.size());
 		total_cached += full_chunk.size();
@@ -656,6 +670,28 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 		bind_data->is_timestamp = bind_data->input_types[bind_data->partition_col_pos].id() == LogicalTypeId::TIMESTAMP;
 	}
 
+	// Check if this group's output schema includes symbol and date columns.
+	// If not (non-index group), we need hidden sort-key columns appended to
+	// the buffer CDC so SortAndFlushPartition can sort by (symbol, date).
+	bind_data->needs_hidden_sort_keys = true;
+	for (idx_t c = 0; c < bind_data->column_names.size(); c++) {
+		if (StringUtil::CIEquals(bind_data->column_names[c], "symbol") ||
+		    StringUtil::CIEquals(bind_data->column_names[c], bind_data->partition_col_name)) {
+			bind_data->needs_hidden_sort_keys = false;
+		}
+	}
+	if (bind_data->needs_hidden_sort_keys) {
+		bind_data->hidden_symbol_input_col = bind_data->symbol_col_pos;
+		bind_data->hidden_date_input_col = bind_data->partition_col_pos;
+		if (bind_data->hidden_symbol_input_col < bind_data->input_types.size() &&
+		    bind_data->hidden_date_input_col < bind_data->input_types.size()) {
+			bind_data->hidden_symbol_type = bind_data->input_types[bind_data->hidden_symbol_input_col];
+			bind_data->hidden_date_type = bind_data->input_types[bind_data->hidden_date_input_col];
+		} else {
+			bind_data->needs_hidden_sort_keys = false;
+		}
+	}
+
 	return std::move(bind_data);
 }
 
@@ -681,8 +717,15 @@ static unique_ptr<GlobalFunctionData> AlignedCopyInitializeGlobal(ClientContext 
 
 static unique_ptr<LocalFunctionData> AlignedCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data_p) {
 	auto &bind_data = bind_data_p.Cast<AlignedCopyBindData>();
-	auto result = make_uniq<AlignedCopyLocalState>(context.client, bind_data.sql_types);
-	result->projected_chunk.Initialize(context.client, bind_data.sql_types);
+	// The projected chunk includes group schema columns + hidden sort keys
+	// (symbol, date) for non-index groups.
+	vector<LogicalType> chunk_types = bind_data.sql_types;
+	if (bind_data.needs_hidden_sort_keys) {
+		chunk_types.push_back(bind_data.hidden_symbol_type);
+		chunk_types.push_back(bind_data.hidden_date_type);
+	}
+	auto result = make_uniq<AlignedCopyLocalState>(context.client, chunk_types);
+	result->projected_chunk.Initialize(context.client, chunk_types);
 	return std::move(result);
 }
 
@@ -703,6 +746,7 @@ static unique_ptr<LocalFunctionData> AlignedCopyInitializeLocal(ExecutionContext
 
 // Project a contiguous range of rows from input to the group-schema
 // projected_chunk. Copies columns per input_col_map, casting when needed.
+// If needs_hidden_sort_keys, also appends symbol + date columns for sorting.
 static void ProjectRows(ClientContext &ctx, const AlignedCopyBindData &bind_data,
                         DataChunk &input, idx_t start_row, idx_t count,
                         DataChunk &output) {
@@ -721,6 +765,22 @@ static void ProjectRows(ClientContext &ctx, const AlignedCopyBindData &bind_data
 			Vector temp(src_vec.GetType(), count);
 			VectorOperations::Copy(src_vec, temp, sel, count, 0, 0);
 			VectorOperations::Cast(ctx, temp, tgt_vec, count);
+		}
+	}
+	// Append hidden sort-key columns (symbol + date) for non-index groups.
+	if (bind_data.needs_hidden_sort_keys) {
+		idx_t base = bind_data.sql_types.size();
+		auto &sym_src = input.data[bind_data.hidden_symbol_input_col];
+		auto &sym_tgt = output.data[base];
+		VectorOperations::Copy(sym_src, sym_tgt, sel, count, 0, 0);
+		auto &date_src = input.data[bind_data.hidden_date_input_col];
+		auto &date_tgt = output.data[base + 1];
+		if (date_src.GetType() == date_tgt.GetType()) {
+			VectorOperations::Copy(date_src, date_tgt, sel, count, 0, 0);
+		} else {
+			Vector temp(date_src.GetType(), count);
+			VectorOperations::Copy(date_src, temp, sel, count, 0, 0);
+			VectorOperations::Cast(ctx, temp, date_tgt, count);
 		}
 	}
 }
@@ -768,7 +828,12 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 
 		auto buf_it = local_state.rg_buffers.find(pk);
 		if (buf_it == local_state.rg_buffers.end()) {
-			auto buf = make_uniq<ColumnDataCollection>(context.client, bind_data.sql_types);
+			vector<LogicalType> buf_types = bind_data.sql_types;
+			if (bind_data.needs_hidden_sort_keys) {
+				buf_types.push_back(bind_data.hidden_symbol_type);
+				buf_types.push_back(bind_data.hidden_date_type);
+			}
+			auto buf = make_uniq<ColumnDataCollection>(context.client, buf_types);
 			auto app = make_uniq<ColumnDataAppendState>();
 			buf->InitializeAppend(*app);
 			local_state.rg_buffers[pk] = std::move(buf);
