@@ -6,6 +6,16 @@
 
 namespace duckdb {
 
+//! Scan state is organized in three tiers (all defined in aligned_scan.cpp):
+//!
+//! 1. AlignedTableBindData (bind time): the TablePlan, output schema (names/types),
+//!    total row count, and the virtual partition column config.
+//! 2. AlignedScanGlobalState (global, per-query): row-space intervals after
+//!    partition pruning, shared cursor, per-group open parts/readers, and
+//!    compiled filter → group mappings.
+//! 3. AlignedScanLocalState (local, per-thread): per-group scan cursors
+//!    (rg_window, carry buffer) and the scratch DataChunk for filter paths.
+
 //! Bind data of aligned_scan(): the built table plan plus the resolved output
 //! schema. Defined here so catalog integration (AlignedTableEntry::GetScanFunction)
 //! can build/cast it too.

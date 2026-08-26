@@ -3,6 +3,8 @@
 #include "duckdb.hpp"
 #include "duckdb/common/file_system.hpp"
 
+#include <cstring>
+
 namespace duckdb {
 
 //! Shared transaction ID counter (process-wide). Used by aligned_create,
@@ -34,7 +36,7 @@ public:
 		}
 		auto handle = fs.OpenFile(lock_path, FileFlags::FILE_FLAGS_FILE_CREATE | FileFlags::FILE_FLAGS_WRITE);
 		const char *msg = "locked\n";
-		handle->Write(const_cast<char *>(msg), 7);
+		handle->Write(const_cast<char *>(msg), std::strlen(msg));
 		handle->Close();
 		locked = true;
 	}

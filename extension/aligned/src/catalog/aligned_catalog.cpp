@@ -108,12 +108,11 @@ TableStorageInfo AlignedTableEntry::GetStorageInfo(ClientContext &context) {
 // AlignedSchemaEntry
 //===----------------------------------------------------------------------===//
 AlignedSchemaEntry::AlignedSchemaEntry(Catalog &catalog, const string &schema_name)
-    : SchemaCatalogEntry(catalog, [] {
+    : SchemaCatalogEntry(catalog, [&] {
 	      CreateSchemaInfo info;
-	      info.schema = "main";
+	      info.schema = schema_name;
 	      return info;
       }()) {
-	(void)schema_name;
 }
 
 void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
