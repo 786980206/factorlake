@@ -237,7 +237,7 @@ static bool IsConstantDateFilter(const TableFilter &filter, ExpressionType &cmp,
 		return false;
 	}
 	if (cf.constant.type().id() == LogicalTypeId::TIMESTAMP) {
-		// v6: TIMESTAMP constants are compared on their date part (the
+		// TIMESTAMP constants are compared on their date part (the
 		// partition source column may be a TIMESTAMP field).
 		cmp = cf.comparison_type;
 		value = Timestamp::GetDate(cf.constant.GetValue<timestamp_t>());

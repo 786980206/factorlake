@@ -481,7 +481,7 @@ static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
 		}
 
 		// Group schema = the group's LAST part (rel-path order) — ONE footer
-		// read per group (v6: row counts never come from footers).
+		// read per group (row counts come from file names, not footers).
 		if (has_parts) {
 			auto &last_part = group.parts.back();
 			auto last_footer = ReadPartFooterInfo(context, last_part.path);
