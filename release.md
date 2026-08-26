@@ -2181,3 +2181,57 @@ Bug、死代码、性能问题和陈旧注释。
 - SQLLogicTest：246/246 PASS
 - PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
 
+
+## 2026-08-28 — aligned_scan group_filter 功能
+
+### 新增
+
+- **ligned_scan group_filter 参数**：新增可选第 2 位置参数，过滤 plan.groups
+  仅保留 index + 匹配的非 index 组。支持逗号分隔多组名（如
+  'factor/alpha101,fieldset/ma'）。index 组始终保留。
+- 注册为 TableFunctionSet 两个 overload（1-arg {VARCHAR} + 2-arg
+  {VARCHAR, VARCHAR}）——DuckDB 表函数不支持可选位置参数。
+
+### 测试
+
+- 	est/aligned/aligned_scan_group.test：14 个新测试（无过滤、单组、逗号分隔、
+  index-only、错误场景）
+
+### 测试结果
+
+- SQLLogicTest：260/260 PASS（246 + 14 新）
+- PS 套件：全 PASS
+
+
+## 2026-08-29 — 限定列名别名 (lv1.lv2.col) + aligned_meta column_mapping
+
+### 新增
+
+- **ligned_scan 限定列名别名**：非 index 唯一列同时注册裸名和
+  lv1.lv2.col 限定别名。重名列继续只用限定名（跨组歧义）。
+  查询限定列使用 DuckDB COLUMNS('lv1.lv2.col') 正则引用——DuckDB SQL
+  解析器将 . 视为 schema.table.column 分隔符，带点列名不能用标识符语法
+  直接引用，需通过 COLUMNS() regex 函数。
+- **ligned_meta column_mapping 字段**：新增输出列
+  column_mapping（格式 are_name:lv1.lv2.bare_name;...），映射每个非 index
+  唯一列的裸名到限定名。index 列和跨组重名列不包含在映射中。
+
+### 实现
+
+- manifest.hpp: GroupPlan 新增 output_positions_qualified 字段
+- ligned_scan.cpp: ResolveColumnTypes 注册限定别名；OpenPart 处理双输出
+  位置（裸名+限定名，同一 parquet 列只读一次后复制）；NullFillGroupRange、
+  group_active 判定、filter mapping 均支持限定位置
+- ligned_meta.cpp: 新增 column_mapping 输出字段 + string_util.hpp include
+- AlignedGroupScanState: 新增 dup_out_positions（pair<source_out, dup_out>）
+  处理同一 parquet 列复制到多个输出位置
+
+### 测试
+
+- 	est/aligned/aligned_qualified.test：13 个新测试（裸名、COLUMNS() 限定名、
+  COLUMNS() regex、aligned_meta column_mapping）
+
+### 测试结果
+
+- SQLLogicTest：273/273 PASS（260 + 13 新）
+- PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
