@@ -568,7 +568,11 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	// have a different sort order than new data).
 	auto t_extract = std::chrono::steady_clock::now();
 
-	bool already_sorted = !has_existing;
+	// Only check already_sorted when there's a single buffer (single-threaded
+	// source — morsels arrive in order). With parallel source readers
+	// (PARALLEL_COPY_TO_FILE, multiple buffers), morsels arrive out of order,
+	// so the check always fails and wastes time scanning all rows.
+	bool already_sorted = !has_existing && buffers.size() <= 1;
 	if (already_sorted) {
 		// Scan symbol/date to verify the input is already sorted by
 		// (symbol, date). Use integer encoding for fast comparison.
