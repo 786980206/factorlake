@@ -117,6 +117,8 @@ void AlignedCopyGlobalState::PushSentinels() {
 		}
 		workers[i]->queue_cv.notify_one();
 	}
+	// Prevent the destructor from pushing sentinels again into dead queues.
+	num_workers = 0;
 }
 
 void AlignedCopyGlobalState::JoinThreads() {
@@ -379,8 +381,9 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 	while (true) {
 		group_cols->Scan(group_scan, group_chunk);
 		key_cols->Scan(key_scan, key_chunk);
-		// Use the minimum of both chunk sizes — if one CDC is exhausted
-		// before the other, stop (they should be the same size).
+		// Both CDCs have the same row count, so chunk boundaries align.
+		// If one is exhausted before the other, stop.
+		D_ASSERT(group_chunk.size() == key_chunk.size());
 		idx_t rows = std::min(group_chunk.size(), key_chunk.size());
 		if (rows == 0) {
 			break;
@@ -577,11 +580,13 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 
 	// Scan ALL columns (not a column subset) to avoid InitializeScan
 	// column_id issues, then index into chunk.data[symbol_col]/[date_col].
+	// We also cache each chunk here so we don't need a second scan pass.
 	ColumnDataScanState scan_state;
 	merged->InitializeScan(scan_state, all_cols);
 	DataChunk chunk;
 	merged->InitializeScanChunk(scan_state, chunk);
 
+	vector<unique_ptr<DataChunk>> source_chunks;
 	idx_t row_offset = 0;
 	while (merged->Scan(scan_state, chunk)) {
 		auto &sym_vec = chunk.data[symbol_col];
@@ -618,6 +623,12 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 				date_values[row_offset + i] = static_cast<int64_t>(dd[di]);
 			}
 		}
+		// Cache this chunk for the build phase (avoids a second scan).
+		auto cached = make_uniq<DataChunk>();
+		cached->Initialize(context, merged_types);
+		cached->Reference(chunk);
+		cached->SetCardinality(chunk.size());
+		source_chunks.push_back(std::move(cached));
 		row_offset += chunk.size();
 	}
 
@@ -689,33 +700,13 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	}
 
 	// Build sorted collection by re-appending rows in sorted order.
-	// Scan merged into cached chunks, then output rows in perm order
-	// (perm[i] = source row index of the i-th output row).
-	// The sorted CDC contains only group schema columns — hidden sort keys
-	// are stripped (copy loop only copies sql_types.size() columns).
+	// source_chunks was cached during the extract pass above — no second scan.
 	auto t_build = std::chrono::steady_clock::now();
 	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
 	ColumnDataAppendState sorted_append;
 	sorted->InitializeAppend(sorted_append);
 
-	// Cache all source chunks (with hidden sort keys for sorting reference).
-	ColumnDataScanState full_scan;
-	merged->InitializeScan(full_scan, all_cols);
-	DataChunk full_chunk;
-	merged->InitializeScanChunk(full_scan, full_chunk);
-
-	vector<unique_ptr<DataChunk>> source_chunks;
-	idx_t total_cached = 0;
-	while (merged->Scan(full_scan, full_chunk)) {
-		auto cached = make_uniq<DataChunk>();
-		cached->Initialize(context, merged_types);
-		cached->Reference(full_chunk);
-		cached->SetCardinality(full_chunk.size());
-		total_cached += full_chunk.size();
-		source_chunks.push_back(std::move(cached));
-	}
-
-	// Now output rows in perm order. For each batch of STANDARD_VECTOR_SIZE
+	// Precompute chunk boundaries.
 	// consecutive perm entries, determine which source chunk each row is in,
 	// build a SelectionVector, and copy.
 	DataChunk out_chunk;

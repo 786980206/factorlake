@@ -1993,7 +1993,7 @@ COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index', MERGE
 - 注册：`extension/aligned/src/extension.cpp`
 - CMakeLists：`extension/aligned/CMakeLists.txt`
 - schema 列去重：跨组同名列只出现一次（index 组优先）
-- SQLLogicTest：271/271 PASS
+- SQLLogicTest：246/246 PASS
 
 
 ## 2026-08-27 — 删除全部 DML 实现（INSERT/UPDATE/DELETE 路径）
@@ -2038,5 +2038,71 @@ DML 相关测试段。
 ### 测试结果
 
 - SQLLogicTest：246/246 PASS（原 271 中删除了 DML 专用测试）
+- PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
+
+
+## 2026-08-27 — 代码审计修复（scan/copy/catalog 三路审计）
+
+### 背景
+
+DML 删除后对三大代码路径（scan、copy、catalog）做全面审计，修复审计发现的
+Bug、死代码、性能问题和陈旧注释。
+
+### Bug 修复
+
+- **F1: EnsureTablesLoaded 部分加载 Bug**（`aligned_catalog.cpp`）：`tables_loaded=true`
+  原来在加载循环前设置，非 IOException 异常传播后目录永久部分加载。改为循环后设置。
+- **Copy #5: MERGE 路径 NULL validity 未复制**（`aligned_copy.cpp`）：手动
+  DATE↔TIMESTAMP cast 循环未复制 validity mask，NULL 日期被写入垃圾值。添加
+  `FlatVector::Validity::Copy`。
+- **F4: aligned_create_fn TOCTOU**（`aligned_create_fn.cpp`）：`table_exists` 在锁前
+  检查。改为锁后重新 glob 检查。
+- **Copy #9: 数据竞争**（`aligned_copy.cpp`）：`g_timing_enabled`/`g_sink_start` 非
+  原子全局变量多线程写竞争。改用 `std::call_once`。
+
+### 死代码移除
+
+- `AlignedScanGlobalState::rowid_scratch`、`partition_pruned`（写从未读）
+- `OpenPartReader` 未用参数 `table_name`/`group_name`（内联到调用处）
+- `PerPartitionState::finalized`、`StagedTransaction::committed`（写从未读）
+- `AlignedCopyLocalState` 空构造函数参数（改为 default）
+- 未用 `Scan` 返回值 `g_ok`/`k_ok`
+
+### 性能优化
+
+- **FillPartitionColumn 按行 string 分配 → 按 part 缓存**（`aligned_scan.cpp`）：
+  消除 O(rows) 堆分配，每个 chunk 只在 part 切换时分配一次 `string_t`。
+- **SortAndFlushPartition 双重 CDC 扫描合并**（`aligned_copy.cpp`）：extract pass
+  同时缓存 chunk，消除 build pass 的第二次完整扫描，减少 ~50% CDC 遍历。
+- **eval_pk lambda 不必要 string 局部变量**（`aligned_copy.cpp`）：直接写入
+  `cached_pk`。
+- **冗余 partition_col_pos guard 移除**（`aligned_copy.cpp`）。
+- **PushSentinels 幂等**（`aligned_copy.cpp`）：设置 `num_workers=0` 防止析构函数
+  重复推 sentinel 到死队列。
+- **lockstep CDC scan 添加 D_ASSERT**（`aligned_copy.cpp`）：校验两个 CDC chunk
+  大小一致。
+
+### 注释清理
+
+- `aligned_scan.cpp`：23 处 UTF-8 mojibake（`鈥?`→`—`、`搂`→`§`）修复
+- catalog: get_bind_info 注释从 DELETE/UPDATE 改为 binder base-table 识别
+- catalog: catalog_entry 注释移除 Phase 8 标签
+- catalog: MERGE 选项说明从 SQL MERGE 改为 COPY MERGE true
+- catalog: 虚拟分区列注释从 DML binding 改为 binder column resolution
+- scan: DELETE-UPDATE rowid 注释改为 catalog integration
+- scan: "UPDATE re-references key columns" 改为 "SELECT a, a"
+- copy: "LEFT JOIN" 改为 "union with deduplication"
+- partition_resolver.hpp: EvaluatePartitionTemplate 启发式重载已删除说明
+
+### 未修复（已知 gap）
+
+- **F3: DDL 路径缺少 TableWriteLock**：`AlignedCreateTable`/`AlignedCreatePartition`
+  不持有锁。添加锁后 `EnsureTablesLoaded` 在 `CreateTable` 后重新发现时会与
+  `.aligned_write.lock` 文件冲突导致测试失败。暂时搁置——仅影响并发 DDL+COPY
+  场景，现有测试不覆盖。
+
+### 测试结果
+
+- SQLLogicTest：246/246 PASS
 - PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
 
