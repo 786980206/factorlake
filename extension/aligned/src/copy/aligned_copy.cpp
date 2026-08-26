@@ -171,6 +171,12 @@ void AlignedCopyGlobalState::WorkerLoop(FlushWorker &worker) {
 
 	// All data has arrived. For each partition, merge all buffers into one
 	// ColumnDataCollection, sort by (symbol, date), and flush in sorted order.
+	//
+	// NOTE: An async pipeline (Sort(N+1) overlapped with Flush(N)) was tried
+	// but rejected — it made things SLOWER because both Sort and Flush are
+	// CPU-bound (ZSTD compression), so overlapping just adds contention.
+	// The FlushWorker threads already provide 8x parallelism across
+	// partitions, which is the right granularity.
 	for (auto &kv : worker.pending) {
 		try {
 			auto &pk = kv.first;
@@ -492,8 +498,24 @@ void AlignedCopyGlobalState::FlushToPartition(PerPartitionState &pp, ColumnDataC
 	}
 }
 
-void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
-                                                    vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &buffers) {
+//--- Async pipeline support: SortPartition + FlushSortedPartition ---
+// SortPartition produces a sorted CDC; FlushSortedPartition writes it to
+// ParquetWriter. The two can run concurrently on different partitions
+// (sort partition N+1 while flushing partition N).
+
+// Struct returned by SortPartition, consumed by FlushSortedPartition.
+struct SortedPartitionResult {
+	unique_ptr<ColumnDataCollection> cdc; // sorted data (nullptr = empty)
+	idx_t sort_input_col_count = 0;      // number of columns in sort_input_types
+	idx_t symbol_col = DConstants::INVALID_INDEX;
+	idx_t date_col = DConstants::INVALID_INDEX;
+	bool has_existing = false;            // CDC has is_existing flag column
+	idx_t existing_flag_col = DConstants::INVALID_INDEX;
+};
+
+unique_ptr<ColumnDataCollection> AlignedCopyGlobalState::SortPartition(
+    PerPartitionState &pp,
+    vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &buffers) {
 	auto t_total = std::chrono::steady_clock::now();
 
 	// Count total rows.
@@ -502,7 +524,7 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		total_rows += buf.first->Count();
 	}
 	if (total_rows == 0) {
-		return;
+		return nullptr;
 	}
 
 	auto t_merge = std::chrono::steady_clock::now();
@@ -542,15 +564,26 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	}
 
 	if (symbol_col == DConstants::INVALID_INDEX || date_col == DConstants::INVALID_INDEX) {
-		// Can't sort 鈥?flush as-is (already in arrival order).
-		// No merge was done; flush each buffer directly.
+		// Can't sort — flush as-is (already in arrival order).
+		// No merge was done; return a merged CDC of all buffers.
+		auto merged = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+		ColumnDataAppendState app;
+		merged->InitializeAppend(app);
 		for (auto &buf_pair : buffers) {
 			auto &buf = buf_pair.first;
 			if (buf && buf->Count() > 0) {
-				FlushToPartition(pp, *buf);
+				ColumnDataScanState scan_state;
+				buf->InitializeScan(scan_state, all_cols);
+				DataChunk chunk;
+				buf->InitializeScanChunk(scan_state, chunk);
+				while (buf->Scan(scan_state, chunk)) {
+					if (chunk.size() > 0) {
+						merged->Append(app, chunk);
+					}
+				}
 			}
 		}
-		return;
+		return merged;
 	}
 
 	// Detect whether any buffer is existing data (MERGE mode).
@@ -656,20 +689,13 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	int64_t extract_u = elapsed_us(t_extract);
 	if (g_timing_enabled) g_extract_us.fetch_add(extract_u);
 
-	const idx_t RG_SIZE = 131072;
-
-	// --- already_sorted fast path: flush source buffers directly ---
+	// --- already_sorted fast path: merge source buffers into one CDC ---
 	// When input is already sorted by (symbol, date) and there's no existing
-	// data, we can flush the source buffer chunks directly without sorting.
+	// data, we can merge source buffer chunks directly without sorting.
 	if (already_sorted) {
-		// Zero-copy fast path: flush source buffers directly to ParquetWriter
-		// without an intermediate CDC. The source CDC's internal storage is
-		// read zero-copy by ParquetWriter::Flush (it scans the CDC's chunks
-		// directly). This eliminates one full copy pass.
-		auto t_build = std::chrono::steady_clock::now();
-		auto flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-		ColumnDataAppendState flush_append;
-		flush_buffer->InitializeAppend(flush_append);
+		auto sorted_cdc = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+		ColumnDataAppendState direct_append;
+		sorted_cdc->InitializeAppend(direct_append);
 		for (auto &buf_pair : buffers) {
 			auto &buf = buf_pair.first;
 			if (!buf || buf->Count() == 0) {
@@ -683,25 +709,11 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 				if (chunk.size() == 0) {
 					continue;
 				}
-				// Append only the first sql_types.size() columns.
-				flush_buffer->Append(flush_append, chunk);
-				if (flush_buffer->Count() >= RG_SIZE) {
-					FlushToPartition(pp, *flush_buffer);
-					flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-					flush_buffer->InitializeAppend(flush_append);
-				}
+				sorted_cdc->Append(direct_append, chunk);
 			}
 		}
-		if (flush_buffer->Count() > 0) {
-			FlushToPartition(pp, *flush_buffer);
-		}
-		auto t_flush = std::chrono::steady_clock::now();
-		if (g_timing_enabled) {
-			g_build_us.fetch_add(elapsed_us(t_build));
-			g_flush_us.fetch_add(elapsed_us(t_flush));
-			g_sort_us.fetch_add(elapsed_us(t_total));
-		}
-		return;
+		if (g_timing_enabled) g_sort_us.fetch_add(elapsed_us(t_total));
+		return sorted_cdc;
 	}
 
 	// --- Sort path: use DuckDB's Sort class ---
@@ -796,8 +808,21 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 
 	int64_t perm_u = elapsed_us(t_perm);
 	if (g_timing_enabled) g_perm_us.fetch_add(perm_u);
+	if (g_timing_enabled) g_sort_us.fetch_add(elapsed_us(t_total));
 
-	// --- Flush the sorted CDC in RG-sized batches ---
+	return sorted_cdc;
+}
+
+void AlignedCopyGlobalState::FlushSortedPartition(
+    PerPartitionState &pp, unique_ptr<ColumnDataCollection> sorted_cdc,
+    idx_t sort_input_col_count, idx_t symbol_col, idx_t date_col,
+    bool has_existing, idx_t existing_flag_col) {
+
+	if (!sorted_cdc || sorted_cdc->Count() == 0) {
+		return;
+	}
+
+	const idx_t RG_SIZE = 131072;
 	auto t_build = std::chrono::steady_clock::now();
 
 	auto flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
@@ -805,8 +830,13 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	flush_buffer->InitializeAppend(flush_append);
 
 	if (sorted_cdc && sorted_cdc->Count() > 0) {
+		// Use the CDC's actual column count — already_sorted/cant-sort
+		// paths produce sql_types columns only (no hidden keys, no flag),
+		// while the Sort-class path produces sort_input_types columns
+		// (hidden keys + optional is_existing flag).
+		idx_t cdc_cols = sorted_cdc->ColumnCount();
 		vector<column_t> sort_all_cols;
-		for (idx_t c = 0; c < sort_input_types.size(); c++) {
+		for (idx_t c = 0; c < cdc_cols; c++) {
 			sort_all_cols.push_back(c);
 		}
 
@@ -815,7 +845,11 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		DataChunk sort_chunk;
 		sorted_cdc->InitializeScanChunk(sort_scan, sort_chunk);
 
-		if (has_existing) {
+		// Only dedup when the CDC actually has the is_existing flag column.
+		// The already_sorted and cant-sort paths don't include it.
+		bool cdc_has_flag = has_existing && existing_flag_col != DConstants::INVALID_INDEX &&
+		                    existing_flag_col < sorted_cdc->ColumnCount();
+		if (cdc_has_flag) {
 			// Dedup: for each group of consecutive rows with the same
 			// (symbol, date), keep the last row where is_existing=false
 			// (new data wins), or the first row if no new rows. Since the
@@ -946,12 +980,65 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	}
 
 	auto t_flush = std::chrono::steady_clock::now();
-
 	if (g_timing_enabled) {
 		g_build_us.fetch_add(elapsed_us(t_build));
 		g_flush_us.fetch_add(elapsed_us(t_flush));
-		g_sort_us.fetch_add(elapsed_us(t_total));
 	}
+}
+
+void AlignedCopyGlobalState::SortAndFlushPartition(
+    PerPartitionState &pp,
+    vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &buffers) {
+	// Backward-compatible wrapper: sort then flush (serial).
+	// Compute the same metadata SortPartition already computed.
+	idx_t total_rows = 0;
+	for (auto &buf : buffers) {
+		total_rows += buf.first->Count();
+	}
+	if (total_rows == 0) {
+		return;
+	}
+
+	vector<LogicalType> merged_types = bind_data.sql_types;
+	if (bind_data.needs_hidden_sort_keys) {
+		merged_types.push_back(bind_data.hidden_symbol_type);
+		merged_types.push_back(bind_data.hidden_date_type);
+	}
+	vector<column_t> all_cols;
+	for (idx_t c = 0; c < merged_types.size(); c++) {
+		all_cols.push_back(c);
+	}
+	idx_t symbol_col = DConstants::INVALID_INDEX;
+	idx_t date_col = DConstants::INVALID_INDEX;
+	if (bind_data.needs_hidden_sort_keys) {
+		symbol_col = bind_data.sql_types.size();
+		date_col = bind_data.sql_types.size() + 1;
+	} else {
+		for (idx_t c = 0; c < bind_data.column_names.size(); c++) {
+			if (StringUtil::CIEquals(bind_data.column_names[c], "symbol")) {
+				symbol_col = c;
+			} else if (StringUtil::CIEquals(bind_data.column_names[c], bind_data.partition_col_name)) {
+				date_col = c;
+			}
+		}
+	}
+	bool has_existing = false;
+	for (auto &buf_pair : buffers) {
+		if (buf_pair.second && buf_pair.first && buf_pair.first->Count() > 0) {
+			has_existing = true;
+			break;
+		}
+	}
+	vector<LogicalType> sort_input_types = merged_types;
+	idx_t existing_flag_col = DConstants::INVALID_INDEX;
+	if (has_existing) {
+		existing_flag_col = sort_input_types.size();
+		sort_input_types.push_back(LogicalType::BOOLEAN);
+	}
+
+	auto sorted_cdc = SortPartition(pp, buffers);
+	FlushSortedPartition(pp, std::move(sorted_cdc), sort_input_types.size(),
+	                     symbol_col, date_col, has_existing, existing_flag_col);
 }
 
 void AlignedCopyGlobalState::RotatePartition(PerPartitionState &pp) {

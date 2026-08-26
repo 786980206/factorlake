@@ -195,6 +195,23 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 	void ReadExistingPartition(const string &partition_key,
 	                           vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &pending);
 
+	// Helper: sort all pending buffers for a partition by (symbol, date).
+	// Returns a sorted ColumnDataCollection (or nullptr if empty).
+	// Separated from FlushSortedPartition so the two can run concurrently
+	// on different partitions (async pipeline: sort N+1 while flushing N).
+	unique_ptr<ColumnDataCollection> SortPartition(
+	    PerPartitionState &pp,
+	    vector<std::pair<unique_ptr<ColumnDataCollection>, bool>> &buffers);
+
+	// Helper: flush a sorted CDC to the partition's ParquetWriter in
+	// RG-sized batches. Handles dedup when the CDC contains an
+	// is_existing flag column.
+	void FlushSortedPartition(PerPartitionState &pp,
+	                          unique_ptr<ColumnDataCollection> sorted_cdc,
+	                          idx_t sort_input_col_count,
+	                          idx_t symbol_col, idx_t date_col,
+	                          bool has_existing, idx_t existing_flag_col);
+
 	// Helper: merge all pending buffers for a partition into a single
 	// ColumnDataCollection, sort by (symbol, date), deduplicate (new data
 	// wins over existing), and flush.
