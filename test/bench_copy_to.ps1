@@ -18,8 +18,8 @@ $dataRoot = 'D:/proj/factorlake/bench_copy_data'
 Remove-Item -Recurse -Force $dataRoot -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
 
-# Scales: number of symbols (400 symbols x 13159 days = 5.26M rows)
-$scales = @(1, 4, 20, 80, 400)
+# Scales: number of symbols (4000 symbols x 13159 days = 52.6M rows at max)
+$scales = @(100, 500, 1000, 2000, 4000)
 
 $results = @()
 

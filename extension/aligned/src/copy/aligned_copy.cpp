@@ -500,44 +500,24 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		return;
 	}
 
-	// Merge all buffers into one ColumnDataCollection.
-	// Track is_existing per buffer for dedup (new data wins over existing).
+	// OPTIMIZATION: Skip the merge phase. Instead of copying all buffers into a
+	// single merged ColumnDataCollection, we extract sort keys and cache chunks
+	// directly from the source buffers. This eliminates one full O(n) copy.
 	auto t_merge = std::chrono::steady_clock::now();
+
 	vector<LogicalType> merged_types = bind_data.sql_types;
 	if (bind_data.needs_hidden_sort_keys) {
 		merged_types.push_back(bind_data.hidden_symbol_type);
 		merged_types.push_back(bind_data.hidden_date_type);
 	}
-	auto merged = make_uniq<ColumnDataCollection>(context, merged_types);
-	ColumnDataAppendState append_state;
-	merged->InitializeAppend(append_state);
 	vector<column_t> all_cols;
 	for (idx_t c = 0; c < merged_types.size(); c++) {
 		all_cols.push_back(c);
 	}
-	DataChunk merge_chunk;
-	merge_chunk.Initialize(context, merged_types);
 
 	// Track which rows are from existing data (for dedup).
-	// Each buffer contributes its rows; is_existing marks them.
 	vector<bool> row_is_existing;
 	row_is_existing.reserve(total_rows);
-
-	for (auto &buf_pair : buffers) {
-		auto &buf = buf_pair.first;
-		bool is_existing = buf_pair.second;
-		if (buf && buf->Count() > 0) {
-			ColumnDataScanState scan_state;
-			buf->InitializeScan(scan_state, all_cols);
-			buf->InitializeScanChunk(scan_state, merge_chunk);
-			while (buf->Scan(scan_state, merge_chunk)) {
-				merged->Append(append_state, merge_chunk);
-				for (idx_t i = 0; i < merge_chunk.size(); i++) {
-					row_is_existing.push_back(is_existing);
-				}
-			}
-		}
-	}
 
 	int64_t merge_us = elapsed_us(t_merge);
 	if (g_timing_enabled) g_merge_us.fetch_add(merge_us);
@@ -561,7 +541,13 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 
 	if (symbol_col == DConstants::INVALID_INDEX || date_col == DConstants::INVALID_INDEX) {
 		// Can't sort — flush as-is (already in arrival order).
-		FlushToPartition(pp, *merged);
+		// No merge was done; flush each buffer directly.
+		for (auto &buf_pair : buffers) {
+			auto &buf = buf_pair.first;
+			if (buf && buf->Count() > 0) {
+				FlushToPartition(pp, *buf);
+			}
+		}
 		return;
 	}
 
@@ -578,58 +564,73 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	sym_lookup.reserve(2048);
 	int32_t next_idx = 0;
 
-	// Scan ALL columns (not a column subset) to avoid InitializeScan
-	// column_id issues, then index into chunk.data[symbol_col]/[date_col].
-	// We also cache each chunk here so we don't need a second scan pass.
-	ColumnDataScanState scan_state;
-	merged->InitializeScan(scan_state, all_cols);
-	DataChunk chunk;
-	merged->InitializeScanChunk(scan_state, chunk);
-
+	// Scan directly from source buffers (no merge step). Extract symbol/date
+	// for sorting and cache chunks for the build phase.
 	vector<unique_ptr<DataChunk>> source_chunks;
+	DataChunk chunk;
 	idx_t row_offset = 0;
-	while (merged->Scan(scan_state, chunk)) {
-		auto &sym_vec = chunk.data[symbol_col];
-		UnifiedVectorFormat sym_fmt;
-		sym_vec.ToUnifiedFormat(chunk.size(), sym_fmt);
-		auto sym_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
-
-		auto &date_vec = chunk.data[date_col];
-		UnifiedVectorFormat date_fmt;
-		date_vec.ToUnifiedFormat(chunk.size(), date_fmt);
-
-		// Determine date column physical type from the actual vector,
-		// not from bind_data.is_timestamp (which reflects the *input* type,
-		// not the *output* type after cast).
-		bool date_is_ts = (date_vec.GetType().id() == LogicalTypeId::TIMESTAMP);
-
-		for (idx_t i = 0; i < chunk.size(); i++) {
-			auto si = sym_fmt.sel->get_index(i);
-			auto di = date_fmt.sel->get_index(i);
-			auto sym_str = sym_data[si].GetString();
-			auto dit = sym_lookup.find(sym_str);
-			if (dit == sym_lookup.end()) {
-				sym_lookup[sym_str] = next_idx;
-				symbol_idx[row_offset + i] = next_idx;
-				next_idx++;
-			} else {
-				symbol_idx[row_offset + i] = dit->second;
-			}
-			if (date_is_ts) {
-				auto dd = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
-				date_values[row_offset + i] = dd[di];
-			} else {
-				auto dd = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
-				date_values[row_offset + i] = static_cast<int64_t>(dd[di]);
-			}
+	for (auto &buf_pair : buffers) {
+		auto &buf = buf_pair.first;
+		bool is_existing = buf_pair.second;
+		if (!buf || buf->Count() == 0) {
+			continue;
 		}
-		// Cache this chunk for the build phase (avoids a second scan).
-		auto cached = make_uniq<DataChunk>();
-		cached->Initialize(context, merged_types);
-		cached->Reference(chunk);
-		cached->SetCardinality(chunk.size());
-		source_chunks.push_back(std::move(cached));
-		row_offset += chunk.size();
+		ColumnDataScanState scan_state;
+		buf->InitializeScan(scan_state, all_cols);
+		// Destroy and re-init chunk for each buffer: DataChunk::Initialize
+		// asserts data.empty() (it only emplaces_back, never clears).
+		chunk.Destroy();
+		buf->InitializeScanChunk(scan_state, chunk);
+		while (buf->Scan(scan_state, chunk)) {
+			auto &sym_vec = chunk.data[symbol_col];
+			UnifiedVectorFormat sym_fmt;
+			sym_vec.ToUnifiedFormat(chunk.size(), sym_fmt);
+			auto sym_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
+
+			auto &date_vec = chunk.data[date_col];
+			UnifiedVectorFormat date_fmt;
+			date_vec.ToUnifiedFormat(chunk.size(), date_fmt);
+
+			bool date_is_ts = (date_vec.GetType().id() == LogicalTypeId::TIMESTAMP);
+
+			for (idx_t i = 0; i < chunk.size(); i++) {
+				auto si = sym_fmt.sel->get_index(i);
+				auto di = date_fmt.sel->get_index(i);
+				auto sym_str = sym_data[si].GetString();
+				auto dit = sym_lookup.find(sym_str);
+				if (dit == sym_lookup.end()) {
+					sym_lookup[sym_str] = next_idx;
+					symbol_idx[row_offset + i] = next_idx;
+					next_idx++;
+				} else {
+					symbol_idx[row_offset + i] = dit->second;
+				}
+				if (date_is_ts) {
+					auto dd = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
+					date_values[row_offset + i] = dd[di];
+				} else {
+					auto dd = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
+					date_values[row_offset + i] = static_cast<int64_t>(dd[di]);
+				}
+				row_is_existing.push_back(is_existing);
+			}
+			// Cache this chunk for the build phase. Use Copy (not Reference)
+			// because the source chunk's buffers are reused by the next Scan.
+			auto cached = make_uniq<DataChunk>();
+			vector<LogicalType> chunk_types;
+			for (idx_t i = 0; i < chunk.ColumnCount(); i++) {
+				chunk_types.push_back(chunk.data[i].GetType());
+			}
+			cached->Initialize(context, chunk_types);
+			// Manual copy (avoids DataChunk::Copy assertions about FLAT_VECTOR).
+			cached->SetCardinality(chunk.size());
+			for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
+				VectorOperations::Copy(chunk.data[c], cached->data[c],
+				                       chunk.size(), 0, 0);
+			}
+			source_chunks.push_back(std::move(cached));
+			row_offset += chunk.size();
+		}
 	}
 
 	// Reassign dictionary indices in lexicographic order so that
@@ -701,23 +702,25 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 
 	// Build sorted collection by re-appending rows in sorted order.
 	// source_chunks was cached during the extract pass above — no second scan.
+	// OPTIMIZATION: Build sorted chunks and flush them in RG-sized batches,
+	// avoiding one full intermediate CDC.
 	auto t_build = std::chrono::steady_clock::now();
-	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-	ColumnDataAppendState sorted_append;
-	sorted->InitializeAppend(sorted_append);
 
-	// Precompute chunk boundaries.
-	// consecutive perm entries, determine which source chunk each row is in,
-	// build a SelectionVector, and copy.
-	DataChunk out_chunk;
-	out_chunk.Initialize(context, bind_data.sql_types);
-
-	// Precompute chunk boundaries.
+	// Precompute chunk boundaries for global row → chunk mapping.
 	vector<idx_t> chunk_starts(source_chunks.size() + 1);
 	chunk_starts[0] = 0;
 	for (idx_t i = 0; i < source_chunks.size(); i++) {
 		chunk_starts[i + 1] = chunk_starts[i] + source_chunks[i]->size();
 	}
+
+	// Flush directly: build sorted chunks and append to a RG-sized CDC, flush
+	// when it reaches RG_SIZE rows.
+	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+	ColumnDataAppendState sorted_append;
+	sorted->InitializeAppend(sorted_append);
+	DataChunk out_chunk;
+	out_chunk.Initialize(context, bind_data.sql_types);
+	const idx_t RG_SIZE = 131072;
 
 	idx_t perm_pos = 0;
 	while (perm_pos < total_rows) {
@@ -752,12 +755,22 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 			}
 			out_chunk.SetCardinality(sel_count);
 			sorted->Append(sorted_append, out_chunk);
+
+			// Flush when we reach RG_SIZE rows.
+			if (sorted->Count() >= RG_SIZE) {
+				FlushToPartition(pp, *sorted);
+				sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+				sorted->InitializeAppend(sorted_append);
+			}
 		}
 	}
 
-	// Flush the sorted collection in RG-sized chunks.
+	// Flush remaining rows.
+	if (sorted->Count() > 0) {
+		FlushToPartition(pp, *sorted);
+	}
+
 	auto t_flush = std::chrono::steady_clock::now();
-	FlushToPartition(pp, *sorted);
 
 	if (g_timing_enabled) {
 		g_build_us.fetch_add(elapsed_us(t_build));
