@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_aligned.sh 鈥?Linux equivalent of test_aligned.ps1 (v5 partition-aligned).
+# test_aligned.sh —Linux equivalent of test_aligned.ps1 (v5 partition-aligned).
 # Requires: test/gen_testdata.sh has been run, $ROOT/duckdb/build/duckdb built.
 # Usage: bash test/test_aligned.sh   (env: DUCKDB, ALIGNED_DATA_ROOT)
 set -u
@@ -21,9 +21,9 @@ first_val() { printf '%s\n' "$1" | grep -E '^[0-9]' | head -n1; }
 
 # --- counts + cross-group alignment -----------------------------------------
 # Layout: index month=2026-07 (1 part x 2000) + month=2026-08 (2 parts x 2000);
-# alpha same months (07: 1 part 2000, 08: 1 part 4000 鈥?last-part row count
+# alpha same months (07: 1 part 2000, 08: 1 part 4000 —last-part row count
 # differs from index, only the partition total is contractual); ma only
-# month=2026-08 (4000) 鈥?rows [0,2000) read as NULL for ma columns.
+# month=2026-08 (4000) —rows [0,2000) read as NULL for ma columns.
 out=$(run_duckdb "SET aligned_data_root='$DATA_ROOT'; WITH t AS (SELECT * FROM aligned_scan('cnstk_ixday')) SELECT count(*) AS c, count(alpha001) AS a1, count(alpha099) AS a99, count(rowid_ma) AS ma, sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) AS mis FROM t;")
 vals=$(first_val "$out" | tr ',' ' ')
 expect_equal 'total rows' "$(echo "$vals" | awk '{print $1}')" "6000"
@@ -154,7 +154,7 @@ else echo 'FAIL: 2.1c one-level group'; failures=$((failures+1)); fi
 rm -rf "$DATA_ROOT/badlvl"
 
 # v6: a non-conforming part file name (not "{idx:04d}-{rows:10d}.parquet") must
-# fail fast 鈥?the file-name row counts are the contract.
+# fail fast —the file-name row counts are the contract.
 BADNAME="$DATA_ROOT/badname"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADNAME"
 mv "$BADNAME/index/month=2026-08/0001-0000002000.parquet" "$BADNAME/index/month=2026-08/part-000001.parquet"
@@ -164,7 +164,7 @@ else echo 'FAIL: v6 non-conforming part name'; failures=$((failures+1)); fi
 rm -rf "$BADNAME"
 
 # v6: the index group's indexes must be consecutive from 0000 (a gap in the
-# index is a contract violation 鈥?the index defines the row space).
+# index is a contract violation —the index defines the row space).
 BADIDX="$DATA_ROOT/badidx"
 cp -r "$DATA_ROOT/cnstk_ixday" "$BADIDX"
 rm -f "$BADIDX/index/month=2026-08/0000-0000002000.parquet"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench_scenarios.sh 鈥?ONE-COMMAND, RESOURCE-MONITORED, STAGED benchmark driver.
+# bench_scenarios.sh —ONE-COMMAND, RESOURCE-MONITORED, STAGED benchmark driver.
 #
 # Runs the standardized multi-scenario benchmarks from test/multi_bench_config.sh
 # in INCREASING data scale (so any resource issue surfaces early and never
@@ -43,7 +43,7 @@ ENG3="D-WIDE,D-JOIN,A-ALIGNED"
 
 avail(){ echo "N/A"; }
 
-# gen_data <rows> <width> <sparsity> 鈥?regenerate bench_mb.
+# gen_data <rows> <width> <sparsity> —regenerate bench_mb.
 # gen_multi_bench.sh writes a .gen-meta marker (rows/width/sparsity). With
 # --skip-regen we regenerate only if the marker matches ALL of rows/width/sparsity;
 # a stale or foreign dataset otherwise triggers a confusing self-check FAIL.
@@ -99,10 +99,10 @@ run_stage g-250k 250000 128 90   "$ENG5" "1,4" "Q2,Q5" "F1,F2" "S0"
 # so the slow polars P-JOIN baseline stays tractable at 1M.
 run_stage g-1m   1000000 128 90  "$ENG5" "1" "Q2" "F2" "S0"
 run_stage g-1m-q 1000000 128 90  "$ENG3" "1,4" "Q1,Q2,Q3,Q5" "F1,F2,F3,F4,F5" "S0,S1"
-# g-10m: next scale step 鈥?10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
+# g-10m: next scale step —10M x 128 x 90%. Kept to Q2 (35 cols) at t=1 so the
 # expensive D-JOIN / P-JOIN baselines stay tractable (they are ~40-150x slower).
 run_stage g-10m 10000000 128 90 "$ENG5" "1" "Q2" "F1,F2" "S0"
-# g-w2: width direction 鈥?500K x 1024 (W2) x 90%, heavy projections Q3/Q5, 4 DDB
+# g-w2: width direction —500K x 1024 (W2) x 90%, heavy projections Q3/Q5, 4 DDB
 # engines, t=1. Verifies aligned's gap to D-WIDE narrows as columns/row-groups grow.
 run_stage g-w2 500000 1024 90 "$ENG3" "1" "Q3,Q5" "F1,F2" "S0"
 # sparsity sweep (reuse 1M x 128)

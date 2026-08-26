@@ -1,11 +1,11 @@
 ﻿# gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
 # and Phase 6 (benchmark). v5 contract: index mandatory, two-level
-# non-index groups, single-level partition (year= / month= / date= 鈥?the SAME
+# non-index groups, single-level partition (year= / month= / date= —the SAME
 # kind for every group), only the footer is authoritative (no sidecars, no
 # commit markers, no _group.json), _tmp ignored.
 #
-#   Layout (partition-aligned 鈥?index, alpha and ma share the date= kind; each
+#   Layout (partition-aligned —index, alpha and ma share the date= kind; each
 #   partition holds 1 part per group (v6 self-describing name "0000-{rows:10d}"),
 #   so partition rows == part rows and every group has full coverage):
 #   bench_ixday/

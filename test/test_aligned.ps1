@@ -27,7 +27,7 @@ function Run-DuckDB([string]$sql) {
 }
 
 # SQL containing backtick/double-quoted identifiers cannot survive PS 5.1
-# native-arg passing (-c mangles embedded quotes) 鈥?pipe via a temp file.
+# native-arg passing (-c mangles embedded quotes) —pipe via a temp file.
 function Run-DuckDB-File([string]$sql) {
     $tmp = Join-Path $env:TEMP 'aligned_test_query.sql'
     Set-Content -Path $tmp -Encoding UTF8 -Value $sql
@@ -38,9 +38,9 @@ function Run-DuckDB-File([string]$sql) {
 
 # --- counts + cross-group alignment -----------------------------------------
 # Layout: index month=2026-07 (1 part x 2000) + month=2026-08 (2 parts x 2000);
-# alpha same months (07: 1 part 2000, 08: 1 part 4000 鈥?last-part row count
+# alpha same months (07: 1 part 2000, 08: 1 part 4000 —last-part row count
 # differs from index, only the partition total is contractual); ma only
-# month=2026-08 (4000) 鈥?rows [0,2000) read as NULL for ma columns.
+# month=2026-08 (4000) —rows [0,2000) read as NULL for ma columns.
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; WITH t AS (SELECT * FROM aligned_scan('cnstk_ixday')) SELECT count(*) AS c, count(alpha001) AS a1, count(alpha099) AS a99, count(rowid_ma) AS ma, sum(CASE WHEN rowid != rowid_alpha THEN 1 ELSE 0 END) AS mis FROM t;"
 $vals = ($out -split "`n" | Where-Object { $_ -match '^\d' } | Select-Object -First 1) -split ','
 Expect-Equal 'total rows' ([long]$vals[0]) 6000
@@ -122,7 +122,7 @@ if ($out8 -match '(?m)^4000,666\r?$') { Write-Host 'PASS: parallel projection + 
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT current_setting('parquet_metadata_cache');"
 if ($out -match '(?m)^true\r?$') { Write-Host 'PASS: parquet metadata cache default on' } else { Write-Host "FAIL: metadata cache default ($out)"; $script:failures++ }
 
-# --- column-name rules (contract 搂2.2e) --------------------------------------
+# --- column-name rules (contract §2.2e) --------------------------------------
 # e1: columns duplicated with index resolve to the index copy (authoritative)
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT close FROM aligned_scan('cnstk_ixday') WHERE rowid = 100;"
 if ($out -match '(?m)^50\.5\r?$') { Write-Host 'PASS: e1 bare close = index (authoritative)' } else { Write-Host "FAIL: e1 bare close ($out)"; $script:failures++ }
@@ -145,9 +145,9 @@ if ($out -match '(?m)^250\.125,62\.53125\r?$') { Write-Host 'PASS: e2 qualified 
 $out = Run-DuckDB "SET aligned_data_root='$dataRoot'; SELECT rowid_alpha, ma5 FROM aligned_scan('cnstk_ixday') WHERE rowid = 2000;"
 if ($out -match '(?m)^2000,0\.0\r?$') { Write-Host 'PASS: e3 bare non-duplicated columns' } else { Write-Host "FAIL: e3 bare columns ($out)"; $script:failures++ }
 
-# --- directory rules (contract 搂2.1b/c) --------------------------------------
-# 搂2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above)
-# 搂2.1b: a table without the mandatory index group must fail (has alpha parts
+# --- directory rules (contract §2.1b/c) --------------------------------------
+# §2.1d: '_tmp' stray parts are ignored (proven by total rows = 6000 above)
+# §2.1b: a table without the mandatory index group must fail (has alpha parts
 # but no index parts at all)
 $badIdx = Join-Path $dataRoot 'badidx'
 New-Item -ItemType Directory -Force -Path (Join-Path $badIdx 'factor\alpha101\month=2026-07') | Out-Null
@@ -156,9 +156,9 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_scan('badidx');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match "mandatory group 'index'") { Write-Host 'PASS: 搂2.1b missing index group rejected' } else { Write-Host "FAIL: 搂2.1b missing index ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match "mandatory group 'index'") { Write-Host 'PASS: §2.1b missing index group rejected' } else { Write-Host "FAIL: §2.1b missing index ($out)"; $script:failures++ }
 Remove-Item (Join-Path $dataRoot 'badidx') -Recurse -Force
-# 搂2.1c: a one-level non-index group must fail (a real part file in group 'single')
+# §2.1c: a one-level non-index group must fail (a real part file in group 'single')
 $badLvl = Join-Path $dataRoot 'badlvl'
 New-Item -ItemType Directory -Force -Path (Join-Path $badLvl 'index\month=2026-07') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $badLvl 'index\month=2026-08') | Out-Null
@@ -172,11 +172,11 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_scan('badlvl');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match "two-level path") { Write-Host 'PASS: 搂2.1c one-level group rejected' } else { Write-Host "FAIL: 搂2.1c one-level group ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match "two-level path") { Write-Host 'PASS: §2.1c one-level group rejected' } else { Write-Host "FAIL: §2.1c one-level group ($out)"; $script:failures++ }
 Remove-Item (Join-Path $dataRoot 'badlvl') -Recurse -Force
 
-# 搂v6: a non-conforming part file name (not "{idx:04d}-{rows:10d}.parquet")
-# must fail fast 鈥?the file-name row counts are the contract.
+# §v6: a non-conforming part file name (not "{idx:04d}-{rows:10d}.parquet")
+# must fail fast —the file-name row counts are the contract.
 $badName = Join-Path $dataRoot 'badname'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $badName -Recurse -Force
 Rename-Item (Join-Path $badName 'index\month=2026-08\0001-0000002000.parquet') 'part-000001.parquet'
@@ -184,11 +184,11 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_scan('badname');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match 'self-desc') { Write-Host 'PASS: 搂v6 non-conforming part name rejected' } else { Write-Host "FAIL: 搂v6 non-conforming part name ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match 'self-desc') { Write-Host 'PASS: §v6 non-conforming part name rejected' } else { Write-Host "FAIL: §v6 non-conforming part name ($out)"; $script:failures++ }
 Remove-Item $badName -Recurse -Force
 
-# 搂v6: the index group's indexes must be consecutive from 0000 (a gap in the
-# index is a contract violation 鈥?the index defines the row space).
+# §v6: the index group's indexes must be consecutive from 0000 (a gap in the
+# index is a contract violation —the index defines the row space).
 $badIdx = Join-Path $dataRoot 'badidx'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $badIdx -Recurse -Force
 Remove-Item (Join-Path $badIdx 'index\month=2026-08\0000-0000002000.parquet') -Force
@@ -196,12 +196,12 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_scan('badidx');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match 'consecu') { Write-Host 'PASS: 搂v6 index gap rejected' } else { Write-Host "FAIL: 搂v6 index gap ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match 'consecu') { Write-Host 'PASS: §v6 index gap rejected' } else { Write-Host "FAIL: §v6 index gap ($out)"; $script:failures++ }
 Remove-Item $badIdx -Recurse -Force
 
-# 搂v6: a SHARED index must agree on its row count across groups (copy the
+# §v6: a SHARED index must agree on its row count across groups (copy the
 # index's 2000-row part over the alpha group's 2000-row part after rewriting
-# its name to 3000 rows 鈥?the alpha partition then has 0000(2000)+0002(3000),
+# its name to 3000 rows —the alpha partition then has 0000(2000)+0002(3000),
 # total 5000 != index 4000, and the shared index 0002 is only in alpha, but the
 # partition TOTAL already disagrees).
 $badRows = Join-Path $dataRoot 'badrows'
@@ -212,10 +212,10 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_scan('badrows');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match 'must agree') { Write-Host 'PASS: 搂v6 cross-group row-count mismatch rejected' } else { Write-Host "FAIL: 搂v6 cross-group row-count mismatch ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match 'must agree') { Write-Host 'PASS: §v6 cross-group row-count mismatch rejected' } else { Write-Host "FAIL: §v6 cross-group row-count mismatch ($out)"; $script:failures++ }
 Remove-Item $badRows -Recurse -Force
 
-# 搂v8: the index schema's SECOND column must be DATE or TIMESTAMP (the
+# §v8: the index schema's SECOND column must be DATE or TIMESTAMP (the
 # partition source column). Rebuild the index's LAST part (the group schema
 # source) with the date column NOT in the second position (e.g. col0=symbol,
 # col1=close which is DOUBLE, date moved to col2).
@@ -227,10 +227,10 @@ $sql = "COPY (SELECT printf('%06d', r + 1) AS symbol, CAST((r + 1) * 0.5 AS DOUB
 & $db -c $sql 2>&1 | Out-Null
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_scan('baddate');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match 'second column must be DATE') { Write-Host 'PASS: 搂v8 index date-field contract enforced' } else { Write-Host "FAIL: 搂v8 index date-field contract ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and $out -match 'second column must be DATE') { Write-Host 'PASS: §v8 index date-field contract enforced' } else { Write-Host "FAIL: §v8 index date-field contract ($out)"; $script:failures++ }
 Remove-Item $badDate -Recurse -Force
 
-# 搂v8: TIMESTAMP partition-source pruning. A dedicated table whose index date
+# §v8: TIMESTAMP partition-source pruning. A dedicated table whose index date
 # column is TIMESTAMP; filtering on it must prune to the matching partition.
 # v8 contract: col0=symbol, col1=ts (TIMESTAMP).
 $tsTable = Join-Path $dataRoot 'ts_ixday'
@@ -248,7 +248,7 @@ Remove-Item $tsTable -Recurse -Force
 
 # --- partition-aligned contract (no manifest needed) -------------------------
 # Groups are discovered from the file layout and the partition-aligned contract
-# is enforced (ma missing month=2026-07 stays legal 鈥?partition subsets are
+# is enforced (ma missing month=2026-07 stays legal —partition subsets are
 # allowed; the partition totals still agree).
 $v3Table = Join-Path $dataRoot 'v3_notable'
 Copy-Item (Join-Path $dataRoot 'cnstk_ixday') $v3Table -Recurse -Force
@@ -270,7 +270,7 @@ if ($LASTEXITCODE -ne 0 -and $out -match 'has partition[\s\S]*index\s+group does
 Remove-Item $v3Bad -Recurse -Force
 Remove-Item $v3Table -Recurse -Force
 
-# --- error cases (expected failures 鈥?must not terminate the script) ---------
+# --- error cases (expected failures —must not terminate the script) ---------
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SELECT * FROM aligned_scan('no_such_table');" 2>&1 | Out-String

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_multi_bench.sh 鈥?multi-scenario benchmark harness (Phase 6+).
+# run_multi_bench.sh —multi-scenario benchmark harness (Phase 6+).
 #
 # Reads the standardized Group Settings from test/multi_bench_config.sh and
 # executes a Tier (A smoke / B main / C stress) or an explicit selection across
@@ -16,7 +16,7 @@
 #                                   [--engines D-WIDE,D-JOIN,A-ALIGNED]
 #                                   [--no-regen]
 # env: DUCKDB (default build/duckdb), ALIGNED_DATA_ROOT,
-#      REPEATS (int, default 5) executions per warm measurement 鈥?
+#      REPEATS (int, default 5) executions per warm measurement —
 #      pass as env prefix, NOT a positional arg:
 #      REPEATS=5 bash test/run_multi_bench.sh --tier A ...
 set -euo pipefail
@@ -151,7 +151,7 @@ engine_sql() { # e q f sel rows -> sql
 }
 
 # baselines for D-JOIN share join_index (already written by generator as
-# bench_baseline_<tag>/join_alpha, join_fs, wide 鈥?index baseline is in wide's
+# bench_baseline_<tag>/join_alpha, join_fs, wide —index baseline is in wide's
 # first columns but we need a standalone join_index.parquet; generate it.)
 if ! [ -f "$BASE/join_index.parquet" ]; then
   "$DUCKDB" -light-mode -c "COPY (SELECT date,symbol,close,volume,rowid,$(range_cols ix 1 15) FROM read_parquet('$WIDE')) TO '$BASE/join_index.parquet' (FORMAT PARQUET, COMPRESSION ZSTD);" >/dev/null
@@ -165,7 +165,7 @@ elapsed(){ echo "scale=9; ($2 - $1)/1000000000" | bc -l; }
 # process startup cost (~0.02s) that otherwise dominates tiny/cached datasets.
 # warm_s = mean per query.
 REPEATS=${REPEATS:-5}
-# ddb_run <th> <pre> <sql...> 鈥?run DuckDB, feeding the SQL through a temp file
+# ddb_run <th> <pre> <sql...> —run DuckDB, feeding the SQL through a temp file
 # on stdin so very wide queries (W3, thousands of columns) that overflow ARG_MAX
 # with `-c` still execute. All measurement/consistency calls go through here.
 DDB_SQL_TMP="${TMPDIR:-/tmp}/rmb_$$.sql"
@@ -209,7 +209,7 @@ echo "SELF-CHECK OK: A-ALIGNED prunes to $expected rows on non-first partition."
 
 # cross-engine row-count consistency: every engine must return ROWS/4 rows for
 # Q2+F2+S0 (date partition point). This proves all engines observe the SAME
-# logical table (same key, order, NULL distribution) 鈥?timing is only meaningful
+# logical table (same key, order, NULL distribution) —timing is only meaningful
 # if the outputs agree.
 check_count(){ # engine -> rows after (date='2026-09-02')
   local e="$1"

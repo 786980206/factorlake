@@ -13,7 +13,7 @@ DATA_ROOT="${ALIGNED_DATA_ROOT:-$ROOT/testdata}"
 failures=0
 
 if [ ! -x "$DUCKDB" ]; then
-  echo "build missing: $DUCKDB (run the duckdb build first, see AGENTS.md 搂16)" >&2
+  echo "build missing: $DUCKDB (run the duckdb build first, see AGENTS.md §16)" >&2
   exit 1
 fi
 

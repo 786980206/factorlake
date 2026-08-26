@@ -1,8 +1,8 @@
 ﻿#!/usr/bin/env bash
-# gen_bench.sh 鈥?Linux equivalent of gen_bench.ps1
+# gen_bench.sh —Linux equivalent of gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
 # and Phase 6 (benchmark). v5 contract: index mandatory, two-level
-# non-index groups, single-level partition (year= / month= / date= 鈥?the SAME
+# non-index groups, single-level partition (year= / month= / date= —the SAME
 # kind for every group), only the footer is authoritative (no sidecars, no
 # commit markers, no _group.json), _tmp ignored.
 #

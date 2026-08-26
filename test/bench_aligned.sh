@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench_aligned.sh 鈥?Linux equivalent of bench_aligned.ps1
+# bench_aligned.sh —Linux equivalent of bench_aligned.ps1
 # Phase 6 benchmark: aligned_scan vs plain-parquet JOIN vs single wide parquet.
 # Dataset: bench_ixday (configurable rows, default 1M) x 127 cols, 4 daily
 # partitions, sparse factors. Dimensions: projection 5/25/120 cols,
@@ -192,7 +192,7 @@ REPORT="$ROOT/docs/BENCHMARK.md"
 {
   echo "# AlignedTable Benchmark (Phase 6)"
   echo ""
-  echo "Date: $(date +%Y-%m-%d)  Machine: local Linux (see AGENTS.md 搂16.2);"
+  echo "Date: $(date +%Y-%m-%d)  Machine: local Linux (see AGENTS.md §16.2);"
   echo "aligned engine: $DUCKDB"
   echo "Dataset: **bench_ixday** - $TOTAL rows x 127 columns (index 5 + alpha101 101 + ma 21),"
   echo "4 daily partitions, factors sparse (non-null 1/7). Aligned layout: 3 independent Parquet column groups."
