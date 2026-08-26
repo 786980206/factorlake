@@ -161,7 +161,13 @@ aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_befo
 aligned_drop(table, group_name, root=...)         → (dirs_removed, files_removed, txid)
 aligned_meta(table, root=...)                    → (table_name, table_path, partition_template,
                                                     total_rows, group_count, partition_count,
-                                                    part_count, groups, partitions, schema)
+                                                    part_count, groups, partitions, schema,
+                                                    column_mapping)
+  # column_mapping: "bare_name:lv1.lv2.bare_name;..." 映射每个非 index 唯一
+  # 列的裸名到限定名。index 列和跨组重名列不包含在映射中。
+  # 限定列名在 aligned_scan 中可通过 COLUMNS('lv1.lv2.col') 正则引用
+  # （DuckDB SQL 解析器将 . 视为 schema.table.column 分隔符，带点列名
+  # 不能直接用标识符语法引用）。
 ```
 
 - **COPY TO (FORMAT aligned)**：批量写入主路径，走 DuckDB CopyFunction 框架。
@@ -346,7 +352,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本（位于 `test/`）：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 260/260 + 3 PS 套件全 PASS
+- 当前总：SQLLogicTest 273/273 + 3 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`
