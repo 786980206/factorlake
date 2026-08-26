@@ -182,21 +182,21 @@ aligned 相对单宽 Parquet（read_parquet）有 ~1.8× 框架开销，来自�
 
 | 规模 | 行数 | Aligned index | Aligned panel | Native year-part | Native flat |
 |------|------|---------------|---------------|------------------|-------------|
-| 100 sym | 1,315,900 | 0.113 | 0.251 | 0.701 | 0.212 |
-| 500 sym | 6,579,500 | 0.495 | 1.028 | 1.484 | 0.794 |
-| 1000 sym | 13,159,000 | 1.475 | 1.921 | 2.161 | 1.547 |
-| 2000 sym | 26,318,000 | 2.052 | 4.654 | 4.162 | 2.554 |
-| 4000 sym | 52,636,000 | 4.758 | 11.290 | 8.106 | 7.066 |
+| 100 sym | 1,315,900 | 0.116 | 0.249 | 0.713 | 0.207 |
+| 500 sym | 6,579,500 | 0.513 | 0.974 | 1.367 | 0.553 |
+| 1000 sym | 13,159,000 | 0.998 | 2.018 | 2.014 | 1.078 |
+| 2000 sym | 26,318,000 | 2.019 | 4.474 | 4.125 | 2.481 |
+| 4000 sym | 52,636,000 | 4.676 | 10.837 | 9.482 | 6.285 |
 
 ### 2.3 倍率分析（Aligned panel / Native year-part）
 
 | 规模 | 倍率 | 结论 |
 |------|------|------|
-| 100 sym | 0.36× | **aligned 快 2.8×** |
-| 500 sym | 0.69× | **aligned 快 1.4×** |
-| 1000 sym | 0.89× | **aligned 快 1.1×** |
-| 2000 sym | 1.12× | aligned 慢 1.1× |
-| 4000 sym | 1.39× | aligned 慢 1.4× |
+| 100 sym | 0.35× | **aligned 快 2.8×** |
+| 500 sym | 0.71× | **aligned 快 1.4×** |
+| 1000 sym | 1.00× | 持平 |
+| 2000 sym | 1.08× | aligned 慢 1.1× |
+| 4000 sym | 1.14× | aligned 慢 1.1× |
 
 > **优化历程**：
 > 1. 消除合并阶段（1.48s→0.02s）
@@ -217,20 +217,23 @@ aligned 相对单宽 Parquet（read_parquet）有 ~1.8× 框架开销，来自�
 > 9. **FlushWorker 线程数从 8 增至 12**（20 核机器上 8 Sink + 12 Flush
 >    = 20 线程，充分利用 CPU；4000sym 倍率 1.54×→1.39×，total
 >    14.9s→11.1s 中位数）
+> 10. **直接 flush sorted CDC（跳过 flush_buffer 拷贝）**（分区行数 ≤ RG_SIZE
+>    时直接将 sorted CDC 传入 ParquetWriter::Flush，省去 CDC→CDC
+>    per-column copy；build 34.0s→31.0s，4000sym 倍率 1.39×→1.14×）
+> 11. **读取启用 parquet prefetch**（本地文件默认不预取，aligned_scan 在
+>    InitGlobal 中设置 prefetch_all_parquet_files=true；100 列 1 线程
+>    1.33s→1.27s，~5% 加速）
 
 ### 2.4 结论
 
 - **中小规模（≤1000 sym）aligned 与 native year-part 持平或更快**：aligned 的
   per-partition CDC 缓冲 + run-length 批处理优于 native 的 per-row 分区路由。
-  100 sym 时 aligned 快 2.8×。
-- **大规模（2000+ sym）aligned 慢于 native**：超线性增长来自 SortAndFlushPartition
-  的 O(n log n) 排序 + 多次 O(n) 数据拷贝。4000 sym 时 aligned panel 21.2s vs
-  native 8.4s。这是后续优化的方向——可考虑：(1) 检测输入已排序时跳过排序，
-  (2) 用更高效的列式排序替代 std::stable_sort + per-element VectorOperations::Copy。
-- **Aligned vs native flat：慢 1.0~4.1×**：native flat 无分区开销。
-  4000 sym 时 21.2s vs 5.2s。差距主要来自排序 + 分区管理。
-- **写入优化已实施**：消除 merge 阶段（1.48s→0.02s），RG 批量 flush 替代
-  全量中间 CDC（build+flush 15.1s→5.7s）。
+  100 sym 时 aligned 快 2.8×，1000 sym 持平。
+- **大规模（4000 sym）aligned 仅慢 1.1×**：经过多轮优化（Sort 类、ZSTD1、
+  直接追加、直接 flush、12 线程），4000 sym 从初始 21.2s→10.8s，倍率从 2.64×→1.14×。
+  剩余差距主要来自 ZSTD 压缩（CPU-bound）和排序开销。
+- **Aligned vs native flat：慢 1.0~1.7×**：native flat 无分区开销，但无分区
+  限制——大规模时单文件过大。4000 sym 时 10.8s vs 6.3s。
 - **宽表（100+ 列）：aligned 优势放大**——列裁剪 + 投影下推在读取路径
   节省远超分区管理成本。7 列基准是 aligned 最差场景（窄表，分区开销占比高）。
 
