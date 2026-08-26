@@ -88,20 +88,10 @@ TableFunction AlignedTableEntry::GetScanFunction(ClientContext &context, unique_
 	fn.projection_pushdown = true;
 	fn.filter_pushdown = true;
 	fn.filter_prune = true;
-	// Lets DELETE/UPDATE binders recognize this GET as a base table (LogicalGet::GetTable).
+	// Lets catalog binders recognize this GET as a base table (LogicalGet::GetTable).
 	bind_data->Cast<AlignedTableBindData>().catalog_entry = this;
 	fn.get_bind_info = AlignedScanGetBindInfo;
 	return fn;
-}
-
-void AlignedTableEntry::BindUpdateConstraints(Binder &binder, LogicalGet &get, LogicalProjection &proj,
-                                              LogicalUpdate &update, ClientContext &context) {
-	// Default: no extra columns. Only the columns the UPDATE statement touches
-	// are fetched; the rowid identifies the target rows. The aligned UPDATE
-	// pipeline resolves rowid -> (date, symbol) keys and only writes the SET
-	// columns back (columns absent from an old part due to schema evolution
-	// must NOT be force-updated — that would fail the v7 contract).
-	TableCatalogEntry::BindUpdateConstraints(binder, get, proj, update, context);
 }
 
 unique_ptr<BaseStatistics> AlignedTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
