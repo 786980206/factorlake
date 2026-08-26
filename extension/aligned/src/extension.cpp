@@ -54,7 +54,7 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	// aligned_meta(table_name, root=...)
 	// Returns a single row of comprehensive metadata: table_name, table_path,
 	// partition_template, total_rows, group_count, partition_count,
-	// part_count, groups, partitions, schema.
+	// part_count, groups, partitions, schema, column_mapping.
 	TableFunction aligned_meta_fn("aligned_meta", {LogicalType::VARCHAR},
 	                                AlignedMetaFunction, AlignedMetaBind, AlignedMetaInitGlobal, nullptr);
 	aligned_meta_fn.named_parameters["root"] = LogicalType::VARCHAR;

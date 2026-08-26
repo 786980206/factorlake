@@ -169,19 +169,26 @@ struct AlignedScanLocalState : public LocalTableFunctionState {
 //===----------------------------------------------------------------------===//
 
 //! Builds the table schema (names/types in table order) and fills each group's
-//! output_positions. Types are resolved from the first part containing a column.
-//! Column-name rules (contract 搂2.2), implemented in two passes:
+//! output_positions. Types are resolved from the group's last part's footer.
+//! Column-name rules (contract §2.2), implemented in two passes:
 //!  pass 1: count which (non-index) groups contain each bare column name;
-//!  pass 2: register columns 鈥?
+//!  pass 2: register columns:
 //!   - index columns: bare names (index is authoritative);
-//!   - non-index columns whose name also exists in index: ignored entirely;
+//!   - non-index columns whose name also exists in index: ignored entirely
+//!     (index shadow);
 //!   - non-index columns whose name exists in >= 2 non-index groups: registered
 //!     under the qualified name "lv1.lv2.col_name" in EVERY such group (the
-//!     bare name is not registered at all 鈫?querying it reports "column not
+//!     bare name is not registered at all; querying it reports "column not
 //!     found");
-//!   - other non-index columns: bare names.
+//!   - other non-index columns (unique): bare name. When register_qualified
+//!     is true, ALSO register the qualified "lv1.lv2.col" alias as a second
+//!     output position — both names reference the same parquet column (the
+//!     scan reads it once and copies to both positions). This is for the
+//!     table-function path where COLUMNS('lv1.lv2.col') regex can reference
+//!     the qualified name. The catalog (ATTACH) path sets register_qualified
+//!     = false to avoid duplicate columns in DESCRIBE / SELECT *.
 static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<string> &names,
-                               vector<LogicalType> &types) {
+                               vector<LogicalType> &types, bool register_qualified = true) {
 	// The index group is always at position 0 (BuildTablePlan guarantees this).
 	const idx_t index_group = 0;
 	(void)IndexGroup(plan); // validates non-empty
@@ -246,19 +253,20 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 				names.push_back(qualified);
 				types.push_back(col_type);
 			} else {
-				// Unique non-index column: register BOTH the bare name and
-				// the qualified "lv1.lv2.col" alias. The bare name is the
-				// primary output position; the qualified alias gets a
-				// separate output position that the scan fills by copying
-				// the same parquet column.
+				// Unique non-index column: register the bare name. When
+				// register_qualified is true (table-function path), also
+				// register the qualified "lv1.lv2.col" alias as a second
+				// output position — both reference the same parquet column.
 				group.output_positions.push_back(names.size());
 				names.push_back(col);
 				types.push_back(col_type);
 
-				auto qualified = group.lv1 + "." + group.lv2 + "." + col;
-				group.output_positions_qualified[ci] = names.size();
-				names.push_back(qualified);
-				types.push_back(col_type);
+				if (register_qualified) {
+					auto qualified = group.lv1 + "." + group.lv2 + "." + col;
+					group.output_positions_qualified[ci] = names.size();
+					names.push_back(qualified);
+					types.push_back(col_type);
+				}
 			}
 		}
 	}
@@ -271,6 +279,7 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, const string &root, const string &table,
                                                     vector<LogicalType> &return_types, vector<string> &names,
                                                     bool add_partition_col = true,
+                                                    bool register_qualified = true,
                                                     const string &group_filter = string()) {
 	auto result = make_uniq<AlignedTableBindData>();
 	BuildTablePlan(context, root, table, result->plan);
@@ -300,7 +309,7 @@ static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, cons
 		}
 		result->plan.groups = std::move(kept);
 	}
-	ResolveColumnTypes(context, result->plan, result->names, result->types);
+	ResolveColumnTypes(context, result->plan, result->names, result->types, register_qualified);
 
 	// Virtual partition column: derived from the index group's partition
 	// template prefix ("year", "month", or "date"). Added as a VARCHAR column
@@ -341,7 +350,11 @@ static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, cons
 
 unique_ptr<FunctionData> AlignedBindForCatalog(ClientContext &context, const string &root, const string &table,
                                                vector<LogicalType> &return_types, vector<string> &names) {
-	return AlignedBindInternal(context, root, table, return_types, names, false);
+	// Catalog path (ATTACH): no virtual partition column, no qualified aliases.
+	// The catalog's column schema is used by DuckDB's binder for SELECT * —
+	// qualified aliases would appear as confusing duplicate columns that
+	// can't be referenced via normal SQL syntax anyway.
+	return AlignedBindInternal(context, root, table, return_types, names, false, false);
 }
 unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindInput &input,
                                      vector<LogicalType> &return_types, vector<string> &names) {
@@ -355,7 +368,7 @@ unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindIn
 	auto root_it = input.named_parameters.find("root");
 	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
 	string root = ResolveDataRoot(context, root_param, "aligned_scan");
-	return AlignedBindInternal(context, root, table, return_types, names, true, group_filter);
+	return AlignedBindInternal(context, root, table, return_types, names, true, true, group_filter);
 }
 
 //===----------------------------------------------------------------------===//
