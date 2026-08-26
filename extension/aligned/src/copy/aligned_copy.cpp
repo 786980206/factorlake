@@ -653,15 +653,44 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	if (g_timing_enabled) g_extract_us.fetch_add(extract_u);
 
 	// Create permutation sorted by (symbol, date).
+	// OPTIMIZATION: Detect if the input is already sorted by (symbol, date).
+	// When the input query has ORDER BY (symbol, date), the morsel-level
+	// buffers arrive in sorted order. The merge across morsels preserves
+	// order because existing data is prepended and new data is appended
+	// (both pre-sorted). If sorted, we skip the O(n log n) stable_sort
+	// entirely and use the identity permutation.
+	// We can only skip the sort when there's no existing data (MERGE mode),
+	// because existing data may have a different sort order than new data.
 	auto t_perm = std::chrono::steady_clock::now();
-	vector<idx_t> perm(total_rows);
-	for (idx_t i = 0; i < total_rows; i++) {
-		perm[i] = i;
+	bool has_existing = false;
+	for (auto e : row_is_existing) {
+		if (e) { has_existing = true; break; }
 	}
-	std::stable_sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
-		if (symbol_idx[a] != symbol_idx[b]) return symbol_idx[a] < symbol_idx[b];
-		return date_values[a] < date_values[b];
-	});
+	bool already_sorted = !has_existing;
+	if (already_sorted) {
+		for (idx_t i = 1; i < total_rows; i++) {
+			if (symbol_idx[i] < symbol_idx[i - 1] ||
+			    (symbol_idx[i] == symbol_idx[i - 1] && date_values[i] < date_values[i - 1])) {
+				already_sorted = false;
+				break;
+			}
+		}
+	}
+	vector<idx_t> perm(total_rows);
+	if (already_sorted) {
+		// Identity permutation — skip sort entirely.
+		for (idx_t i = 0; i < total_rows; i++) {
+			perm[i] = i;
+		}
+	} else {
+		for (idx_t i = 0; i < total_rows; i++) {
+			perm[i] = i;
+		}
+		std::stable_sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
+			if (symbol_idx[a] != symbol_idx[b]) return symbol_idx[a] < symbol_idx[b];
+			return date_values[a] < date_values[b];
+		});
+	}
 
 	int64_t perm_u = elapsed_us(t_perm);
 	if (g_timing_enabled) g_perm_us.fetch_add(perm_u);
@@ -672,10 +701,6 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	// so stable_sort preserves their relative order. We scan perm and for
 	// each key group, if there's any new row, pick the last new row (new
 	// data is authoritative); otherwise pick the first existing row.
-	bool has_existing = false;
-	for (auto e : row_is_existing) {
-		if (e) { has_existing = true; break; }
-	}
 	if (has_existing) {
 		vector<idx_t> dedup_perm;
 		dedup_perm.reserve(perm.size());
@@ -715,12 +740,31 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 
 	// Flush directly: build sorted chunks and append to a RG-sized CDC, flush
 	// when it reaches RG_SIZE rows.
+	// OPTIMIZATION: When already_sorted, the perm is identity and all source
+	// chunks are in the correct order. We can flush source chunks directly
+	// to the partition writer, skipping the selection-vector gather.
+	const idx_t RG_SIZE = 131072;
+	if (already_sorted) {
+		auto sorted_direct = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+		ColumnDataAppendState direct_append;
+		sorted_direct->InitializeAppend(direct_append);
+		for (auto &src_chunk : source_chunks) {
+			sorted_direct->Append(direct_append, *src_chunk);
+			if (sorted_direct->Count() >= RG_SIZE) {
+				FlushToPartition(pp, *sorted_direct);
+				sorted_direct = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+				sorted_direct->InitializeAppend(direct_append);
+			}
+		}
+		if (sorted_direct->Count() > 0) {
+			FlushToPartition(pp, *sorted_direct);
+		}
+	} else {
 	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
 	ColumnDataAppendState sorted_append;
 	sorted->InitializeAppend(sorted_append);
 	DataChunk out_chunk;
 	out_chunk.Initialize(context, bind_data.sql_types);
-	const idx_t RG_SIZE = 131072;
 
 	idx_t perm_pos = 0;
 	while (perm_pos < total_rows) {
@@ -769,6 +813,7 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	if (sorted->Count() > 0) {
 		FlushToPartition(pp, *sorted);
 	}
+	} // end else (not already_sorted)
 
 	auto t_flush = std::chrono::steady_clock::now();
 

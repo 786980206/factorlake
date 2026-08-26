@@ -1,4 +1,4 @@
-﻿# gen_bench.ps1
+# gen_bench.ps1
 # Generates a larger AlignedTable test dataset for Phase 4 (parallel scan)
 # and Phase 6 (benchmark). v5 contract: index mandatory, two-level
 # non-index groups, single-level partition (year= / month= / date= —the SAME
@@ -70,7 +70,7 @@ foreach ($d in $Days) {
          CAST((r + 1) * 100 AS BIGINT) AS volume,
          CAST(r AS BIGINT) AS rowid
   FROM r
-) TO '$($indexDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD);"
+) TO '$($indexDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_INDEX, COMPRESSION ZSTD, DICTIONARY_SIZE_LIMIT 0);"
     Run-DuckDB $sql
 
     # ---- alpha101: 1 part per day (RGS 65536), 100 sparse cols --------------
@@ -81,7 +81,7 @@ foreach ($d in $Days) {
   WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT $(($colList -join ', '))
   FROM r
-) TO '$($alphaDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
+) TO '$($alphaDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD, DICTIONARY_SIZE_LIMIT 0);"
     Run-DuckDB $sql
 
     # ---- ma: day-level partition, 1 part per day (same kind as index/alpha) --
@@ -92,7 +92,7 @@ foreach ($d in $Days) {
   WITH r AS (SELECT range AS r FROM range($start, $end))
   SELECT $(($colList -join ', '))
   FROM r
-) TO '$($maDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD);"
+) TO '$($maDir.Replace('\','/'))/0000-$($rows.ToString('D10')).parquet' (FORMAT PARQUET, ROW_GROUP_SIZE $RGS_BIG, COMPRESSION ZSTD, DICTIONARY_SIZE_LIMIT 0);"
     Run-DuckDB $sql
 
     $dayStart += $rows
