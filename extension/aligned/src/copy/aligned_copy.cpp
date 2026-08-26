@@ -72,8 +72,8 @@ AlignedCopyGlobalState::AlignedCopyGlobalState(ClientContext &ctx, FileSystem &f
 	if (num_workers == 0) {
 		num_workers = 1;
 	}
-	if (num_workers > 8) {
-		num_workers = 8;  // Cap: disk I/O becomes bottleneck beyond this.
+	if (num_workers > 12) {
+		num_workers = 12;  // Cap: balance between CPU contention and I/O.
 	}
 	for (idx_t i = 0; i < num_workers; i++) {
 		workers.push_back(make_uniq<FlushWorker>());
