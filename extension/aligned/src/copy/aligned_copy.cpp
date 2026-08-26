@@ -757,7 +757,9 @@ unique_ptr<ColumnDataCollection> AlignedCopyGlobalState::SortPartition(
 	// Sink all source buffer chunks into the Sort. If has_existing, we
 	// create a chunk with an extra is_existing flag column.
 	DataChunk sink_chunk;
-	sink_chunk.Initialize(context, sort_input_types);
+	if (has_existing) {
+		sink_chunk.Initialize(context, sort_input_types);
+	}
 	for (auto &buf_pair : buffers) {
 		auto &buf = buf_pair.first;
 		bool is_existing = buf_pair.second;
@@ -773,22 +775,27 @@ unique_ptr<ColumnDataCollection> AlignedCopyGlobalState::SortPartition(
 				continue;
 			}
 			idx_t rows = chunk.size();
-			sink_chunk.Reset();
-			sink_chunk.SetCardinality(rows);
-			// Copy merged_types columns from the source chunk.
-			for (idx_t c = 0; c < merged_types.size(); c++) {
-				VectorOperations::Copy(chunk.data[c], sink_chunk.data[c], rows, 0, 0);
-			}
-			// Set the is_existing flag column (if present).
-			if (has_existing) {
+			if (!has_existing) {
+				// No extra flag column needed — sink the source chunk directly.
+				// This skips the per-column VectorOperations::Copy into sink_chunk.
+				OperatorSinkInput sink_input {*global_sink, *local_sink, interrupt};
+				sort.Sink(exec_ctx, chunk, sink_input);
+			} else {
+				sink_chunk.Reset();
+				sink_chunk.SetCardinality(rows);
+				// Copy merged_types columns from the source chunk.
+				for (idx_t c = 0; c < merged_types.size(); c++) {
+					VectorOperations::Copy(chunk.data[c], sink_chunk.data[c], rows, 0, 0);
+				}
+				// Set the is_existing flag column.
 				auto &flag_vec = sink_chunk.data[existing_flag_col];
 				auto *flag_data = FlatVector::GetData<bool>(flag_vec);
 				for (idx_t r = 0; r < rows; r++) {
 					flag_data[r] = is_existing;
 				}
+				OperatorSinkInput sink_input {*global_sink, *local_sink, interrupt};
+				sort.Sink(exec_ctx, sink_chunk, sink_input);
 			}
-			OperatorSinkInput sink_input {*global_sink, *local_sink, interrupt};
-			sort.Sink(exec_ctx, sink_chunk, sink_input);
 		}
 	}
 
