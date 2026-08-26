@@ -15,19 +15,34 @@
 namespace duckdb {
 
 void AlignedExtension::Load(ExtensionLoader &loader) {
-	// aligned_scan(table_name, root=...)
+	// aligned_scan(table_name [, group_filter], root=...)
 	// Scan a logical AlignedTable: reads parquet column groups and assembles
 	// them into a single DataChunk (no JOIN, no materialization).
-	TableFunction aligned_scan_fn("aligned_scan", {LogicalType::VARCHAR}, AlignedScanFunction,
-	                              AlignedBind, AlignedInitGlobal, AlignedInitLocal);
-	aligned_scan_fn.named_parameters["root"] = LogicalType::VARCHAR;
-	aligned_scan_fn.cardinality = AlignedCardinality;
-	aligned_scan_fn.projection_pushdown = true;
-	// Filter pushdown lets partition/row-group pruning reach the aligned scan.
-	aligned_scan_fn.filter_pushdown = true;
-	// filter_prune=true: prune filter-only columns from the scan output.
-	aligned_scan_fn.filter_prune = true;
-	loader.RegisterFunction(aligned_scan_fn);
+	// Optional group_filter: a group name or comma-separated list (e.g.
+	// 'factor/alpha101' or 'factor/alpha101,factor/alpha191') to limit the
+	// scan to specific column groups. The index group is always included.
+	// Without group_filter, all groups are available (projection pushdown
+	// naturally limits which parquet files are opened).
+	TableFunction aligned_scan_fn1("aligned_scan", {LogicalType::VARCHAR}, AlignedScanFunction,
+	                               AlignedBind, AlignedInitGlobal, AlignedInitLocal);
+	aligned_scan_fn1.named_parameters["root"] = LogicalType::VARCHAR;
+	aligned_scan_fn1.cardinality = AlignedCardinality;
+	aligned_scan_fn1.projection_pushdown = true;
+	aligned_scan_fn1.filter_pushdown = true;
+	aligned_scan_fn1.filter_prune = true;
+
+	TableFunction aligned_scan_fn2("aligned_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                               AlignedScanFunction, AlignedBind, AlignedInitGlobal, AlignedInitLocal);
+	aligned_scan_fn2.named_parameters["root"] = LogicalType::VARCHAR;
+	aligned_scan_fn2.cardinality = AlignedCardinality;
+	aligned_scan_fn2.projection_pushdown = true;
+	aligned_scan_fn2.filter_pushdown = true;
+	aligned_scan_fn2.filter_prune = true;
+
+	TableFunctionSet aligned_scan_set("aligned_scan");
+	aligned_scan_set.functions.push_back(std::move(aligned_scan_fn1));
+	aligned_scan_set.functions.push_back(std::move(aligned_scan_fn2));
+	loader.RegisterFunction(std::move(aligned_scan_set));
 
 	// aligned_groups(table_name, root=...)
 	// List all column groups in an AlignedTable.

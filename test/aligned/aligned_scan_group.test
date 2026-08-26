@@ -1,0 +1,74 @@
+# name: test/aligned/aligned_scan_group.test
+# description: aligned_scan with optional group_filter parameter
+
+# --- setup: table with index + factor/alpha + fieldset/ma ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT * FROM aligned_create('sg_tbl', 'index', 'symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT * FROM aligned_create('sg_tbl', 'factor/alpha', 'alpha001 DOUBLE, alpha002 DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT * FROM aligned_create('sg_tbl', 'fieldset/ma', 'ma5 DOUBLE, ma20 DOUBLE')
+
+# --- write data to index group ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/sg_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close, 1000::BIGINT AS volume UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 11.0::DOUBLE, 2000::BIGINT ORDER BY symbol) TO 'sg_tbl' (FORMAT aligned, GROUP 'index')
+
+# --- write factor/alpha (MERGE for alignment) ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/sg_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 0.3::DOUBLE AS alpha001, 0.5::DOUBLE AS alpha002 UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 0.4::DOUBLE, 0.6::DOUBLE ORDER BY symbol) TO 'sg_tbl' (FORMAT aligned, GROUP 'factor/alpha', MERGE true)
+
+# --- write fieldset/ma (MERGE for alignment) ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/sg_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 1.0::DOUBLE AS ma5, 2.0::DOUBLE AS ma20 UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 3.0::DOUBLE, 4.0::DOUBLE ORDER BY symbol) TO 'sg_tbl' (FORMAT aligned, GROUP 'fieldset/ma', MERGE true)
+
+# --- no group_filter: all columns available (index + alpha + ma) ---
+# Current-month placeholder adds 0-row partition (no parquet), so total = 2.
+query III
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT count(*), count(alpha001), count(ma5) FROM aligned_scan('sg_tbl')
+----
+2,2,2
+
+# --- group_filter='factor/alpha': only index + factor/alpha columns ---
+# ma5/ma20 are NOT in the schema.
+statement error
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT ma5 FROM aligned_scan('sg_tbl', 'factor/alpha')
+----
+not found in FROM clause
+
+# --- group_filter='factor/alpha': index + alpha columns work ---
+query I
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT count(alpha001) FROM aligned_scan('sg_tbl', 'factor/alpha')
+----
+2
+
+# --- group_filter='fieldset/ma': index + ma columns work ---
+query I
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT count(ma5) FROM aligned_scan('sg_tbl', 'fieldset/ma')
+----
+2
+
+# --- group_filter='fieldset/ma': alpha columns NOT available ---
+statement error
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT alpha001 FROM aligned_scan('sg_tbl', 'fieldset/ma')
+----
+not found in FROM clause
+
+# --- group_filter with comma: index + both non-index groups ---
+query III
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT count(*), count(alpha001), count(ma5) FROM aligned_scan('sg_tbl', 'factor/alpha,fieldset/ma')
+----
+2,2,2
+
+# --- group_filter='index': only index columns, no factor/ma ---
+statement error
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT alpha001 FROM aligned_scan('sg_tbl', 'index')
+----
+not found in FROM clause
+
+# --- index columns always available regardless of filter ---
+query III
+SET aligned_data_root = '{TEST_DIR}/sg_data'; SELECT count(*), count(close), count(volume) FROM aligned_scan('sg_tbl', 'factor/alpha')
+----
+2,2,2

@@ -125,9 +125,8 @@ index 行空间的一部分**（缺分区 → 该区行保留、该组列全 NUL
 footer 推导。
 
 **空表不是有效表**：`BuildTablePlan` 通过 glob 发现 Group，空表（无任何 part）
-返回空 plan。Writer 的标准 DML（INSERT/UPDATE/DELETE via ATTACH）第一次写入时，
-从 `mapping` 参数推导 Group 结构（哪些 Group、每 Group 写哪些列）；分区模板默认
-`month=%Y-%m`。
+返回空 plan。新组首次 COPY TO (FORMAT aligned) 时，从 query 列推断 Group 结构
+（哪些 Group、每 Group 写哪些列）；分区模板默认 `month=%Y-%m`。
 **例外**：`CREATE TABLE` DDL（§9.1）写 0 行占位 parquet，glob 可发现 → 有效表。
 
 ### 5.2 不存在的字段
@@ -140,7 +139,7 @@ footer 推导。
 | schema（列名+类型） | Parquet footer（每组最后 1 个 part） |
 | 行数 / 行区间 | part 文件名 `{idx:04d}-{rows:10d}` |
 | Row Group 大小 | 编译时常量 131072 |
-| Part 行数软上限 | 编译时常量 1048576（`ALIGNED_DEFAULT_PART_ROWS`，append-to-last-part 阈值） |
+| Part 行数软上限 | 编译时常量 1048576（`ALIGNED_DEFAULT_PART_ROWS`，part 文件行数上限） |
 | 事务号 | 不持久化（无 CAS、无并发控制） |
 | Column Group 列表 | glob `<table>/**/*.parquet` |
 | 分区模板 | 目录结构推导（`year=`/`month=`/`date=` 段） |
@@ -154,7 +153,7 @@ footer 推导。
   - 只识别单层；多层 → 报错。
   - 无识别段 → 该 Group 无分区（仅当 index 也无分区时合法）。
 - 空表（glob 无任何 part）：`BuildTablePlan` 返回空 plan，Reader 报 "table directory
-  does not exist" 或 0 groups；Writer 从 `mapping` 参数推导 Group 结构。
+  does not exist" 或 0 groups；Writer 从 query 列推断 Group 结构。
 
 ---
 
@@ -189,9 +188,8 @@ footer 推导。
   分区内按 `(symbol, date)` 升序排列（同一 symbol 可多行/多日期）。
 - **TIMESTAMP 键（v9）**：当 col1 为 TIMESTAMP 时，键为完整 timestamp 值
   （微秒级），不截断为日期——同一天内同一标的的多个时间戳（如分钟 K 线）是不同
-  键。KeyResolver 内部键类型为 `int64_t`（兼容 `date_t` 与 `timestamp_t`）；
-  分区目录求值时自动提取日期部分（TIMESTAMP 列按 `int64_t` 读取，DATE 列按
-  `int32_t` 读取）。
+  键。COPY TO 写入时按完整 timestamp 值排序；分区目录求值时自动提取日期部分
+  （TIMESTAMP 列按 `int64_t` 读取，DATE 列按 `int32_t` 读取）。
 
 ---
 
@@ -208,9 +206,9 @@ aligned_compact(table, group_name, root=...)  → (dirs_compacted, parts_before,
 aligned_drop(table, group_name, root=...)     → (dirs_removed, files_removed, txid)
 ```
 
-> **注意**：标准 DML（INSERT/UPDATE/DELETE）不再支持。唯一写入路径是 COPY TO (FORMAT aligned)。
+> **注意**：标准 DML 已移除。唯一写入路径是 COPY TO (FORMAT aligned)。
 
-- `mapping` 对已存在的表可省略（按列名自动推断所属 Group）；空表首写必须显式给出。
+- 列映射：已存在的表按列名自动推断所属 Group；新组首次 COPY 从 query 列推断 schema。
 - 映射列类型 = 组内已存类型（组 schema），不是源文件类型。
 - **Compaction**（`aligned_compact(table, 'all')`）：合并所有组的多 part 分区为
   单 part（同目录必须同列集，拒绝 schema-evolution 合并）。**两阶段提交**：所有组
@@ -355,7 +353,7 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 | 情形 | 行为 |
 |------|------|
 | 表目录不存在 | 报错 |
-| 空表（无任何 part） | Reader 报错；Writer 从 mapping 推导 Group |
+| 空表（无任何 part） | Reader 报错；Writer 从 query 列推断 Group |
 | 无 index Group | 报错 "mandatory group 'index' was not found" |
 | Group 分区键不在 index 分区键集合内 | 报错（fail-fast） |
 | 共享分区 R_i != index 的 R_i | 报错（fail-fast） |

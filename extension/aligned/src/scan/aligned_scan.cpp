@@ -255,9 +255,36 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 
 static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, const string &root, const string &table,
                                                     vector<LogicalType> &return_types, vector<string> &names,
-                                                    bool add_partition_col = true) {
+                                                    bool add_partition_col = true,
+                                                    const string &group_filter = string()) {
 	auto result = make_uniq<AlignedTableBindData>();
 	BuildTablePlan(context, root, table, result->plan);
+
+	// If a group filter is specified, keep only the index group + matching
+	// non-index groups. This reduces the output schema to only the columns
+	// of the requested group(s) and avoids opening irrelevant parquet files.
+	if (!group_filter.empty()) {
+		// Parse comma-separated group names.
+		case_insensitive_set_t filter_set;
+		auto parts = StringUtil::Split(group_filter, ',');
+		for (auto &p : parts) {
+			StringUtil::Trim(p);
+			if (!p.empty()) {
+				filter_set.insert(p);
+			}
+		}
+		// The index group (groups[0]) is always kept — it is the canonical
+		// row space and carries the primary key columns (symbol, date).
+		vector<GroupPlan> kept;
+		kept.push_back(std::move(result->plan.groups[0]));
+		for (idx_t gi = 1; gi < result->plan.groups.size(); gi++) {
+			auto &g = result->plan.groups[gi];
+			if (filter_set.count(g.manifest.group) > 0) {
+				kept.push_back(std::move(g));
+			}
+		}
+		result->plan.groups = std::move(kept);
+	}
 	ResolveColumnTypes(context, result->plan, result->names, result->types);
 
 	// Virtual partition column: derived from the index group's partition
@@ -303,16 +330,17 @@ unique_ptr<FunctionData> AlignedBindForCatalog(ClientContext &context, const str
 }
 unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindInput &input,
                                      vector<LogicalType> &return_types, vector<string> &names) {
-	// aligned_scan(table_name, root=...)
-	if (input.inputs.size() != 1) {
-		throw BinderException("aligned_scan: expected (table_name)");
+	// aligned_scan(table_name [, group_filter], root=...)
+	if (input.inputs.size() < 1 || input.inputs.size() > 2) {
+		throw BinderException("aligned_scan: expected (table_name) or (table_name, group_filter)");
 	}
 	string table = StringValue::Get(input.inputs[0]);
+	string group_filter = input.inputs.size() >= 2 ? StringValue::Get(input.inputs[1]) : string();
 
 	auto root_it = input.named_parameters.find("root");
 	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
 	string root = ResolveDataRoot(context, root_param, "aligned_scan");
-	return AlignedBindInternal(context, root, table, return_types, names);
+	return AlignedBindInternal(context, root, table, return_types, names, true, group_filter);
 }
 
 //===----------------------------------------------------------------------===//
