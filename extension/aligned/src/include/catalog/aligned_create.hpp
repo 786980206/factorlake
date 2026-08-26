@@ -2,14 +2,30 @@
 
 #include "duckdb.hpp"
 #include "duckdb/parser/column_definition.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
-struct BoundCreateTableInfo;
+//! Validates that a group name is either "index" or a two-level path
+//! "lv1/lv2" (exactly one slash, neither segment empty). Throws
+//! BinderException on invalid names.
+inline void ValidateGroupName(const string &group_name) {
+	if (StringUtil::CIEquals(group_name, "index")) {
+		return;
+	}
+	auto slash = group_name.find('/');
+	if (slash == string::npos || group_name.find('/', slash + 1) != string::npos ||
+	    slash == 0 || slash + 1 >= group_name.size()) {
+		throw BinderException("aligned: group name '%s' must be 'index' or a "
+		                       "two-level path 'lv1/lv2' (e.g. 'factor/alpha101')", group_name);
+	}
+}
 
 //! Creates an AlignedTable on disk: creates the table directory, the column
 //! group subdirectories, and writes one empty (0-row) placeholder parquet file
 //! per group so that the reader can discover the schema from the footer.
+//! For table extension (existing table), writes N-row all-NULL placeholders
+//! (N = index partition row count) to satisfy partition alignment.
 //!
 //! Syntax:
 //!   CREATE TABLE al.<table> (col0 <type>, col1 <type>, ...) WITH (
@@ -19,7 +35,7 @@ struct BoundCreateTableInfo;
 //!
 //! Rules:
 //!   - The first two columns must be (symbol VARCHAR, date DATE/TIMESTAMP) —
-//!     the v8 primary key contract (col0=symbol, col1=date).
+//!     the primary key contract (col0=symbol, col1=date).
 //!   - `groups` maps columns to column groups (format "group:col1,col2;...").
 //!     Columns not listed in any group default to the index group.
 //!   - `partition_template` defaults to "month=%Y-%m".

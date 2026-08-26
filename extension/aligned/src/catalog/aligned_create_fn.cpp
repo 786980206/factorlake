@@ -11,7 +11,6 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "duckdb/parallel/async_result.hpp"
 
 #include <algorithm>
 
@@ -27,8 +26,6 @@ struct AlignedCreateBindData : public TableFunctionData {
 	string root;
 	vector<ColumnDefinition> columns;
 	string partition_template;
-	vector<LogicalType> types;
-	vector<string> names;
 };
 
 struct AlignedCreateGlobalState : public GlobalTableFunctionState {
@@ -85,10 +82,8 @@ unique_ptr<FunctionData> AlignedCreateBind(ClientContext &context, TableFunction
 	const Value *root_param = (root_it != input.named_parameters.end()) ? &root_it->second : nullptr;
 	result->root = ResolveDataRoot(context, root_param, "aligned_create");
 
-	result->types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
-	result->names = {"dirs_created", "files_created", "txid"};
-	return_types = result->types;
-	names = result->names;
+	return_types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
+	names = {"dirs_created", "files_created", "txid"};
 	return std::move(result);
 }
 
@@ -99,8 +94,6 @@ unique_ptr<GlobalTableFunctionState> AlignedCreateInitGlobal(ClientContext &cont
 //===----------------------------------------------------------------------===//
 // Create
 //===----------------------------------------------------------------------===//
-
-//! (CountRecursive is now in io/parquet_io.hpp — shared with aligned_drop)
 
 void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind = data.bind_data->Cast<AlignedCreateBindData>();
@@ -114,28 +107,11 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 	auto &fs = FileSystem::GetFileSystem(context);
 	string table_dir = bind.root + "/" + bind.table_name;
 
-	// Check if the table already exists (has committed parquet files).
-	bool table_exists = false;
-	if (fs.DirectoryExists(table_dir)) {
-		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
-		for (auto &p : parts) {
-			// Normalize to '/' separators so the _tmp check works on Windows.
-			string norm = p.path;
-			std::replace(norm.begin(), norm.end(), '\\', '/');
-			if (norm.find("/_tmp/") == string::npos) {
-				table_exists = true;
-				break;
-			}
-		}
-	}
-
 	// Acquire write lock for mutual exclusion with concurrent writers.
 	TableWriteLock write_lock(fs, table_dir);
 
-	// Re-check table_exists AFTER acquiring the lock (TOCTOU: a concurrent
-	// writer may have created or dropped the table between the pre-lock check
-	// and the lock acquisition).
-	table_exists = false;
+	// Check table_exists AFTER acquiring the lock (TOCTOU-safe).
+	bool table_exists = false;
 	if (fs.DirectoryExists(table_dir)) {
 		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
 		for (auto &p : parts) {
@@ -171,12 +147,7 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 			                       bind.table_name, table_dir, bind.group_name);
 		}
 		// Validate non-index group name is lv1/lv2 (two-level path).
-		auto slash = bind.group_name.find('/');
-		if (slash == string::npos || bind.group_name.find('/', slash + 1) != string::npos ||
-		    slash == 0 || slash + 1 >= bind.group_name.size()) {
-			throw BinderException("aligned_create: non-index group name '%s' must be 'lv1/lv2' (two-level path)",
-			                       bind.group_name);
-		}
+		ValidateGroupName(bind.group_name);
 		string group_dir = table_dir + "/" + bind.group_name;
 		if (fs.DirectoryExists(group_dir)) {
 			throw BinderException("aligned_create: group '%s' already exists in table '%s'",

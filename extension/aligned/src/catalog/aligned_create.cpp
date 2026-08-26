@@ -5,15 +5,10 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/types/column/column_data_collection.hpp"
-#include "duckdb/common/types/date.hpp"
 
-#include "parquet_writer.hpp"
 #include "io/parquet_io.hpp"
 
-
 #include <algorithm>
-#include <map>
 
 namespace duckdb {
 
@@ -21,23 +16,9 @@ namespace duckdb {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-//! Validates a group name: "index" is valid as-is; all other groups must be
-//! a two-level path "lv1/lv2" (exactly one slash, neither segment empty).
-static void ValidateGroupName(const string &group_name) {
-	if (StringUtil::CIEquals(group_name, "index")) {
-		return;
-	}
-	auto slash = group_name.find('/');
-	if (slash == string::npos || group_name.find('/', slash + 1) != string::npos ||
-	    slash == 0 || slash + 1 >= group_name.size()) {
-		throw BinderException("aligned CREATE TABLE: group name '%s' must be 'index' or a "
-		                       "two-level path 'lv1/lv2' (e.g. 'factor/alpha101')", group_name);
-	}
-}
-
 //! Parses a "group:col1,col2;group2:col3" mapping string (same syntax as
-//! aligned_create groups option). Returns an ordered map: group_name -> column list.
-//! The "index" group is always first if present.
+//! aligned_create groups option). Returns a case-insensitive map: group_name ->
+//! column list (insertion order not preserved).
 static void ParseGroupsOption(const string &groups_str, case_insensitive_map_t<vector<string>> &out) {
 	auto entries = StringUtil::Split(groups_str, ';');
 	for (auto &entry : entries) {
