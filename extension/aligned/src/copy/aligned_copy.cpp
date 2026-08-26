@@ -1445,11 +1445,30 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		}
 
 		// Project input columns to group schema.
-		local_state.projected_chunk.Reset();
-		ProjectRows(context.client, bind_data, input, start, len,
-		            local_state.projected_chunk);
+		// Fast path: if the run covers the entire chunk, the column mapping
+		// is identity, all types match, and no hidden sort keys are needed,
+		// we can append the input chunk directly — skipping ProjectRows'
+		// per-column SelectionVector copy entirely.
+		bool use_direct_append = false;
+		if (!bind_data.needs_hidden_sort_keys && start == 0 && len == input.size()) {
+			use_direct_append = true;
+			for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+				if (bind_data.input_col_map[c] != c ||
+				    bind_data.input_types[c] != bind_data.sql_types[c]) {
+					use_direct_append = false;
+					break;
+				}
+			}
+		}
 
-		buf_it->second->Append(*local_state.rg_appends[pk], local_state.projected_chunk);
+		if (use_direct_append) {
+			buf_it->second->Append(*local_state.rg_appends[pk], input);
+		} else {
+			local_state.projected_chunk.Reset();
+			ProjectRows(context.client, bind_data, input, start, len,
+			            local_state.projected_chunk);
+			buf_it->second->Append(*local_state.rg_appends[pk], local_state.projected_chunk);
+		}
 
 		if (buf_it->second->Count() >= RG_SIZE) {
 			// Push to background worker.
