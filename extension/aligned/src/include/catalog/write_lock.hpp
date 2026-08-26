@@ -73,7 +73,6 @@ public:
 	const string table_path;
 	const idx_t txid;
 	const string tmp_root;
-	bool committed = false;
 
 	StagedTransaction(FileSystem &fs, const string &table_path)
 	    : fs(fs), table_path(table_path), txid(NextTransactionId()),

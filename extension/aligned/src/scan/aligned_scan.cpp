@@ -119,13 +119,12 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	//   scratch_pos:   column_ids index (the filter-path scratch chunk)
 	vector<idx_t> projected_pos;
 	vector<idx_t> scratch_pos;
-	// Virtual rowid column (catalog integration / DELETE-UPDATE): scratch slot
-	// (column_ids index) and effective output position (INVALID when pruned).
-	idx_t rowid_scratch = DConstants::INVALID_INDEX;
+	// Virtual rowid column (catalog integration): effective output position
+	// (INVALID when pruned). Lets the binder treat the scan as a real base table.
 	idx_t rowid_pos = DConstants::INVALID_INDEX;
-	// Duplicate column requests (UPDATE re-references key columns): (from, to)
-	// positions of the same full-schema column, per index space; filled after
-	// the group scan by copying the first occurrence.
+	// Duplicate column requests (e.g. SELECT a, a): (from, to) positions of the
+	// same full-schema column, per index space; filled after the group scan by
+	// copying the first occurrence.
 	vector<pair<idx_t, idx_t>> dup_copies_scratch;
 	vector<pair<idx_t, idx_t>> dup_copies_out;
 	// Per-group flag: does this group contribute any requested column?
@@ -147,8 +146,6 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	// output position (INVALID when pruned or not requested).
 	idx_t partition_scratch = DConstants::INVALID_INDEX;
 	idx_t partition_pos = DConstants::INVALID_INDEX;
-	// True when a filter on the partition column was used for partition pruning.
-	bool partition_pruned = false;
 };
 
 struct AlignedScanLocalState : public LocalTableFunctionState {
@@ -167,18 +164,6 @@ struct AlignedScanLocalState : public LocalTableFunctionState {
 //===----------------------------------------------------------------------===//
 // Column type resolution (bind time)
 //===----------------------------------------------------------------------===//
-
-namespace {
-
-//! Opens a parquet file and returns the reader. Part metadata (row count,
-//! columns) is read from the Parquet footer at plan time; there is no sidecar
-//! to validate against anymore.
-unique_ptr<ParquetReader> OpenPartReader(ClientContext &context, const PartInfo &part, const string &table_name,
-                                         const string &group_name) {
-	return make_uniq<ParquetReader>(context, OpenFileInfo(part.path), ParquetOptions(context));
-}
-
-} // namespace
 
 //! Builds the table schema (names/types in table order) and fills each group's
 //! output_positions. Types are resolved from the first part containing a column.
@@ -469,9 +454,8 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 		auto col_id = input.column_ids[i];
 		auto out_pos = out_of_colids[i];
 		if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
-			// Virtual rowid = logical row number. scratch slot = column_ids
-			// index; output slot = effective position (INVALID when pruned).
-			result->rowid_scratch = i;
+			// Virtual rowid = logical row number.
+			// Output slot = effective position (INVALID when pruned).
 			result->rowid_pos = out_pos;
 			continue;
 		}
@@ -497,8 +481,8 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			continue; // pruned from the scan output (filter-only column)
 		}
 		if (result->projected_pos[col_id] != DConstants::INVALID_INDEX) {
-			// Same column requested twice (e.g. UPDATE re-references key
-			// columns): replicate the filled vector after the group scan.
+			// Same column requested twice (e.g. SELECT a, a): replicate the
+			// filled vector after the group scan.
 			result->dup_copies_out.emplace_back(result->projected_pos[col_id], out_pos);
 			continue;
 		}
@@ -546,7 +530,6 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			if (bind.partition_col_idx != DConstants::INVALID_INDEX && full_col == bind.partition_col_idx) {
 				if (filter.filter_type == TableFilterType::CONSTANT_COMPARISON) {
 					ApplyPartitionColumnPruning(bind, filter.Cast<ConstantFilter>(), result->kept_parts[0]);
-					result->partition_pruned = true;
 				}
 				continue; // not a group-level filter
 			}
@@ -643,7 +626,7 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	auto &part = parts[part_idx];
 
 	g.part_idx = part_idx;
-	g.reader = OpenPartReader(context, part, bind.plan.table_name, group.manifest.group);
+	g.reader = make_uniq<ParquetReader>(context, OpenFileInfo(part.path), ParquetOptions(context));
 
 	// Build the column name → index map for this part (O(cols) once,
 	// replaces O(cols²) std::find_if scans in the loop below and in
@@ -1215,6 +1198,10 @@ static void FillPartitionColumn(const AlignedTableBindData &bind, idx_t partitio
 		part_idx++;
 	}
 
+	// Cache the per-part partition value once (avoids O(rows) string allocations).
+	string_t cached_value;
+	idx_t cached_part_idx = DConstants::INVALID_INDEX;
+
 	for (idx_t i = 0; i < count; i++) {
 		idx_t row = chunk_start + i;
 		// Advance past exhausted parts
@@ -1226,10 +1213,12 @@ static void FillPartitionColumn(const AlignedTableBindData &bind, idx_t partitio
 			validity.SetInvalid(i);
 			continue;
 		}
-		// Extract the value portion from the partition key
-		auto &part = parts[part_idx];
-		string value = PartitionKeyValue(part.partition_key);
-		data[i] = StringVector::AddString(vec, value);
+		// Extract the value portion from the partition key — cached per part.
+		if (part_idx != cached_part_idx) {
+			cached_part_idx = part_idx;
+			cached_value = StringVector::AddString(vec, PartitionKeyValue(parts[part_idx].partition_key));
+		}
+		data[i] = cached_value;
 	}
 }
 

@@ -60,8 +60,8 @@ struct AlignedCopyBindData : public TableFunctionData {
 	bool is_timestamp = false;  // partition column is TIMESTAMP (not DATE)
 
 	// OVERWRITE option: true (default) = wipe partition before writing;
-	// false = merge with existing partition data (old rows LEFT JOIN new rows;
-	// new data wins on key conflict).
+	// false = merge with existing partition data (union of old and new rows;
+	// new data wins on duplicate (symbol, date) keys).
 	bool overwrite = true;
 
 	// For non-index groups with needs_hidden_sort_keys, we must read
@@ -99,8 +99,6 @@ struct PerPartitionState {
 	// Accounting.
 	idx_t received_rows = 0;
 	idx_t written_rows = 0;
-
-	bool finalized = false;
 };
 
 //===----------------------------------------------------------------------===//
@@ -221,7 +219,7 @@ struct AlignedCopyGlobalState : public GlobalFunctionData {
 //===----------------------------------------------------------------------===//
 
 struct AlignedCopyLocalState : public LocalFunctionData {
-	explicit AlignedCopyLocalState(ClientContext &context, const vector<LogicalType> &types);
+	AlignedCopyLocalState() = default;
 
 	// Scratch buffer for projecting input chunk -> group schema.
 	DataChunk projected_chunk;

@@ -14,8 +14,9 @@ struct AlignedTableBindData : public TableFunctionData {
 	vector<string> names;
 	vector<LogicalType> types;
 	idx_t total_rows = 0;
-	//! Owning catalog entry when scanned through an attached table (Phase 8);
-	//! nullptr for direct aligned_scan() calls.
+	//! Owning catalog entry when scanned through an attached table;
+	//! nullptr for direct aligned_scan() calls. Used by get_bind_info so the
+	//! binder treats the scan as a real base table.
 	class TableCatalogEntry *catalog_entry = nullptr;
 	//! Virtual partition column (e.g. "year" of type VARCHAR). Populated when
 	//! the table's partition template prefix does not collide with an existing

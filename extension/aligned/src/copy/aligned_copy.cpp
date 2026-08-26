@@ -37,6 +37,7 @@ namespace duckdb {
 static constexpr idx_t RG_SIZE = 131072;
 
 // Timing instrumentation (guarded by env var ALIGNED_COPY_TIMING).
+static std::once_flag g_timing_once;
 static bool g_timing_enabled = false;
 static std::chrono::steady_clock::time_point g_sink_start;
 static std::atomic<idx_t> g_sink_chunks {0};
@@ -376,8 +377,8 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 	merge_chunk.Initialize(context, merged_types);
 
 	while (true) {
-		bool g_ok = group_cols->Scan(group_scan, group_chunk);
-		bool k_ok = key_cols->Scan(key_scan, key_chunk);
+		group_cols->Scan(group_scan, group_chunk);
+		key_cols->Scan(key_scan, key_chunk);
 		// Use the minimum of both chunk sizes — if one CDC is exhausted
 		// before the other, stop (they should be the same size).
 		idx_t rows = std::min(group_chunk.size(), key_chunk.size());
@@ -422,6 +423,9 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 				    "aligned COPY MERGE: unsupported date type cast %s → %s",
 				    EnumUtil::ToChars(src_type), EnumUtil::ToChars(dst_type));
 			}
+			// Copy the validity mask so NULL dates are preserved across the cast.
+			FlatVector::Validity(dst_date_vec).Copy(
+			    FlatVector::Validity(src_date_vec), rows);
 		}
 		merged->Append(merged_append, merge_chunk);
 	}
@@ -790,7 +794,6 @@ void AlignedCopyGlobalState::FinalizePartition(PerPartitionState &pp) {
 	pp.writer->Finalize();
 	RenamePartFile(pp);
 	pp.written_rows += pp.rows_in_current_part;
-	pp.finalized = true;
 	pp.writer.reset();
 }
 
@@ -810,9 +813,6 @@ void AlignedCopyGlobalState::RenamePartFile(PerPartitionState &pp) {
 //===----------------------------------------------------------------------===//
 // LocalState
 //===----------------------------------------------------------------------===//
-
-AlignedCopyLocalState::AlignedCopyLocalState(ClientContext &context, const vector<LogicalType> &types) {
-}
 
 //===----------------------------------------------------------------------===//
 // Copy options
@@ -865,7 +865,6 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 	// Also check parsed_options (OVERWRITE is consumed by DuckDB's binder
 	// and removed from info.options, but remains in parsed_options).
 	for (auto &opt : input.info.parsed_options) {
-		fprintf(stderr, "[BIND] parsed_option '%s' = '%s'\n", opt.first.c_str(), opt.second->ToString().c_str());
 		if (StringUtil::Lower(opt.first) == "overwrite") {
 			// Evaluate the parsed expression to get the boolean value.
 			auto value = opt.second->ToString();
@@ -1003,9 +1002,8 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 		}
 	}
 
-	if (bind_data->partition_col_pos < bind_data->input_types.size()) {
-		bind_data->is_timestamp = bind_data->input_types[bind_data->partition_col_pos].id() == LogicalTypeId::TIMESTAMP;
-	}
+	bind_data->is_timestamp =
+	    bind_data->input_types[bind_data->partition_col_pos].id() == LogicalTypeId::TIMESTAMP;
 
 	// Check if this group's output schema includes symbol and date columns.
 	// If not (non-index group), we need hidden sort-key columns appended to
@@ -1061,7 +1059,7 @@ static unique_ptr<LocalFunctionData> AlignedCopyInitializeLocal(ExecutionContext
 		chunk_types.push_back(bind_data.hidden_symbol_type);
 		chunk_types.push_back(bind_data.hidden_date_type);
 	}
-	auto result = make_uniq<AlignedCopyLocalState>(context.client, chunk_types);
+	auto result = make_uniq<AlignedCopyLocalState>();
 	result->projected_chunk.Initialize(context.client, chunk_types);
 	return std::move(result);
 }
@@ -1133,9 +1131,11 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 	}
 
 	if (!g_timing_enabled) {
-		const char *env = std::getenv("ALIGNED_COPY_TIMING");
-		g_timing_enabled = (env != nullptr);
-		if (g_timing_enabled) g_sink_start = std::chrono::steady_clock::now();
+		std::call_once(g_timing_once, [] {
+			const char *env = std::getenv("ALIGNED_COPY_TIMING");
+			g_timing_enabled = (env != nullptr);
+			if (g_timing_enabled) g_sink_start = std::chrono::steady_clock::now();
+		});
 	}
 
 	auto t0 = std::chrono::steady_clock::now();
@@ -1202,14 +1202,12 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		if (date_val == local_state.cached_date_val) {
 			return local_state.cached_pk;
 		}
-		string pk;
 		if (!EvaluatePartitionTemplate(bind_data.partition_template, date_val,
-		                                bind_data.is_timestamp, pk)) {
+		                                bind_data.is_timestamp, local_state.cached_pk)) {
 			throw IOException("aligned COPY: cannot evaluate partition template '%s'",
 			                  bind_data.partition_template);
 		}
 		local_state.cached_date_val = date_val;
-		local_state.cached_pk = pk;
 		return local_state.cached_pk;
 	};
 

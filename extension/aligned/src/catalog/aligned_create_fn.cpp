@@ -132,6 +132,22 @@ void AlignedCreateFunction(ClientContext &context, TableFunctionInput &data, Dat
 	// Acquire write lock for mutual exclusion with concurrent writers.
 	TableWriteLock write_lock(fs, table_dir);
 
+	// Re-check table_exists AFTER acquiring the lock (TOCTOU: a concurrent
+	// writer may have created or dropped the table between the pre-lock check
+	// and the lock acquisition).
+	table_exists = false;
+	if (fs.DirectoryExists(table_dir)) {
+		auto parts = fs.GlobFiles(table_dir + "/**/*.parquet", FileGlobOptions::ALLOW_EMPTY);
+		for (auto &p : parts) {
+			string norm = p.path;
+			std::replace(norm.begin(), norm.end(), '\\', '/');
+			if (norm.find("/_tmp/") == string::npos) {
+				table_exists = true;
+				break;
+			}
+		}
+	}
+
 	idx_t txid = NextTransactionId();
 
 	if (StringUtil::CIEquals(bind.group_name, "index")) {

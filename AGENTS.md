@@ -490,11 +490,11 @@ extension/aligned/src/
 - **PS 5.1 `-c` 无法携带引号标识符**：走临时文件 + `cmd /c "exe < file"`。
 - **DuckDB CLI `-csv` 输出 NULL 是字面 `NULL`**（不是空串）。
 - **DuckDB COPY TO PARQUET 的 ROW_GROUP_SIZE 不精确**：writer 按 vector 大小 flush。
-- **`EvaluatePartitionTemplate` int64_t 版本的 date/timestamp 启发式**：
-  `value >= 0 && value <= 200000` 判为 date_t，否则判为 timestamp_t。1970 年
-  之前的日期（负 date_t）和 epoch 后 200000 微秒内的 timestamp_t 会被误判。
-  **已修复**：新增 `is_timestamp` 类型安全重载，所有调用方都已改用类型安全版本。
-  旧的启发式重载保留向后兼容但已弃用。
+- **`EvaluatePartitionTemplate` 已移除 int64_t 启发式重载**：原先的
+  `int64_t` 重载用 `value >= 0 && value <= 200000` 启发式区分 date_t vs
+  timestamp_t，会误判 pre-1970 日期和 epoch 附近 timestamp。已替换为
+  类型安全的 `is_timestamp` 重载（调用方显式指定类型）。旧的启发式重载
+  已删除（DML 删除后无调用方）。
 - **读路径列匹配必须大小写不敏感**：`OpenPart` 和 `ComputeRowGroupWindow` 中
   查找 parquet reader 列名必须用 `StringUtil::CIEquals`，与 `parquet_io.cpp`
   一致。跨 part 列名大小写不一致（如 `Symbol` vs `symbol`）不应被静默 NULL 填充。

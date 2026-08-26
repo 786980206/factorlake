@@ -1,15 +1,16 @@
-//! DuckLake-style catalog integration (Phase 8).
+//! Aligned catalog integration.
 //!
 //! `ATTACH '<root>' AS name (TYPE ALIGNED)` creates an AlignedCatalog over the
 //! parquet column-group data root. Tables are LOGICAL: reads go straight to
 //! the parquet files via the aligned_scan scan; nothing is materialized.
 //! DML (INSERT/UPDATE/DELETE) is not supported — use COPY TO (FORMAT aligned)
-//! for bulk writes and MERGE for incremental updates.
+//! for bulk writes and COPY TO (FORMAT aligned, MERGE true) for incremental updates.
 
 #include "catalog/aligned_catalog.hpp"
 
 #include "catalog/manifest.hpp"
 #include "catalog/aligned_create.hpp"
+#include "catalog/write_lock.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
@@ -33,7 +34,8 @@
 namespace duckdb {
 
 //! BindInfo hook for LogicalGet::GetTable(): reports the owning catalog entry
-//! so DELETE/UPDATE recognize the scan as a base table.
+//! so the binder treats the scan as a real base table (used by AddBaseTable,
+//! cardinality estimation, and metadata queries like duckdb_tables()).
 static BindInfo AlignedScanGetBindInfo(const optional_ptr<FunctionData> bind_data) {
 	auto &abd = bind_data->Cast<AlignedTableBindData>();
 	return BindInfo(*abd.catalog_entry);
@@ -52,7 +54,7 @@ TableFunction AlignedTableEntry::GetScanFunction(ClientContext &context, unique_
 	bind_data = AlignedBindForCatalog(context, root, name, types, names);
 
 	// Add the virtual partition column to the scan bind data (but NOT to the
-	// catalog entry's column schema, which is used for DML binding).
+	// catalog entry's column schema, which is used for binder column resolution).
 	auto &scan_bind = bind_data->Cast<AlignedTableBindData>();
 	if (!scan_bind.plan.groups.empty()) {
 		auto &index_group = scan_bind.plan.groups[0];
@@ -88,7 +90,7 @@ TableFunction AlignedTableEntry::GetScanFunction(ClientContext &context, unique_
 	fn.projection_pushdown = true;
 	fn.filter_pushdown = true;
 	fn.filter_prune = true;
-	// Lets catalog binders recognize this GET as a base table (LogicalGet::GetTable).
+	// Lets the binder recognize this GET as a real base table (LogicalGet::GetTable).
 	bind_data->Cast<AlignedTableBindData>().catalog_entry = this;
 	fn.get_bind_info = AlignedScanGetBindInfo;
 	return fn;
@@ -119,7 +121,6 @@ void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
 	if (tables_loaded) {
 		return;
 	}
-	tables_loaded = true;
 	tables.clear(); // Clear stale entries before re-loading from disk.
 	const string &root = catalog.Cast<AlignedCatalog>().GetRoot();
 
@@ -127,6 +128,7 @@ void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
 	if (!fs->DirectoryExists(root)) {
 		// Empty data root — no tables yet. CREATE TABLE will create the
 		// directory structure on demand.
+		tables_loaded = true;
 		return;
 	}
 	vector<string> candidates;
@@ -164,6 +166,10 @@ void AlignedSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
 			// propagate so real errors are not silently swallowed.
 		}
 	}
+	// Mark loaded only after the full scan succeeds. If a non-IOException
+	// propagates from the loop above, tables_loaded stays false so the next
+	// EnsureTablesLoaded call will retry from scratch.
+	tables_loaded = true;
 }
 
 void AlignedSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
