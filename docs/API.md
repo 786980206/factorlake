@@ -28,7 +28,7 @@ AlignedTable 扩展是一个 unsigned 的 DuckDB 扩展二进制文件（`.duckd
 
 - **GitHub Release 下载**：从项目的 GitHub Release 页面下载对应平台的
   `aligned.duckdb_extension` 文件。
-- **本地构建**：见 `docs/EXTENSION_RELEASE.md`，使用
+- **本地构建**：见 README.md 的"构建"章节，使用
   `-DEXTENSION_STATIC_BUILD=1` 构建产出自包含的二进制（约 24MB）。
 
 ### 1.2 在 DuckDB CLI 中加载

@@ -114,8 +114,98 @@ SELECT column_mapping FROM aligned_meta('cnstk_ixday');
 | 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，并行暂存各分区目录（Phase 1 多线程），规范化重写（1M rows/part），原子切换 |
 | 删除 | ✅ | `aligned_drop()`：删除列组（`factor/alpha`）或整表（`index`） |
 | catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；`ATTACH` 仅用于读访问，`INSERT/UPDATE/DELETE` 抛 `NotImplementedException`，写入请用 `COPY TO (FORMAT aligned)` |
-| 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
+| 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用 |
 
 不支持（明确不做）：Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
 
 ## 构建
+
+### 前置要求
+
+- DuckDB **v1.5.5** 源码（vendored 在 `duckdb/`，gitignored）
+- Windows：scoop + MSVC（vcvars64）+ Ninja
+- Linux：brew/gcc + Ninja
+
+### 构建整体（含调试 CLI）
+
+```powershell
+.\scripts\build.ps1          # Windows：vcvars64 + ninja → duckdb\build\duckdb_al3.exe
+```
+
+### 构建可加载扩展（Release，自包含）
+
+```powershell
+.\scripts\build_extension.ps1 -Copy   # -DEXTENSION_STATIC_BUILD=1
+# 产物：release/aligned.duckdb_extension（~24MB，静态链接 DuckDB 核心 + parquet + mbedtls + zstd）
+```
+
+扩展是 **unsigned**（无官方签名），加载时需 `duckdb -unsigned` 或
+`SET allow_unsigned_extensions=true`。扩展二进制内嵌 DuckDB engine version（v1.5.5），
+加载时强校验与 CLI 版本一致，版本不匹配会报错。
+
+### 运行测试
+
+```powershell
+.\scripts\run_tests.ps1           # 全部测试
+python test/run_sqllogictest.py    # SQLLogicTest（auto-discover test/aligned/*.test）
+```
+
+## 扩展安装
+
+### 方式 A：本地 LOAD（开发用）
+
+```bash
+# CLI 专用（-unsigned 标志）
+duckdb -unsigned -c "LOAD '/path/to/aligned.duckdb_extension'; SELECT * FROM aligned_scan('mytable');"
+
+# 或在 SQL 会话中直接 LOAD 完整路径
+LOAD '/path/to/aligned.duckdb_extension';
+SET aligned_data_root = '/data';
+SELECT * FROM aligned_scan('mytable');
+```
+
+### 方式 B：INSTALL 从 URL 下载（发布后）
+
+```sql
+-- 一次性安装（下载到 ~/.duckdb/extensions/v1.5.5/<platform>/）
+INSTALL 'https://github.com/<org>/<repo>/releases/download/v0.1.0/aligned-windows_amd64.duckdb_extension';
+
+-- 使用（扩展名 = URL 文件 base name）
+LOAD aligned-windows_amd64;
+SET aligned_data_root = '/data';
+SELECT * FROM aligned_scan('cnstk_ixday');
+
+-- 更新版本
+FORCE INSTALL 'https://github.com/<org>/<repo>/releases/download/v0.2.0/aligned-windows_amd64.duckdb_extension';
+```
+
+> **注意**：资产名带平台后缀时，`LOAD` 使用的扩展名 = 文件 base name
+> （`aligned-windows_amd64`）。若想保持 `LOAD aligned`，可仅发布单平台资产
+> `aligned.duckdb_extension`。CLI 版本必须 v1.5.5（与构建版本一致）。
+
+### INSTALL 输入判定
+
+| 输入 | 行为 |
+|------|------|
+| `INSTALL 'http://...'` | 直接 HTTP 下载（不需要 httpfs） |
+| `INSTALL 'https://...'` | 直接 HTTPS 下载（自动 autoload httpfs） |
+| `INSTALL '本地路径'` | 文件复制安装 |
+| `INSTALL name FROM 'repo-url'` | 仓库模板 URL（不适合 GitHub Release） |
+| `INSTALL name`（无 repo） | 默认 core 仓库 `extensions.duckdb.org` |
+
+GitHub Release 资产平铺无目录结构，**直接 URL 安装是正解**（repository 方式
+需要 `v1.5.5/<platform>/` 布局，GitHub Release 不支持）。
+
+### 三个硬约束
+
+1. **签名**：未开启 `allow_unsigned_extensions` 时无签名扩展被拒绝。
+   → CLI 必须 `duckdb -unsigned` 或 `SET allow_unsigned_extensions=true`。
+2. **版本强校验**：扩展内嵌 `DUCKDB_NORMALIZED_VERSION`，加载时
+   `engine_version != duckdb_version` 直接拒绝。必须用相同 DuckDB 版本构建。
+3. **依赖自包含**：`EXTENSION_STATIC_BUILD=1` 将 DuckDB 核心 + parquet + mbedtls +
+   zstd 静态链入扩展 → 单文件，用户**无需预装 parquet**。
+
+## 架构文档
+
+- **AGENTS.md** — 唯一权威架构文件：核心需求、契约、代码结构、关键经验/坑
+- **docs/API.md** — API 对接文档：ATTACH、COPY TO、全部表函数参数说明

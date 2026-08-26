@@ -358,7 +358,7 @@ extension/aligned/src/
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`
 - 发布构建：`-DEXTENSION_STATIC_BUILD=1`，产物 23MB 自包含
 - 无签名扩展需 `duckdb -unsigned`；`INSTALL '<url>'` + `LOAD aligned`
-- 详见 `docs/EXTENSION_RELEASE.md`
+- 详见 README.md 的"构建"和"扩展安装"章节
 
 ---
 
