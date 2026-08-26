@@ -968,15 +968,23 @@ void AlignedCopyGlobalState::FlushSortedPartition(
 			}
 		} else {
 			// No dedup needed: flush sorted chunks directly.
-			while (sorted_cdc->Scan(sort_scan, sort_chunk)) {
-				if (sort_chunk.size() == 0) {
-					continue;
-				}
-				flush_buffer->Append(flush_append, sort_chunk);
-				if (flush_buffer->Count() >= RG_SIZE) {
-					FlushToPartition(pp, *flush_buffer);
-					flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-					flush_buffer->InitializeAppend(flush_append);
+			// Fast path: if the sorted CDC has exactly the same columns as
+			// the group schema (no hidden keys, no flag) and fits in one RG,
+			// flush it directly without the intermediate flush_buffer copy.
+			if (!bind_data.needs_hidden_sort_keys && sorted_cdc->ColumnCount() == bind_data.sql_types.size() &&
+			    sorted_cdc->Count() <= RG_SIZE) {
+				FlushToPartition(pp, *sorted_cdc);
+			} else {
+				while (sorted_cdc->Scan(sort_scan, sort_chunk)) {
+					if (sort_chunk.size() == 0) {
+						continue;
+					}
+					flush_buffer->Append(flush_append, sort_chunk);
+					if (flush_buffer->Count() >= RG_SIZE) {
+						FlushToPartition(pp, *flush_buffer);
+						flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+						flush_buffer->InitializeAppend(flush_append);
+					}
 				}
 			}
 		}
