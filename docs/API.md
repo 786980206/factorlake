@@ -292,7 +292,7 @@ COPY (SELECT symbol, date, close, volume
 
 ## 6. 表函数 API
 
-提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+提供 6 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
 ### 6.0 `aligned_create` — 建表 / 扩展列组
 
@@ -370,20 +370,72 @@ COPY (SELECT symbol, date, ma5, ma20, ma60 FROM mock ORDER BY symbol, date)
 ### 6.1 `aligned_scan` — 扫描逻辑表
 
 ```sql
+-- 全列扫描（投影下推自然限制打开的 parquet 文件）
 SELECT * FROM aligned_scan(table_name [, root => '...']);
+
+-- 列组过滤扫描（仅打开 index + 指定组的 parquet）
+SELECT * FROM aligned_scan(table_name, group_filter [, root => '...']);
 ```
 
 | 参数 | 位置 | 类型 | 必填 | 说明 |
 |------|------|------|------|------|
 | `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名（数据根目录下的子目录名）。 |
+| `group_filter` | 位置参数 2 | VARCHAR | 否 | 列组过滤：单个组名或逗号分隔列表（如 `'factor/alpha101'` 或 `'factor/alpha101,fieldset/ma'`）。指定后仅扫描匹配的列组 + index 组（index 始终包含，提供主键列 symbol/date）。未指定时所有列组可用。 |
 | `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root` 设置。 |
 
-**返回**：表的全部列（schema 从 Parquet footer 推导）。
+> **注意**：DuckDB 表函数不支持可选位置参数，`aligned_scan` 注册为 `TableFunctionSet`
+> 两个独立 overload（1-arg 和 2-arg），而非单个函数 + 默认参数。
+
+**返回**：表的列（schema 从 Parquet footer 推导）。不指定 `group_filter` 时返回
+所有列组的列；指定时仅返回 index 组 + 匹配组的列。
+
+#### 列名命名规则
+
+`aligned_scan` 的输出列名遵循以下规则：
+
+| 列类型 | 输出列名 | 可查询方式 | 说明 |
+|--------|---------|-----------|------|
+| index 组列 | 裸名（如 `symbol`, `date`, `close`） | 直接标识符 | index 组列始终用裸名 |
+| 非 index 唯一列 | 裸名（如 `alpha001`） | 直接标识符 | 仅出现在一个非 index 组中的列 |
+| 非 index 唯一列的限定别名 | `lv1.lv2.col`（如 `factor.alpha.alpha001`） | `COLUMNS('factor.alpha.alpha001')` | 同一列的第二个输出别名 |
+| 跨组重名列 | `lv1.lv2.col`（如 `factor.alpha.vwap`） | `COLUMNS('factor.alpha.vwap')` | 出现在 2+ 个非 index 组中的列，**只能**通过限定名引用 |
+| index shadow 列（非 index 组中与 index 同名） | 不输出 | — | 被扫描路径忽略，不作为独立输出列 |
+
+> **DuckDB SQL 限制**：DuckDB SQL 解析器将 `.` 视为 `schema.table.column` 分隔符，
+> 因此包含 `.` 的列名**不能用标识符语法直接引用**（如 `SELECT "factor.alpha.alpha001"` 
+> 会被解析为表引用而非列引用）。必须使用 `COLUMNS()` 正则函数：
+>
+> ```sql
+> -- 引用单个限定列
+> SELECT COLUMNS('factor.alpha.alpha001') FROM aligned_scan('my_table');
+> 
+> -- 正则匹配整组列
+> SELECT COLUMNS('factor.alpha.*') FROM aligned_scan('my_table');
+> 
+> -- 正则匹配多个组
+> SELECT COLUMNS('(factor|fieldset).*') FROM aligned_scan('my_table');
+> ```
 
 ```sql
 SET aligned_data_root = 'D:/data/factorlake';
+
+-- 全列扫描（投影下推自然只打开需要的组）
 SELECT symbol, date, close FROM aligned_scan('cnstk_ixday')
   WHERE date >= DATE '2026-01-01' AND date <= DATE '2026-01-31';
+
+-- 列组过滤：仅打开 index + factor/alpha101
+SELECT * FROM aligned_scan('cnstk_ixday', 'factor/alpha101');
+
+-- 列组过滤：多组逗号分隔
+SELECT * FROM aligned_scan('cnstk_ixday', 'factor/alpha101,fieldset/ma');
+
+-- 限定列名查询（COLUMNS 正则）
+SELECT COLUMNS('factor.alpha101.alpha001') FROM aligned_scan('cnstk_ixday')
+  WHERE symbol = '000001';
+
+-- 限定列名正则匹配整组
+SELECT COLUMNS('factor.alpha101.*') FROM aligned_scan('cnstk_ixday')
+  WHERE date = DATE '2026-08-17';
 
 -- 或指定 root
 SELECT * FROM aligned_scan('cnstk_ixday', root => 'D:/data/factorlake');
@@ -472,6 +524,78 @@ SELECT * FROM aligned_drop('cnstk_ixday', 'factor/alpha001');
 
 -- 删除整张表（index = 删除所有内容）
 SELECT * FROM aligned_drop('cnstk_ixday', 'index');
+```
+
+### 6.5 `aligned_meta` — 查看表元数据
+
+```sql
+SELECT * FROM aligned_meta(table_name [, root => '...']);
+```
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|------|------|------|------|------|
+| `table_name` | 位置参数 1 | VARCHAR | 是 | 逻辑表名。 |
+| `root` | 命名参数 | VARCHAR | 否 | 数据根目录。省略时使用 `aligned_data_root`。 |
+
+**返回**：单行 11 列元数据。
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `table_name` | VARCHAR | 表名（目录名）。 |
+| `table_path` | VARCHAR | 表的相对路径（`./<table>`）。 |
+| `partition_template` | VARCHAR | 分区模板（`year=%Y` / `month=%Y-%m` / `date=%Y-%m-%d`），从 index 组目录结构推导。 |
+| `total_rows` | BIGINT | 总行数（index 组所有分区行数之和）。 |
+| `group_count` | BIGINT | 列组数量（含 index）。 |
+| `partition_count` | BIGINT | 分区数（index 组的分区数）。 |
+| `part_count` | BIGINT | parquet 文件总数（所有组之和）。 |
+| `groups` | VARCHAR | 列组详情，格式 `group:col1,col2;group2:col3,col4`。 |
+| `partitions` | VARCHAR | 分区键列表（逗号分隔，如 `year=2024,year=2025`）。 |
+| `schema` | VARCHAR | 完整表 schema，格式 `queryable_name:type,...`（见下方命名规则）。 |
+| `column_mapping` | VARCHAR | 列名映射，格式 `queryable_name:lv1.lv2.col;...`（见下方命名规则）。 |
+
+#### `schema` 字段命名规则
+
+`schema` 字段列出表的全部可查询列，每列格式 `queryable_name:type`：
+
+| 列类型 | `schema` 中的名称 | 示例 |
+|--------|-----------------|------|
+| index 组列 | 裸名 | `symbol:VARCHAR`, `close:DOUBLE` |
+| 非 index 唯一列 | 裸名 | `alpha001:DOUBLE` |
+| 跨组重名列（2+ 个非 index 组含同名列） | 限定名 `lv1.lv2.col`（每组各一行） | `factor.alpha.vwap:DOUBLE`, `panel.ma.vwap:DOUBLE` |
+| index shadow（非 index 组中与 index 同名） | 跳过 | — |
+
+#### `column_mapping` 字段命名规则
+
+`column_mapping` 字段映射每个非 index 列的可查询名到全限定名，格式
+`queryable_name:lv1.lv2.col`：
+
+| 列类型 | `column_mapping` 中的条目 | 示例 |
+|--------|--------------------------|------|
+| 非 index 唯一列 | `bare_name:lv1.lv2.col` | `alpha001:factor.alpha.alpha001` |
+| 跨组重名列 | `lv1.lv2.col:lv1.lv2.col`（自别名） | `factor.alpha.vwap:factor.alpha.vwap` |
+| index shadow 列 | 跳过 | — |
+| index 列本身 | 跳过（已在 schema 中用裸名） | — |
+
+> **用途**：`column_mapping` 帮助确定每个列的限定名，用于通过 `COLUMNS()` 
+> 正则引用列。跨组重名列只能通过限定名访问，因此 `column_mapping` 中它们的
+> 可查询名就是限定名本身。
+
+```sql
+SET aligned_data_root = 'D:/data/factorlake';
+SELECT * FROM aligned_meta('cnstk_ixday');
+
+-- 仅查看列名映射
+SELECT column_mapping FROM aligned_meta('cnstk_ixday');
+-- 示例结果：
+--   alpha001:factor.alpha101.alpha001;alpha002:factor.alpha101.alpha002;
+--   ma5:fieldset.ma.ma5;factor.alpha101.vwap:factor.alpha101.vwap;
+--   fieldset.ma.vwap:fieldset.ma.vwap
+
+-- 仅查看 schema
+SELECT schema FROM aligned_meta('cnstk_ixday');
+-- 示例结果：
+--   symbol:VARCHAR,date:DATE,close:DOUBLE,alpha001:DOUBLE,alpha002:DOUBLE,
+--   ma5:DOUBLE,factor.alpha101.vwap:DOUBLE,fieldset.ma.vwap:DOUBLE
 ```
 
 ---
@@ -585,7 +709,63 @@ date 列（col1）是**分区源列**——其值决定行属于哪个分区目�
 `date=2026-01-15` 等）。分区模板（`partition_template`）定义了分区目录的命名格式，
 但分区值始终从 date 列的值求值得出。
 
-### 8.5 WITH 子句参数（CREATE TABLE）
+### 8.5 列名与限定别名（lv1.lv2.col）
+
+AlignedTable 的列分布在多个 Column Group 中。不同 Group 可能包含同名列（如 `close` 
+同时出现在 `index` 和 `factor/alpha` 中）。`aligned_scan` 的输出列名和 
+`aligned_meta` 的 `schema` / `column_mapping` 字段遵循统一的命名规则：
+
+#### 列名分类
+
+| 分类 | 条件 | 可查询名 | 可查询方式 |
+|------|------|---------|-----------|
+| **index 列** | index 组中的列 | 裸名（如 `symbol`） | 标识符 `SELECT symbol FROM ...` |
+| **非 index 唯一列** | 仅出现在一个非 index 组中的列 | 裸名（如 `alpha001`） | 标识符 `SELECT alpha001 FROM ...` |
+| **非 index 唯一列的限定别名** | 同上列的第二个输出 | 限定名 `lv1.lv2.col` | `COLUMNS('lv1.lv2.col')` |
+| **跨组重名列** | 出现在 2+ 个非 index 组中的同名列 | 限定名 `lv1.lv2.col`（每组各一） | `COLUMNS('lv1.lv2.col')` |
+| **index shadow 列** | 非 index 组中与 index 组同名的列 | 不输出（被忽略） | — |
+
+> **唯一列同时注册裸名和限定名**：非 index 唯一列有两个输出位置——裸名用于
+> 方便的直接引用，限定名用于避免歧义或正则匹配整组列。两者数据完全相同，
+> parquet 列只读一次后复制到两个位置。
+
+#### 为什么需要 `COLUMNS()` 正则引用
+
+DuckDB SQL 解析器将 `.` 视为 `schema.table.column` 分隔符。因此包含 `.` 的列名
+（如 `factor.alpha.alpha001`）**不能用标识符语法直接引用**：
+
+```sql
+-- ✗ 错误：被解析为表 factor 的列 alpha.alpha001
+SELECT "factor.alpha.alpha001" FROM aligned_scan('my_table');
+
+-- ✗ 错误：被解析为表 factor 的 schema alpha 的列 alpha001
+SELECT factor.alpha.alpha001 FROM aligned_scan('my_table');
+
+-- ✓ 正确：COLUMNS() 正则匹配
+SELECT COLUMNS('factor.alpha.alpha001') FROM aligned_scan('my_table');
+
+-- ✓ 正确：正则匹配整组
+SELECT COLUMNS('factor.alpha.*') FROM aligned_scan('my_table');
+```
+
+#### 使用 `aligned_meta` 查询映射
+
+```sql
+-- 查看列名映射（裸名 → 限定名）
+SELECT column_mapping FROM aligned_meta('cnstk_ixday');
+-- alpha001:factor.alpha101.alpha001;factor.alpha101.vwap:factor.alpha101.vwap;
+-- fieldset.ma.vwap:fieldset.ma.vwap;...
+
+-- 查看 schema（可查询名:类型）
+SELECT schema FROM aligned_meta('cnstk_ixday');
+-- symbol:VARCHAR,date:DATE,close:DOUBLE,alpha001:DOUBLE,...,
+-- factor.alpha101.vwap:DOUBLE,fieldset.ma.vwap:DOUBLE
+
+-- 从 mapping 提取某组的所有限定名
+SELECT split_part(column_mapping, ';', 1);  -- 第一条映射
+```
+
+### 8.6 WITH 子句参数（CREATE TABLE）
 
 CREATE TABLE 的 `WITH (...)` 子句支持以下选项：
 
@@ -675,3 +855,14 @@ idx_t NextTransactionId();
 | `aligned_groups` | `group_name` | 列组路径 |
 | | `columns` | 该组的列名列表（分号分隔） |
 | | `partition_count` | 该组的分区数 |
+| `aligned_meta` | `table_name` | 表名（目录名） |
+| | `table_path` | 表相对路径 |
+| | `partition_template` | 分区模板（`year=%Y` / `month=%Y-%m` / `date=%Y-%m-%d`） |
+| | `total_rows` | 总行数 |
+| | `group_count` | 列组数（含 index） |
+| | `partition_count` | 分区数 |
+| | `part_count` | parquet 文件总数 |
+| | `groups` | 列组详情（`group:col1,col2;...`） |
+| | `partitions` | 分区键列表（逗号分隔） |
+| | `schema` | 完表 schema（`queryable_name:type,...`） |
+| | `column_mapping` | 列名映射（`queryable_name:lv1.lv2.col;...`） |

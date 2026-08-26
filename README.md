@@ -68,6 +68,20 @@ SET preserve_insertion_order = false;  -- 启用并行写入
 COPY (SELECT symbol, date, ma5, ma20 FROM source ORDER BY symbol, date)
   TO 'cnstk_ixday' (FORMAT aligned, GROUP 'panel/ma');
 -- 已有组写入时自动列裁剪（只写组内列）+ 类型转换（如 TIMESTAMP → DATE）。
+
+-- 限定列名（lv1.lv2.col）查询：
+-- 非 index 唯一列同时有裸名和限定名，重名列只有限定名。
+-- DuckDB SQL 解析器将 . 视为 schema.table.column 分隔符，带点列名需用 COLUMNS() 引用：
+SELECT COLUMNS('factor.alpha101.alpha001') FROM aligned_scan('cnstk_ixday') WHERE symbol='000001';
+SELECT COLUMNS('factor.alpha101.*') FROM aligned_scan('cnstk_ixday') WHERE date = DATE '2026-08-17';
+
+-- 列组过滤扫描（仅打开 index + 指定组）：
+SELECT * FROM aligned_scan('cnstk_ixday', 'factor/alpha101');
+SELECT * FROM aligned_scan('cnstk_ixday', 'factor/alpha101,fieldset/ma');
+
+-- 查看表元数据（含列名映射）：
+SELECT column_mapping FROM aligned_meta('cnstk_ixday');
+-- alpha001:factor.alpha101.alpha001;factor.alpha101.vwap:factor.alpha101.vwap;...
 ```
 
 ## 核心概念
@@ -87,10 +101,13 @@ COPY (SELECT symbol, date, ma5, ma20 FROM source ORDER BY symbol, date)
 | 能力 | 状态 | 说明 |
 |------|------|------|
 | 读取 | ✅ | `aligned_scan()`，多 Group 并行读、跨 part/RG 行窗口、Schema Evolution（缺失列补 NULL）、跨 Group 重复列遮蔽、Row Space 校验 |
+| 列组过滤 | ✅ | `aligned_scan(table, group_filter)`：仅扫描 index + 指定组（逗号分隔），减少 IO |
+| 限定列名 | ✅ | 非 index 唯一列同时注册裸名和 `lv1.lv2.col` 限定别名；跨组重名列用限定名。通过 `COLUMNS('lv1.lv2.col')` 正则引用 |
 | 投影下推 | ✅ | 只打开被选中的 Group、只读被选中的列（`SELECT alpha001` 只碰 alpha101） |
 | 过滤下推 | ✅ | Hive 分区剪枝 + Parquet Row Group stats 剪枝 + 行级 filter（`WHERE date=...` 剪到 1/4 数据时约 2-3× 收益） |
 | 并行扫描 | ✅ | Aligned Row Group 为任务单元，8 线程实测 ≈4.2× 加速 |
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
+| 元数据查询 | ✅ | `aligned_meta()`：表名/路径/分区模板/行数/列组数/分区数/part 数/groups/schema/column_mapping |
 | 写入 | ✅ | `COPY TO (FORMAT aligned, GROUP '...')`：per-partition 覆盖/MERGE，自描述文件名，RG 131072 / part 8 RG，ZSTD/V1 |
 | 批量写入 | ✅ | `COPY TO ... (FORMAT aligned, GROUP '...')`：走 DuckDB CopyFunction 框架，per-partition 覆盖，自描述文件名，RG 131072 / part 8 RG，ZSTD/V1，`preserve_insertion_order=false` 启用并行写入（5M 行 7 列 0.8s） |
 | 建表 | ✅ | `aligned_create()` 表函数 + `CREATE TABLE ... WITH (groups=..., partition_template=...)` DDL |
