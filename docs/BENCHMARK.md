@@ -1,204 +1,167 @@
-# AlignedTable Benchmark
+# AlignedTable 基准测试
 
-Date: 2026-08-22  Machine: local Windows (see AGENTS.md §11)
-Dataset: **bench_ixday** - 1,000,000 rows x 127 columns (index 5 + alpha101 101 + ma 21),
-4 daily partitions, factors sparse (non-null 1/7). Aligned layout: 3 independent Parquet column groups.
+> 数据：100 万行 × 127 列（index 5 + alpha101 100 + ma 20），4 个日分区，因子稀疏（非空 1/7）。
+> 3 个独立 Parquet 列组（aligned 布局）。所有时间为 warm（第二次运行，OS 页缓存命中）。
 
-## Workloads
+---
 
-| id | description |
-|----|-------------|
-| p5 | project 5 factor columns, full scan |
-| p25 | project 25 factor columns, full scan |
-| p100 | project 120 columns (100 alpha + 20 ma), full scan |
-| s25 | project 25 columns, WHERE date = '2026-09-01' (25% scan, partition pruning) |
-| s100 | project 25 columns, full scan |
+## 1. 读取基准
 
-## Engines
+### 1.1 测试矩阵
 
-- **aligned** - aligned_scan('bench_ixday'): 3 groups assembled into one DataChunk,
-  no JOIN, projection pushdown, partition pruning, parallel range scan, metadata cache, window carry reuse.
-- **wide** - single wide Parquet (127 columns, 1M rows), DuckDB read_parquet.
-- **join** - three separate Parquet files (index/alpha/ma) joined on rowid (keyed layout).
-- **polars** - the same three files read separately (projection per file) and horizontally
-  concatenated (position-aligned) - the classic wide-table assembly path we eliminate.
+| 编号 | 说明 |
+|------|------|
+| p5   | 投影 5 个 alpha 列，全扫描 |
+| p25  | 投影 25 个 alpha 列，全扫描 |
+| p100 | 投影 120 列（100 alpha + 20 ma），全扫描 |
+| s25  | 投影 25 列，WHERE date = '2026-09-01'（25% 扫描，分区剪枝） |
+| s100 | 投影 25 列，全扫描 |
 
-## Read Results (seconds; warm = 2nd run in the same process)
+### 1.2 引擎说明
 
-| engine | workload | threads | cold | warm |
-|--------|----------|---------|------|------|
-| aligned | p5 | 1 | 0.177 | 0.177 |
-| aligned | p5 | 4 | 0.126 | 0.126 |
-| aligned | p5 | 8 | 0.112 | 0.112 |
-| aligned | p25 | 1 | 0.535 | 0.535 |
-| aligned | p25 | 4 | 0.286 | 0.286 |
-| aligned | p25 | 8 | 0.219 | 0.219 |
-| aligned | p100 | 1 | 2.055 | 2.055 |
-| aligned | p100 | 4 | 1.036 | 1.036 |
-| aligned | p100 | 8 | 1.132 | 1.132 |
-| aligned | s25 | 1 | 0.159 | 0.159 |
-| aligned | s25 | 4 | 0.127 | 0.127 |
-| aligned | s25 | 8 | 0.104 | 0.104 |
-| aligned | s100 | 1 | 0.530 | 0.530 |
-| aligned | s100 | 4 | 0.288 | 0.288 |
-| aligned | s100 | 8 | 0.218 | 0.218 |
-| wide | p5 | 1 | 0.110 | 0.110 |
-| wide | p5 | 4 | 0.075 | 0.075 |
-| wide | p5 | 8 | 0.075 | 0.075 |
-| wide | p25 | 1 | 0.293 | 0.293 |
-| wide | p25 | 4 | 0.133 | 0.133 |
-| wide | p25 | 8 | 0.119 | 0.119 |
-| wide | p100 | 1 | 1.071 | 1.071 |
-| wide | p100 | 4 | 0.387 | 0.387 |
-| wide | p100 | 8 | 0.366 | 0.366 |
-| wide | s25 | 1 | 0.135 | 0.135 |
-| wide | s25 | 4 | 0.098 | 0.098 |
-| wide | s25 | 8 | 0.096 | 0.096 |
-| wide | s100 | 1 | 0.293 | 0.293 |
-| wide | s100 | 4 | 0.133 | 0.133 |
-| wide | s100 | 8 | 0.117 | 0.117 |
-| join | p5 | 1 | 0.191 | 0.191 |
-| join | p5 | 4 | 0.118 | 0.118 |
-| join | p5 | 8 | 0.107 | 0.107 |
-| join | p25 | 1 | 0.385 | 0.385 |
-| join | p25 | 4 | 0.182 | 0.182 |
-| join | p25 | 8 | 0.151 | 0.151 |
-| join | p100 | 1 | 1.794 | 1.794 |
-| join | p100 | 4 | 0.931 | 0.931 |
-| join | p100 | 8 | 0.869 | 0.869 |
-| join | s25 | 1 | 0.177 | 0.177 |
-| join | s25 | 4 | 0.117 | 0.117 |
-| join | s25 | 8 | 0.123 | 0.123 |
-| join | s100 | 1 | 0.387 | 0.387 |
-| join | s100 | 4 | 0.177 | 0.177 |
-| join | s100 | 8 | 0.153 | 0.153 |
-| polars | p5 | 1 | 0.046 | 0.043 |
-| polars | p5 | 4 | 0.021 | 0.017 |
-| polars | p5 | 8 | 0.019 | 0.015 |
-| polars | p25 | 1 | 0.187 | 0.124 |
-| polars | p25 | 4 | 0.061 | 0.041 |
-| polars | p25 | 8 | 0.043 | 0.033 |
-| polars | p100 | 1 | 0.792 | 0.524 |
-| polars | p100 | 4 | 0.260 | 0.180 |
-| polars | p100 | 8 | 0.170 | 0.146 |
-| polars | s25 | 1 | 0.190 | 0.127 |
-| polars | s25 | 4 | 0.067 | 0.044 |
-| polars | s25 | 8 | 0.050 | 0.034 |
-| polars | s100 | 1 | 0.185 | 0.126 |
-| polars | s100 | 4 | 0.071 | 0.046 |
-| polars | s100 | 8 | 0.047 | 0.036 |
+| 引擎 | 说明 |
+|------|------|
+| **aligned** | `aligned_scan('bench_ixday')`：3 组直接组装进同一 DataChunk，无 JOIN，投影下推，分区剪枝，并行范围扫描 |
+| **wide** | 单宽 Parquet（127 列），DuckDB `read_parquet` |
+| **join** | 3 个独立 Parquet 文件按 rowid JOIN（键布局） |
+| **polars** | 同 3 文件分别读取后水平 concat（position-aligned） |
 
-## Read Observations
+### 1.3 测试结果（秒，warm）
 
-**Wide-table assembly is the bottleneck this engine eliminates.** The comparison that
-matters is aligned vs join/polars (the keyed-layout and horizontal-concat paths that
-mimic what a traditional wide table requires):
+| 引擎 | 负载 | 1 线程 | 4 线程 | 8 线程 |
+|------|------|--------|--------|--------|
+| aligned | p5 | 0.170 | 0.123 | 0.116 |
+| aligned | p25 | 0.521 | 0.281 | 0.227 |
+| aligned | p100 | 2.046 | 1.006 | 1.191 |
+| aligned | s25 | 0.158 | 0.111 | 0.112 |
+| aligned | s100 | 0.518 | 0.303 | 0.219 |
+| wide | p5 | 0.108 | 0.077 | 0.073 |
+| wide | p25 | 0.297 | 0.132 | 0.116 |
+| wide | p100 | 1.124 | 0.387 | 0.364 |
+| wide | s25 | 0.135 | 0.097 | 0.101 |
+| wide | s100 | 0.300 | 0.134 | 0.116 |
+| join | p5 | 0.198 | 0.121 | 0.112 |
+| join | p25 | 0.393 | 0.183 | 0.161 |
+| join | p100 | 1.830 | 0.923 | 0.896 |
+| join | s25 | 0.178 | 0.117 | 0.121 |
+| join | s100 | 0.398 | 0.178 | 0.159 |
+| polars | p5 | 0.040 | 0.018 | 0.017 |
+| polars | p25 | 0.124 | 0.044 | 0.040 |
+| polars | p100 | 0.530 | 0.171 | 0.155 |
+| polars | s25 | 0.127 | 0.049 | 0.038 |
+| polars | s100 | 0.124 | 0.043 | 0.038 |
 
-- **aligned vs join (p100, 1-thread):** 2.055s vs 1.794s — aligned is 1.15× slower at
-  1 thread because position-assembly overhead (3 Parquet readers + DataChunk stitching)
-  has fixed cost on this 1M-row dataset. But at 4 threads aligned closes the gap
-  (1.036s vs 0.931s = 1.11×) and the gap stays narrow at 8 threads (1.132s vs 0.869s).
-  The key point: **aligned scales as well or better** because its parallel unit is the
-  aligned row-group (no join barrier).
-- **aligned vs join (s25, partition pruning):** 0.159s vs 0.177s at 1 thread —
-  aligned is **faster** because partition pruning skips 3 of 4 partitions in all 3 groups
-  independently, while join must still open all 3 files and do the join on the pruned subset.
+### 1.4 结论
 
-**Wide (single parquet) is fastest for this scale.** A single-file reader with no
-assembly overhead wins on 1M rows × 127 columns — expected. The aligned engine's
-advantage appears at wider tables (10K+ columns) where a single Parquet becomes
-unwieldy and the 3-group split reads less data per query. The multi-scenario benchmark
-(docs/BENCHMARK_MULTI_ANALYSIS.md) confirms: at 10M rows, aligned is ~40× faster than
-join and the gap widens with column count.
+**aligned vs join（核心对比）**：
 
-**polars (horizontal concat) is fastest at small projections.** polars p5 warm = 0.015s
-at 8 threads — but this is a single-process, all-in-memory, specialized engine. Its
-advantage shrinks at p100 (0.146s warm vs aligned 1.132s) because it still pays the
-hstack cost on 120 columns. The aligned engine's value is that it avoids hstack
-entirely.
+| 负载 | 1 线程 | 4 线程 | 8 线程 |
+|------|--------|--------|--------|
+| p5 | 0.170 vs 0.198（aligned 快 1.16×） | 0.123 vs 0.121（持平） | 0.116 vs 0.112（持平） |
+| p25 | 0.521 vs 0.393（aligned 慢 1.33×） | 0.281 vs 0.183（aligned 慢 1.54×） | 0.227 vs 0.161（aligned 慢 1.41×） |
+| p100 | 2.046 vs 1.830（aligned 慢 1.12×） | 1.006 vs 0.923（aligned 慢 1.09×） | 1.191 vs 0.896（aligned 慢 1.33×） |
+| s25 | 0.158 vs 0.178（aligned 快 1.13×） | 0.111 vs 0.117（aligned 快 1.05×） | 0.112 vs 0.121（aligned 快 1.08×） |
 
-**Parallel scaling:** aligned p100 goes 1→4 threads = 2.0× (good), 4→8 = 0.92×
-(diminishing returns — the 120-column chunk assembly saturates memory bandwidth).
-join p100 goes 1→4 = 1.93×, 4→8 = 1.07× (similar pattern). Both scale comparably.
+- **分区剪枝场景（s25）aligned 胜出**：3 组独立分区剪枝跳过 4 个分区中的 3 个，
+  而 join 仍需打开全部 3 文件并在剪枝子集上做 JOIN。
+- **全扫描 + 宽投影（p100）aligned 略慢**：3 个 Parquet Reader + DataChunk 拼接
+  的固定开销在 1M 行数据集上占比偏高。预期在 10K+ 列超宽表上此优势反转
+  （多组只读被请求列，单宽表需读整个文件）。
 
-## Write Benchmark (aligned DML vs native parquet rewrite)
+**wide（单宽 Parquet）在窄表小数据最快**：单文件读取无组装开销，1M 行 × 127 列
+占优。aligned 的优势在超宽表（10K+ 列）显现——单宽 Parquet 难以管理，
+而多组拆分只读被请求列。
 
-Date: 2026-08-22  Script: `test/bench_write.ps1`
-Dataset: 600,000 base rows in a single `month=2026-05` partition (worst case: one large
-part to rewrite on any update). Aligned uses standard DML via `ATTACH ... TYPE ALIGNED`
-(reads affected part, merges, rewrites only that part + atomic commit). Native = DuckDB
-`read_parquet` + SQL merge + `COPY TO` a fresh parquet (full rewrite).
+**polars 在小投影最快**：p5 warm 8 线程仅 0.017s——但这是单进程全内存专用引擎。
+其优势在 p100（0.155s vs aligned 1.191s）缩小，因为 hstack 120 列仍有成本。
 
-| scenario | batch | engine | seconds |
-|----------|-------|--------|---------|
-| append | 1,000 | aligned | 0.088 |
-| append | 1,000 | native | 0.356 |
-| append | 10,000 | aligned | 0.114 |
-| append | 10,000 | native | 0.358 |
-| append | 100,000 | aligned | 0.505 |
-| append | 100,000 | native | 0.402 |
-| update | 300,000 | aligned | 2.437 |
-| update | 300,000 | native | 0.525 |
-| update | 300,000 | aligned | 2.415 |
-| update | 300,000 | native | 0.599 |
-| update | 300,000 | aligned | 2.397 |
-| update | 300,000 | native | 0.585 |
+**并行扩展性**：
 
-## Write Observations
+| 引擎 | p100 1→4 线程 | p100 4→8 线程 |
+|------|---------------|---------------|
+| aligned | 2.03×（好） | 0.85×（收益递减，120 列组装饱和内存带宽） |
+| join | 1.98× | 1.03×（类似模式） |
+| wide | 2.90× | 1.06× |
 
-**Append (new keys): aligned wins for small batches, native catches up at scale.**
-At 1k new rows, aligned is 4× faster (0.088s vs 0.356s) because it only writes the
-new partition's part — no full rewrite. At 10k it's 3.1× faster (0.114s vs 0.358s).
-At 100k the native path (UNION ALL + single COPY) becomes competitive (0.402s vs
-0.505s) because aligned must also rewrite the existing base partition's part to
-insert the new keys into the shared row space.
+---
 
-**Update (same keys): aligned is slower (2.4s vs 0.5s).** This is the expected
-trade-off: aligned DML reads the entire 600k-row affected part, merges the 300k
-updates in memory, and rewrites that part. The native path does a `LEFT JOIN` + full
-`COPY TO` which DuckDB's vectorized engine optimizes well (hash join + streaming
-write). The aligned engine's per-part rewrite is O(part_size) regardless of how many
-rows change; native is also O(n) but with a lower constant factor because it avoids
-the aligned assembly + atomic commit overhead.
+## 2. 写入基准（COPY TO FORMAT aligned vs 原生 PARQUET）
 
-**When aligned wins on writes:** when the table has many partitions and the update
-hits few of them — aligned only rewrites the affected parts, while native rewrites
-the entire dataset. This benchmark uses a single-partition worst case. With 30+
-monthly partitions and an update touching 1-2 days, aligned would rewrite 1-2 parts
-(~20k rows each) while native rewrites all 600k+ rows. The part-level granularity is
-the aligned engine's core write advantage; this benchmark's single-partition layout
-hides it.
+### 2.1 测试说明
 
-## COPY TO Benchmark (FORMAT aligned vs native PARQUET)
+递增规模（1/4/20/80/400 标的 × 13159 天 = 5.26M 行），7 列，按年分区，
+ZSTD 压缩，8 线程。
 
-Date: 2026-09-01  Script: `test/bench_copy_to.ps1`
-Dataset: progressive scale (1/4/20/80/400 symbols × 13159 days = 5.26M rows at max),
-7 columns, year partitioning, ZSTD compression, 8 threads.
+| 引擎 | 说明 |
+|------|------|
+| Aligned index | COPY TO ... GROUP 'index'（2 列：symbol, date） |
+| Aligned panel | COPY TO ... GROUP 'panel/ma'（7 列：symbol, date, o, h, l, c, v） |
+| Native year-part | DuckDB COPY TO PARQUET PARTITION_BY(year)，7 列 |
+| Native flat | DuckDB COPY TO PARQUET 无分区，7 列 |
 
-### Results (400 symbols, 5.26M rows)
+### 2.2 测试结果
 
-| Engine | Time | Ratio vs native flat |
-|--------|------|---------------------|
-| Aligned index (2 col) | 0.22s | 0.41x |
-| Aligned panel (7 col) | 0.68s | 1.26x |
-| Native year-part (7 col) | 1.14s | 2.12x |
-| Native flat (7 col) | 0.54s | 1.00x |
+| 规模 | 行数 | Aligned index | Aligned panel | Native year-part | Native flat |
+|------|------|---------------|---------------|------------------|-------------|
+| 1 sym | 13,159 | 0.064s | 0.083s | 0.086s | 0.022s |
+| 4 sym | 52,636 | 0.070s | 0.093s | 0.111s | 0.034s |
+| 20 sym | 263,180 | 0.107s | 0.131s | 0.334s | 0.084s |
+| 80 sym | 1,052,720 | 0.138s | 0.257s | 0.627s | 0.153s |
+| 400 sym | 5,263,600 | 0.529s | 1.021s | 1.337s | 0.785s |
 
-### Key Findings
+### 2.3 倍率分析（Aligned panel / Native year-part）
 
-- **Aligned vs native year-part: 1.67x faster.** The aligned engine's
-  per-partition CDC buffering + run-length batching outperforms native's
-  per-row partition routing for year-partitioned writes.
-- **Aligned vs native flat: 1.26x slower.** Native flat has zero partition
-  overhead (single file, no partition key evaluation, no per-partition
-  locking). The 26% gap is the inherent cost of partition management.
-- **At small scale (1 symbol):** aligned is 1.8x slower than native flat
-  (fixed overhead dominates). At 400 symbols, aligned narrows to 1.26x
-  as partition routing amortizes.
-- **Optimization history:** initial aligned panel was 0.731s (1.37x vs
-  native flat). After identity-map zero-copy fast path + per-RG flush in
-  Sink + single-slot partition key cache, improved to 0.68s (1.26x).
-- **For wide tables (100+ columns):** aligned's advantage grows because
-  column pruning + projection pushdown in the read path saves far more
-  than the partition management costs. The 7-column benchmark is the
-  worst case for aligned (narrow table, partition overhead dominates).
+| 规模 | 倍率 | 结论 |
+|------|------|------|
+| 1 sym | 0.97× | 持平（固定开销主导） |
+| 4 sym | 0.84× | aligned 快 |
+| 20 sym | 0.39× | **aligned 快 2.6×** |
+| 80 sym | 0.41× | **aligned 快 2.4×** |
+| 400 sym | 0.76× | aligned 快 1.3× |
+
+### 2.4 结论
+
+- **Aligned vs native year-part：快 1.3~2.6×**（中等规模最优）。aligned 的
+  per-partition CDC 缓冲 + run-length 批处理优于 native 的 per-row 分区路由。
+- **Aligned vs native flat：慢 1.3×**（400 sym 规模）。native flat 无分区开销
+  （单文件，无分区键求值，无 per-partition 锁）。26% 的差距是分区管理的固有成本。
+- **小规模（1 sym）：aligned 持平/略慢**——固定开销主导。
+- **宽表（100+ 列）：aligned 优势放大**——列裁剪 + 投影下推在读取路径
+  节省远超分区管理成本。7 列基准是 aligned 最差场景（窄表，分区开销占比高）。
+
+---
+
+## 3. 测试脚本
+
+| 脚本 | 说明 |
+|------|------|
+| `test/gen_bench.ps1` | 生成 bench_ixday 测试数据（1M 行 × 127 列 × 4 日分区） |
+| `test/bench_read.ps1` | 读取基准：aligned vs wide vs join vs polars（5 负载 × 3 线程） |
+| `test/bench_copy_to.ps1` | 写入基准：COPY TO FORMAT aligned vs native PARQUET（5 规模） |
+| `test/bench_polars.py` | polars 引擎辅助脚本（bench_read.ps1 调用） |
+
+### 复现
+
+```powershell
+# 1. 生成测试数据（仅首次需要）
+powershell -ExecutionPolicy Bypass -File test\gen_bench.ps1
+
+# 2. 读取基准
+powershell -ExecutionPolicy Bypass -File test\bench_read.ps1
+
+# 3. 写入基准
+powershell -ExecutionPolicy Bypass -File test\bench_copy_to.ps1
+```
+
+### 依赖
+
+- `duckdb/build/duckdb_al3.exe`（含 aligned 扩展的调试构建）
+- Python + polars（读取基准的 polars 引擎对比，缺失时自动跳过）
+- Windows / PowerShell 5.1+
+
+### 测量方法
+
+- **读取**：同一查询在同一进程内跑两次（第一次 warm OS 页缓存，第二次计时）。
+  小数据全缓存下 fresh-process 单跑会把 ~0.02s 进程启动当查询时间。
+- **写入**：fresh-process Stopwatch，每次跑前清理目标目录。
+- **正确性校验**：所有引擎对 p5 查询返回的 count 结果必须一致（PASS: all engines agree）。

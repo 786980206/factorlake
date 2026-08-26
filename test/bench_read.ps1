@@ -1,23 +1,21 @@
-# bench_aligned.ps1
-# Phase 6 benchmark: aligned_scan vs plain-parquet JOIN vs single wide parquet
-# vs polars horizontal concat (position-aligned concat of per-group files).
+# bench_read.ps1 — Aligned scan read benchmark vs wide parquet / JOIN / polars
+#
 # Dataset: bench_ixday (1M rows x 127 cols, 4 daily partitions, sparse factors).
-# Dimensions: projection 5/25/100+ cols, scan 25%/100%, threads 1/4/8.
-# Output: bench/out/bench_output.csv (stdout for human reading).
-# Note: docs/BENCHMARK.md is hand-maintained; this script only emits the CSV.
-# Usage: powershell -ExecutionPolicy Bypass -File test\bench_aligned.ps1
-# Requires: test\gen_bench.ps1 has been run; python + polars available.
+# Engines: aligned_scan, read_parquet (wide), read_parquet (JOIN), polars hstack.
+# Workloads: p5(5 cols) p25(25 cols) p100(120 cols) s25(25 cols+partition prune) s100(25 cols full scan)
+# Threads: 1/4/8
+#
+# Usage: powershell -ExecutionPolicy Bypass -File test\bench_read.ps1
+# Prerequisite: test\gen_bench.ps1 has been run (generates testdata/bench_ixday)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $db = Join-Path $root 'duckdb\build\duckdb_al3.exe'
 if (-not (Test-Path $db)) { throw "build missing: $db" }
-$dataRoot = 'D:/proj/factorlake/testdata'
+$dataRoot = Join-Path $root 'testdata'
 $benchRoot = Join-Path $dataRoot 'bench_baseline'
-$duckdb = 'duckdb'
-$python = 'python'
 
-# ---- baseline parquet files ---------------------------------------------------
+# ---- baseline parquet files (join/wide) --------------------------------------
 if (-not (Test-Path $benchRoot)) { New-Item -ItemType Directory -Force -Path $benchRoot | Out-Null }
 $joinIndex = Join-Path $benchRoot 'join_index.parquet'
 $joinAlpha = Join-Path $benchRoot 'join_alpha.parquet'
@@ -31,7 +29,7 @@ function Gen-Baseline([string]$file, [string]$selectList) {
     if (Test-Path $file) { return }
     Write-Host "generating $([System.IO.Path]::GetFileName($file)) ..."
     $sql = "COPY (WITH r AS (SELECT range AS r FROM range(0, 1000000)) SELECT $selectList FROM r) TO '$($file.Replace('\','/'))' (FORMAT PARQUET, COMPRESSION ZSTD);"
-    & $duckdb -c $sql 2>&1 | Out-Null
+    & $db -c $sql 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "baseline gen failed: $file" }
 }
 $indexList = "printf('%06d', r + 1) AS symbol, DATE '2026-09-01' + (r // 250000)::INT AS date, CAST((r + 1) * 0.5 AS DOUBLE) AS close, CAST((r + 1) * 100 AS BIGINT) AS volume, CAST(r AS BIGINT) AS rowid"
@@ -40,7 +38,7 @@ Gen-Baseline $joinAlpha "CAST(r AS BIGINT) AS rowid_alpha, $(($alphaCols -join '
 Gen-Baseline $joinMa "CAST(r AS BIGINT) AS rowid_ma, $(($maCols -join ', '))"
 Gen-Baseline $wide "$indexList, CAST(r AS BIGINT) AS rowid_alpha, $(($alphaCols -join ', ')), CAST(r AS BIGINT) AS rowid_ma, $(($maCols -join ', '))"
 
-# ---- query templates (no SET inside; prelude passed separately) ---------------
+# ---- query templates ----------------------------------------------------------
 $A5 = 0..4 | ForEach-Object { "alpha$('{0:D3}' -f $_)" }
 $A25 = 0..24 | ForEach-Object { "alpha$('{0:D3}' -f $_)" }
 $A100 = 0..99 | ForEach-Object { "alpha$('{0:D3}' -f $_)" }
@@ -53,7 +51,7 @@ $alpha25 = $A25 -join ', '
 $alpha100 = $A100 -join ', '
 $ma20 = $M20 -join ', '
 
-$alignedPrelude = "SET aligned_data_root='$dataRoot';"
+$alignedPrelude = "SET aligned_data_root='$($dataRoot.Replace('\','/'))';"
 $alignedQ = @{
     p5   = "SELECT $agg5 FROM (SELECT $alpha5 FROM aligned_scan('bench_ixday'));"
     p25  = "SELECT $agg25 FROM (SELECT $alpha25 FROM aligned_scan('bench_ixday'));"
@@ -80,39 +78,30 @@ $joinQ = @{
     s100 = "SELECT $agg25 FROM (SELECT $A25a FROM read_parquet('$($joinIndex.Replace('\','/'))') i JOIN read_parquet('$($joinAlpha.Replace('\','/'))') a ON i.rowid = a.rowid_alpha);"
 }
 
-# ---- measurement ---------------------------------------------------------------
+# ---- measurement --------------------------------------------------------------
 function Measure-Sql([string]$sql, [int]$threads, [string]$prelude = '') {
-    # Run the query once per fresh process, timing with Stopwatch (reliable on
-    # Windows; .timer via piped output is an unreliable ordering under cmd).
-    # cold = fresh process, first touch (page cache). warm = second run in a
-    # fresh process but after the files are in the OS page cache.
-    function RunOnce() {
-        $tmp = Join-Path $env:TEMP 'aligned_bench.sql'
-        $out = Join-Path $env:TEMP 'ab_out.txt'
-        $err = Join-Path $env:TEMP 'ab_err.txt'
-        "SET threads=$threads;`n$prelude`n$sql" | Set-Content -Path $tmp -Encoding Ascii
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        cmd /c "`"$db`" -csv -noheader < `"$tmp`" > `"$out`" 2>`"$err`"" 2>&1 | Out-Null
-        $sw.Stop()
-        Remove-Item $tmp, $out, $err -Force -ErrorAction SilentlyContinue
-        return $sw.Elapsed.TotalSeconds
-    }
-    # warm up (first run), then measure the second (warm) run
-    $null = RunOnce
-    $warm = RunOnce
-    return @{ cold = $warm; warm = $warm }
+    $tmp = Join-Path $env:TEMP 'aligned_bench.sql'
+    $out = Join-Path $env:TEMP 'ab_out.txt'
+    "SET threads=$threads;`n$prelude`n$sql" | Set-Content -Path $tmp -Encoding Ascii
+    # warm up (first run puts files in OS page cache), then measure the second run
+    cmd /c "`"$db`" -csv -noheader < `"$tmp`" > `"$out`" 2>NUL" 2>&1 | Out-Null
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    cmd /c "`"$db`" -csv -noheader < `"$tmp`" > `"$out`" 2>NUL" 2>&1 | Out-Null
+    $sw.Stop()
+    Remove-Item $tmp, $out -Force -ErrorAction SilentlyContinue
+    return $sw.Elapsed.TotalSeconds
 }
 function Measure-Polars([string]$workload, [int]$threads) {
-    $raw = & $python (Join-Path $root 'test\bench_polars.py') $workload $threads 2>&1 | Out-String
+    $raw = & python (Join-Path $root 'test\bench_polars.py') $workload $threads 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "polars failed: $raw" }
     $t = [regex]::Match($raw, 'TIMES ([\d.]+) ([\d.]+)')
-    return @{ cold = [double]$t.Groups[1].Value; warm = [double]$t.Groups[2].Value }
+    return [double]$t.Groups[2].Value  # warm time
 }
 
-# ---- run all engines (append results inline so nothing is lost) ---------------
+# ---- run all engines ----------------------------------------------------------
 $workloads = 'p5', 'p25', 'p100', 's25', 's100'
 $threadSet = 1, 4, 8
-$all = [System.Collections.Generic.List[string]]::new()  # "engine,workload,threads,cold,warm"
+$all = [System.Collections.Generic.List[string]]::new()
 foreach ($e in 'aligned', 'wide', 'join') {
     Write-Host "== engine: $e =="
     $q = if ($e -eq 'aligned') { $alignedQ } elseif ($e -eq 'wide') { $wideQ } else { $joinQ }
@@ -120,8 +109,8 @@ foreach ($e in 'aligned', 'wide', 'join') {
     foreach ($w in $workloads) {
         foreach ($t in $threadSet) {
             $m = Measure-Sql $q[$w] $t $pre
-            $all.Add("$e,$w,$t,$($m.cold.ToString('F4')),$($m.warm.ToString('F4'))")
-            Write-Host ("  {0,-5} threads={1}  cold={2,6:F3}s warm={3,6:F3}s" -f $w, $t, $m.cold, $m.warm)
+            $all.Add("$e,$w,$t,$($m.ToString('F4'))")
+            Write-Host ("  {0,-5} threads={1}  warm={2,6:F3}s" -f $w, $t, $m)
         }
     }
 }
@@ -129,22 +118,23 @@ Write-Host "== engine: polars =="
 foreach ($w in $workloads) {
     foreach ($t in $threadSet) {
         $m = Measure-Polars $w $t
-        $all.Add("polars,$w,$t,$($m.cold.ToString('F4')),$($m.warm.ToString('F4'))")
-        Write-Host ("  {0,-5} threads={1}  cold={2,6:F3}s warm={3,6:F3}s" -f $w, $t, $m.cold, $m.warm)
+        $all.Add("polars,$w,$t,$($m.ToString('F4'))")
+        Write-Host ("  {0,-5} threads={1}  warm={2,6:F3}s" -f $w, $t, $m)
     }
 }
 
-# ---- correctness cross-validation: p5 counts must match across engines ----------
+# ---- correctness cross-validation: p5 counts must match across engines --------
 function Result-P5([string]$e) {
-    if ($e -eq 'aligned') { return Measure-P5-Sql $alignedQ['p5'] $alignedPrelude }
-    if ($e -eq 'wide') { return Measure-P5-Sql $wideQ['p5'] '' }
-    if ($e -eq 'join') { return Measure-P5-Sql $joinQ['p5'] '' }
-    $raw = & $python (Join-Path $root 'test\bench_polars.py') 'p5' 1 2>&1 | Out-String
-    return ([regex]::Match($raw, 'COUNTS ([\d,]+)').Groups[1].Value)
-}
-function Measure-P5-Sql([string]$sql, [string]$prelude) {
     $tmp = Join-Path $env:TEMP 'aligned_bench.sql'
-    "SET threads=1;`n$prelude`n$sql" | Set-Content -Path $tmp -Encoding Ascii
+    if ($e -eq 'polars') {
+        $raw = & python (Join-Path $root 'test\bench_polars.py') 'p5' 1 2>&1 | Out-String
+        return ([regex]::Match($raw, 'COUNTS ([\d,]+)').Groups[1].Value)
+    }
+    $pre = if ($e -eq 'aligned') { $alignedPrelude } else { '' }
+    $sql = $alignedQ['p5']
+    if ($e -eq 'wide') { $sql = $wideQ['p5'] }
+    if ($e -eq 'join') { $sql = $joinQ['p5'] }
+    "SET threads=1;`n$pre`n$sql" | Set-Content -Path $tmp -Encoding Ascii
     $raw = cmd /c "`"$db`" -csv -noheader < `"$tmp`"" 2>&1 | Out-String
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     return ($raw.Trim())
@@ -157,10 +147,10 @@ foreach ($e in 'wide', 'join', 'polars') {
 }
 if ($ok) { Write-Host 'PASS: all engines agree on p5 counts' }
 
-# ---- CSV output ----------------------------------------------------------------
+# ---- CSV output ---------------------------------------------------------------
 $csvDir = Join-Path $root 'bench\out'
 New-Item -ItemType Directory -Force -Path $csvDir | Out-Null
-$csv = @('engine,workload,threads,cold_s,warm_s')
+$csv = @('engine,workload,threads,warm_s')
 $csv += $all
-$csv | Set-Content -Path (Join-Path $csvDir 'bench_output.csv') -Encoding UTF8
-Write-Host "CSV: $(Join-Path $csvDir 'bench_output.csv')"
+$csv | Set-Content -Path (Join-Path $csvDir 'bench_read.csv') -Encoding UTF8
+Write-Host "CSV: $(Join-Path $csvDir 'bench_read.csv')"
