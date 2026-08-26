@@ -87,14 +87,18 @@ unique_ptr<GlobalTableFunctionState> AlignedCompactInitGlobal(ClientContext &con
 
 //! Check whether a partition's parts are already normalized: every part
 //! (except possibly the last) has exactly ALIGNED_DEFAULT_PART_ROWS, and the
-//! last has <= ALIGNED_DEFAULT_PART_ROWS. Any 0-row placeholder part means
-//! the partition is NOT normalized -- 0-row parts should be absorbed by
-//! compaction (per AGENTS.md: "0-row placeholder parts are merged absorbed").
+//! last has <= ALIGNED_DEFAULT_PART_ROWS. A single 0-row placeholder part
+//! is considered normalized (nothing to absorb). Multiple 0-row parts are
+//! NOT normalized -- they should be consolidated by compaction.
 static bool IsAlreadyNormalized(const vector<const PartInfo *> &parts) {
+	if (parts.size() == 1 && parts[0]->row_count == 0) {
+		// Single 0-row placeholder — already as normalized as possible.
+		return true;
+	}
 	for (idx_t i = 0; i < parts.size(); i++) {
 		idx_t rc = parts[i]->row_count;
 		if (rc == 0) {
-			// 0-row part present -- not normalized, should be absorbed.
+			// 0-row part among multiple parts -- not normalized, should be absorbed.
 			return false;
 		}
 		if (i < parts.size() - 1) {
@@ -247,7 +251,23 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 		}
 	}
 	if (!ref_part) {
-		result.parts_after_count = job.parts.size();
+		// All parts are 0-row. Consolidate to a single 0-row placeholder part.
+		// We need the column schema from any part's footer.
+		auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(job.parts[0]->path),
+		                                        ParquetOptions(context));
+		vector<string> col_names;
+		vector<LogicalType> col_types;
+		for (auto &col : reader->columns) {
+			col_names.push_back(col.name);
+			col_types.push_back(col.type);
+		}
+		fs.CreateDirectoriesRecursive(job.staged_dir);
+		string staged_path = job.staged_dir + "/" + FormatPartName(0, 0);
+		WriteEmptyParquet(context, fs, staged_path, col_names, col_types);
+		result.staged_paths.push_back(staged_path);
+		result.target_paths.push_back(job.dir + "/" + FormatPartName(0, 0));
+		result.compacted = true;
+		result.parts_after_count = 1;
 		return result;
 	}
 
