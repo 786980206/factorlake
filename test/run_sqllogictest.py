@@ -54,7 +54,7 @@ class TestConfig:
             raise FileNotFoundError(f"duckdb binary not found: {self.duckdb}")
         # Auto-detect
         candidates = [
-            REPO_ROOT / "duckdb" / "build3" / "duckdb_al3.exe",
+            REPO_ROOT / "duckdb" / "build" / "duckdb_al3.exe",
             REPO_ROOT / "duckdb" / "build" / "duckdb",
             REPO_ROOT / "duckdb" / "build" / "duckdb.exe",
         ]

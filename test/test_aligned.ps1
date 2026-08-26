@@ -1,4 +1,4 @@
-﻿# test_aligned.ps1
+# test_aligned.ps1
 # Acceptance tests for the aligned extension (v5 partition-aligned contract).
 # Usage: powershell -ExecutionPolicy Bypass -File test\test_aligned.ps1
 # Requires: test\gen_testdata.ps1 has been run, duckdb_aligned.exe built.
@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
-$db = Join-Path $root 'duckdb\build3\duckdb_al3.exe'
+$db = Join-Path $root 'duckdb\build\duckdb_al3.exe'
 if (-not (Test-Path $db)) { throw "build missing: $db (run the duckdb build first)" }
 $dataRoot = 'D:/proj/factorlake/testdata'
 

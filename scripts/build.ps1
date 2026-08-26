@@ -4,14 +4,14 @@
 #   .\scripts\build.ps1              # incremental (ninja decides what to rebuild)
 #   .\scripts\build.ps1 -Clean       # force full rebuild (delete all obj first)
 #
-# Prerequisites: DuckDB source vendored at duckdb/, build3/ configured.
-# Product: duckdb/build3/duckdb_al3.exe
+# Prerequisites: DuckDB source vendored at duckdb/, build/ configured.
+# Product: duckdb/build/duckdb_al3.exe
 
 param([switch]$Clean)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$buildDir = Join-Path $repo 'duckdb\build3'
+$buildDir = Join-Path $repo 'duckdb\build'
 
 if (-not (Test-Path (Join-Path $buildDir 'build.ninja'))) {
     throw "Build directory not configured: $buildDir`nRun cmake configuration first (see AGENTS.md §11)."

@@ -11,7 +11,7 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$duckdb = Join-Path $repo 'duckdb\build3\duckdb_al3.exe'
+$duckdb = Join-Path $repo 'duckdb\build\duckdb_al3.exe'
 if (-not (Test-Path $duckdb)) { throw "duckdb binary not found: $duckdb" }
 
 $dataRoot = 'D:/proj/factorlake/bench_copy_data'

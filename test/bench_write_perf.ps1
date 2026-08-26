@@ -14,7 +14,7 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$duckdb = Join-Path $repo 'duckdb\build3\duckdb_al3.exe'
+$duckdb = Join-Path $repo 'duckdb\build\duckdb_al3.exe'
 $dataRoot = 'D:/proj/factorlake/testdata_perf'
 
 if (-not (Test-Path $duckdb)) {

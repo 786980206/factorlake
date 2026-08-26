@@ -353,7 +353,7 @@ extension/aligned/src/
 - 构建整体：`.\scripts\build.ps1`（vcvars64 + ninja）
 - 构建插件：`.\scripts\build_extension.ps1 -Copy`（Release + `-DEXTENSION_STATIC_BUILD=1`）
 - 运行测试：`.\scripts\run_tests.ps1`
-- 产物：`duckdb/build3/duckdb_al3.exe`、`release/aligned.duckdb_extension`
+- 产物：`duckdb/build/duckdb_al3.exe`、`release/aligned.duckdb_extension`
 
 ### Linux（brew + gcc + Ninja）
 - DuckDB v1.5.5 源码在 `duckdb/`（gitignored）

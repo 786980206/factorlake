@@ -9,7 +9,7 @@
 #   .\scripts\run_tests.ps1 -Suite parallel    # test_parallel.ps1 only
 #
 # Prerequisites:
-#   - duckdb/build3/duckdb_al3.exe built (run scripts\build.ps1)
+#   - duckdb/build/duckdb_al3.exe built (run scripts\build.ps1)
 #   - testdata/ generated (run test\gen_testdata.ps1)
 #   - bench data generated for test_parallel (run test\gen_bench.ps1)
 

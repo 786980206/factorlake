@@ -10,7 +10,7 @@
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$db = Join-Path $root 'duckdb\build3\duckdb_al3.exe'
+$db = Join-Path $root 'duckdb\build\duckdb_al3.exe'
 if (-not (Test-Path $db)) { throw "build missing: $db" }
 $dataRoot = 'D:/proj/factorlake/testdata'
 $benchRoot = Join-Path $dataRoot 'bench_baseline'

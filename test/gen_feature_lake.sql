@@ -18,7 +18,7 @@
 -- Usage:
 --   duckdb_al3.exe -unsigned < gen_feature_lake.sql
 -- Or:
---   powershell -Command "& 'duckdb\build3\duckdb_al3.exe' -unsigned < test\gen_feature_lake.sql"
+--   powershell -Command "& 'duckdb\build\duckdb_al3.exe' -unsigned < test\gen_feature_lake.sql"
 --
 -- Prerequisites: duckdb_al3.exe built with the aligned extension (static or loaded).
 

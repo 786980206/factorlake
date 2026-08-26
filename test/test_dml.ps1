@@ -12,7 +12,7 @@ $script:failures = 0
 
 if (-not $DuckDB) {
     $repo = Split-Path -Parent $PSScriptRoot
-    $DuckDB = Join-Path $repo 'duckdb\build3\duckdb_al3.exe'
+    $DuckDB = Join-Path $repo 'duckdb\build\duckdb_al3.exe'
 }
 if (-not (Test-Path $DuckDB)) { throw "duckdb binary not found: $DuckDB" }
 $duckdb = (Resolve-Path $DuckDB).Path
