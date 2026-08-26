@@ -486,17 +486,26 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 	result->total_rows = bind.total_rows;
 	result->projection_ids = input.projection_ids;
 
-	// Enable parquet prefetching for local files. DuckDB's ParquetReader
-	// defaults to prefetching only remote files. For aligned_scan, which
-	// reads local parquet files, prefetching overlaps file I/O with ZSTD
-	// decompression, giving ~5% read speedup. We only set it if the user
-	// hasn't explicitly disabled it.
+	// Enable parquet prefetching and metadata caching for local files.
+	// DuckDB's ParquetReader defaults to prefetching only remote files.
+	// For aligned_scan, which reads local parquet files, prefetching
+	// overlaps file I/O with ZSTD decompression (~5% read speedup).
+	// Metadata caching avoids re-reading parquet footers across queries
+	// (4 partitions × N groups = significant footer I/O on repeated scans).
+	// We only set these if the user hasn't explicitly set them.
 	{
 		Value prefetch_val;
 		if (context.TryGetCurrentSetting("prefetch_all_parquet_files", prefetch_val)) {
 			if (!prefetch_val.GetValue<bool>()) {
 				auto &db_config = DBConfig::GetConfig(context);
 				db_config.SetOptionByName("prefetch_all_parquet_files", Value::BOOLEAN(true));
+			}
+		}
+		Value meta_cache_val;
+		if (context.TryGetCurrentSetting("parquet_metadata_cache", meta_cache_val)) {
+			if (!meta_cache_val.GetValue<bool>()) {
+				auto &db_config = DBConfig::GetConfig(context);
+				db_config.SetOptionByName("parquet_metadata_cache", Value::BOOLEAN(true));
 			}
 		}
 	}
