@@ -305,7 +305,7 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 	auto group_cols = ReadParquetFilesFromDir(context, fs, part_dir,
 	                                           bind_data.column_names, bind_data.sql_types);
 	if (!group_cols) {
-		// No existing data in this partition — nothing to merge.
+		// No existing data in this partition 鈥?nothing to merge.
 		return;
 	}
 
@@ -328,7 +328,7 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 	// (which may be TIMESTAMP). We cast in the merge step below.
 	vector<LogicalType> key_types = {bind_data.hidden_symbol_type, bind_data.hidden_date_type};
 	// For the date column, use the index group's stored type (DATE) if
-	// the hidden type is TIMESTAMP — the parquet file stores DATE.
+	// the hidden type is TIMESTAMP 鈥?the parquet file stores DATE.
 	// We detect the actual type from the index group's schema.
 	// For simplicity, read as the hidden type and handle cast in merge.
 	// But if the parquet stores DATE and we request TIMESTAMP, the reader
@@ -340,13 +340,13 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 	auto key_cols = ReadParquetFilesFromDir(context, fs, index_part_dir,
 	                                         key_names, key_types);
 	if (!key_cols) {
-		// No index data for this partition — can't merge. Just use new data.
+		// No index data for this partition 鈥?can't merge. Just use new data.
 		return;
 	}
 
 	// Check row counts: if group has fewer rows than index, only use the
 	// first N rows of the index (row-position aligned). If group has more
-	// rows than index, this is a data corruption — throw.
+	// rows than index, this is a data corruption 鈥?throw.
 	idx_t group_rows = group_cols->Count();
 	idx_t index_rows = key_cols->Count();
 	if (group_rows > index_rows) {
@@ -400,27 +400,27 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 			                       rows, 0, 0);
 		}
 		// Copy hidden key columns.
-		// symbol: VARCHAR → VARCHAR (same type, direct copy).
+		// symbol: VARCHAR 鈫?VARCHAR (same type, direct copy).
 		VectorOperations::Copy(key_chunk.data[0], merge_chunk.data[bind_data.sql_types.size()],
 		                       rows, 0, 0);
-		// date: may need cast (e.g. parquet DATE int32 → hidden TIMESTAMP int64).
+		// date: may need cast (e.g. parquet DATE int32 鈫?hidden TIMESTAMP int64).
 		auto &src_date_vec = key_chunk.data[1];
 		auto &dst_date_vec = merge_chunk.data[bind_data.sql_types.size() + 1];
 		if (src_date_vec.GetType().id() == dst_date_vec.GetType().id()) {
 			VectorOperations::Copy(src_date_vec, dst_date_vec, rows, 0, 0);
 		} else {
-			// Cast DATE (int32 days) → TIMESTAMP (int64 micros) or vice versa.
+			// Cast DATE (int32 days) 鈫?TIMESTAMP (int64 micros) or vice versa.
 			auto src_type = src_date_vec.GetType().id();
 			auto dst_type = dst_date_vec.GetType().id();
 			if (src_type == LogicalTypeId::DATE && dst_type == LogicalTypeId::TIMESTAMP) {
-				// DATE int32 days → TIMESTAMP int64 micros.
+				// DATE int32 days 鈫?TIMESTAMP int64 micros.
 				auto *src32 = FlatVector::GetData<int32_t>(src_date_vec);
 				auto *dst64 = FlatVector::GetData<int64_t>(dst_date_vec);
 				for (idx_t r = 0; r < rows; r++) {
 					dst64[r] = (int64_t)src32[r] * 86400LL * 1000000LL;
 				}
 			} else if (src_type == LogicalTypeId::TIMESTAMP && dst_type == LogicalTypeId::DATE) {
-				// TIMESTAMP int64 micros → DATE int32 days.
+				// TIMESTAMP int64 micros 鈫?DATE int32 days.
 				auto *src64 = FlatVector::GetData<int64_t>(src_date_vec);
 				auto *dst32 = FlatVector::GetData<int32_t>(dst_date_vec);
 				for (idx_t r = 0; r < rows; r++) {
@@ -428,7 +428,7 @@ void AlignedCopyGlobalState::ReadExistingPartition(
 				}
 			} else {
 				throw InternalException(
-				    "aligned COPY MERGE: unsupported date type cast %s → %s",
+				    "aligned COPY MERGE: unsupported date type cast %s 鈫?%s",
 				    EnumUtil::ToChars(src_type), EnumUtil::ToChars(dst_type));
 			}
 			// Copy the validity mask so NULL dates are preserved across the cast.
@@ -461,7 +461,7 @@ void AlignedCopyGlobalState::InitPartition(PerPartitionState &pp) {
 			break;
 		} catch (const IOException &e) {
 			if (fs.DirectoryExists(pp.part_dir)) {
-				break;  // Another thread created it — that's fine.
+				break;  // Another thread created it 鈥?that's fine.
 			}
 			if (attempt == 2) {
 				throw;
@@ -517,6 +517,10 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		all_cols.push_back(c);
 	}
 
+	// Track which rows are from existing data (for dedup).
+	vector<bool> row_is_existing;
+	row_is_existing.reserve(total_rows);
+
 	int64_t merge_us = elapsed_us(t_merge);
 	if (g_timing_enabled) g_merge_us.fetch_add(merge_us);
 
@@ -538,7 +542,7 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	}
 
 	if (symbol_col == DConstants::INVALID_INDEX || date_col == DConstants::INVALID_INDEX) {
-		// Can't sort — flush as-is (already in arrival order).
+		// Can't sort 鈥?flush as-is (already in arrival order).
 		// No merge was done; flush each buffer directly.
 		for (auto &buf_pair : buffers) {
 			auto &buf = buf_pair.first;
@@ -549,123 +553,93 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		return;
 	}
 
+	// Detect whether any buffer is existing data (MERGE mode).
+	bool has_existing = false;
+	for (auto &buf_pair : buffers) {
+		if (buf_pair.second && buf_pair.first && buf_pair.first->Count() > 0) {
+			has_existing = true;
+			break;
+		}
+	}
+
+	// --- Phase 1: Extract sort keys to check already_sorted (fast path) ---
+	// We only need this check when there's no existing data. When there IS
+	// existing data, we always go through the Sort path (existing data may
+	// have a different sort order than new data).
 	auto t_extract = std::chrono::steady_clock::now();
 
-	// Extract symbol and date values for sorting.
-	// Build a small string→int32 dictionary for fast integer comparisons
-	// during std::stable_sort. unordered_map for O(1) lookup, then remap
-	// indices to lexicographic order. stable_sort is ~O(n) on near-sorted
-	// data (input was ORDER BY).
-	vector<int32_t> symbol_idx(total_rows);
-	vector<int64_t> date_values(total_rows);
-	unordered_map<string, int32_t> sym_lookup;
-	sym_lookup.reserve(2048);
-	int32_t next_idx = 0;
-
-	// Scan directly from source buffers (no merge step). Extract symbol/date
-	// for sorting and cache chunks for the build phase.
-	vector<unique_ptr<DataChunk>> source_chunks;
-	DataChunk chunk;
-	idx_t row_offset = 0;
-	for (auto &buf_pair : buffers) {
-		auto &buf = buf_pair.first;
-		bool is_existing = buf_pair.second;
-		if (!buf || buf->Count() == 0) {
-			continue;
-		}
-		ColumnDataScanState scan_state;
-		buf->InitializeScan(scan_state, all_cols);
-		// Destroy and re-init chunk for each buffer: DataChunk::Initialize
-		// asserts data.empty() (it only emplaces_back, never clears).
-		chunk.Destroy();
-		buf->InitializeScanChunk(scan_state, chunk);
-		while (buf->Scan(scan_state, chunk)) {
-			auto &sym_vec = chunk.data[symbol_col];
-			UnifiedVectorFormat sym_fmt;
-			sym_vec.ToUnifiedFormat(chunk.size(), sym_fmt);
-			auto sym_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
-
-			auto &date_vec = chunk.data[date_col];
-			UnifiedVectorFormat date_fmt;
-			date_vec.ToUnifiedFormat(chunk.size(), date_fmt);
-
-			bool date_is_ts = (date_vec.GetType().id() == LogicalTypeId::TIMESTAMP);
-
-			for (idx_t i = 0; i < chunk.size(); i++) {
-				auto si = sym_fmt.sel->get_index(i);
-				auto di = date_fmt.sel->get_index(i);
-				auto sym_str = sym_data[si].GetString();
-				auto dit = sym_lookup.find(sym_str);
-				if (dit == sym_lookup.end()) {
-					sym_lookup[sym_str] = next_idx;
-					symbol_idx[row_offset + i] = next_idx;
-					next_idx++;
-				} else {
-					symbol_idx[row_offset + i] = dit->second;
-				}
-				if (date_is_ts) {
-					auto dd = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
-					date_values[row_offset + i] = dd[di];
-				} else {
-					auto dd = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
-					date_values[row_offset + i] = static_cast<int64_t>(dd[di]);
-				}
-				row_is_existing.push_back(is_existing);
-			}
-			// Cache this chunk for the build phase. Use Copy (not Reference)
-			// because the source chunk's buffers are reused by the next Scan.
-			auto cached = make_uniq<DataChunk>();
-			vector<LogicalType> chunk_types;
-			for (idx_t i = 0; i < chunk.ColumnCount(); i++) {
-				chunk_types.push_back(chunk.data[i].GetType());
-			}
-			cached->Initialize(context, chunk_types);
-			// Manual copy (avoids DataChunk::Copy assertions about FLAT_VECTOR).
-			cached->SetCardinality(chunk.size());
-			for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
-				VectorOperations::Copy(chunk.data[c], cached->data[c],
-				                       chunk.size(), 0, 0);
-			}
-			source_chunks.push_back(std::move(cached));
-			row_offset += chunk.size();
-		}
-	}
-
-	// Reassign dictionary indices in lexicographic order so that
-	// integer comparison of symbol_idx == string comparison of symbols.
-	vector<string> sorted_syms;
-	sorted_syms.reserve(sym_lookup.size());
-	for (auto &kv : sym_lookup) {
-		sorted_syms.push_back(kv.first);
-	}
-	std::sort(sorted_syms.begin(), sorted_syms.end());
-	vector<int32_t> remap(next_idx);
-	for (idx_t i = 0; i < sorted_syms.size(); i++) {
-		remap[sym_lookup[sorted_syms[i]]] = static_cast<int32_t>(i);
-	}
-	for (idx_t i = 0; i < total_rows; i++) {
-		symbol_idx[i] = remap[symbol_idx[i]];
-	}
-
-	int64_t extract_u = elapsed_us(t_extract);
-	if (g_timing_enabled) g_extract_us.fetch_add(extract_u);
-
-	// Create permutation sorted by (symbol, date).
-	// OPTIMIZATION: Detect if the input is already sorted by (symbol, date).
-	// When the input query has ORDER BY (symbol, date), the morsel-level
-	// buffers arrive in sorted order. The merge across morsels preserves
-	// order because existing data is prepended and new data is appended
-	// (both pre-sorted). If sorted, we skip the O(n log n) stable_sort
-	// entirely and use the identity permutation.
-	// We can only skip the sort when there's no existing data (MERGE mode),
-	// because existing data may have a different sort order than new data.
-	auto t_perm = std::chrono::steady_clock::now();
-	bool has_existing = false;
-	for (auto e : row_is_existing) {
-		if (e) { has_existing = true; break; }
-	}
 	bool already_sorted = !has_existing;
 	if (already_sorted) {
+		// Scan symbol/date to verify the input is already sorted by
+		// (symbol, date). Use integer encoding for fast comparison.
+		vector<int32_t> symbol_idx(total_rows);
+		vector<int64_t> date_values(total_rows);
+		unordered_map<string, int32_t> sym_lookup;
+		sym_lookup.reserve(2048);
+		int32_t next_idx = 0;
+
+		DataChunk chk_chunk;
+		idx_t row_offset = 0;
+		for (auto &buf_pair : buffers) {
+			auto &buf = buf_pair.first;
+			if (!buf || buf->Count() == 0) {
+				continue;
+			}
+			ColumnDataScanState scan_state;
+			buf->InitializeScan(scan_state, all_cols);
+			chk_chunk.Destroy();
+			buf->InitializeScanChunk(scan_state, chk_chunk);
+			while (buf->Scan(scan_state, chk_chunk)) {
+				auto &sym_vec = chk_chunk.data[symbol_col];
+				UnifiedVectorFormat sym_fmt;
+				sym_vec.ToUnifiedFormat(chk_chunk.size(), sym_fmt);
+				auto sym_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
+
+				auto &date_vec = chk_chunk.data[date_col];
+				UnifiedVectorFormat date_fmt;
+				date_vec.ToUnifiedFormat(chk_chunk.size(), date_fmt);
+				bool date_is_ts = (date_vec.GetType().id() == LogicalTypeId::TIMESTAMP);
+
+				for (idx_t i = 0; i < chk_chunk.size(); i++) {
+					auto si = sym_fmt.sel->get_index(i);
+					auto di = date_fmt.sel->get_index(i);
+					auto sym_str = sym_data[si].GetString();
+					auto dit = sym_lookup.find(sym_str);
+					if (dit == sym_lookup.end()) {
+						sym_lookup[sym_str] = next_idx;
+						symbol_idx[row_offset + i] = next_idx;
+						next_idx++;
+					} else {
+						symbol_idx[row_offset + i] = dit->second;
+					}
+					if (date_is_ts) {
+						auto dd = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
+						date_values[row_offset + i] = dd[di];
+					} else {
+						auto dd = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
+						date_values[row_offset + i] = static_cast<int64_t>(dd[di]);
+					}
+				}
+				row_offset += chk_chunk.size();
+			}
+		}
+
+		// Remap dictionary indices to lexicographic order.
+		vector<string> sorted_syms;
+		sorted_syms.reserve(sym_lookup.size());
+		for (auto &kv : sym_lookup) {
+			sorted_syms.push_back(kv.first);
+		}
+		std::sort(sorted_syms.begin(), sorted_syms.end());
+		vector<int32_t> remap(next_idx);
+		for (idx_t i = 0; i < sorted_syms.size(); i++) {
+			remap[sym_lookup[sorted_syms[i]]] = static_cast<int32_t>(i);
+		}
+		for (idx_t i = 0; i < total_rows; i++) {
+			symbol_idx[i] = remap[symbol_idx[i]];
+		}
+
+		// Check if already sorted.
 		for (idx_t i = 1; i < total_rows; i++) {
 			if (symbol_idx[i] < symbol_idx[i - 1] ||
 			    (symbol_idx[i] == symbol_idx[i - 1] && date_values[i] < date_values[i - 1])) {
@@ -674,147 +648,295 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 			}
 		}
 	}
-	vector<idx_t> perm(total_rows);
-	if (already_sorted) {
-		// Identity permutation — skip sort entirely.
-		for (idx_t i = 0; i < total_rows; i++) {
-			perm[i] = i;
-		}
-	} else {
-		for (idx_t i = 0; i < total_rows; i++) {
-			perm[i] = i;
-		}
-		// Use std::stable_sort for both cases — mergesort's sequential
-		// access pattern is faster than introsort's random pivots for
-		// this comparator (array index lookups).
-		std::stable_sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
-			if (symbol_idx[a] != symbol_idx[b]) return symbol_idx[a] < symbol_idx[b];
-			return date_values[a] < date_values[b];
-		});
-	}
 
-	int64_t perm_u = elapsed_us(t_perm);
-	if (g_timing_enabled) g_perm_us.fetch_add(perm_u);
+	int64_t extract_u = elapsed_us(t_extract);
+	if (g_timing_enabled) g_extract_us.fetch_add(extract_u);
 
-	// OVERWRITE=false dedup: for duplicate (symbol, date) keys, keep new
-	// data (is_existing=false) over existing data (is_existing=true).
-	// Since existing buffers were prepended, new data was appended later,
-	// so stable_sort preserves their relative order. We scan perm and for
-	// each key group, if there's any new row, pick the last new row (new
-	// data is authoritative); otherwise pick the first existing row.
-	if (has_existing) {
-		vector<idx_t> dedup_perm;
-		dedup_perm.reserve(perm.size());
-		idx_t i = 0;
-		while (i < perm.size()) {
-			idx_t j = i + 1;
-			while (j < perm.size() &&
-			       symbol_idx[perm[j]] == symbol_idx[perm[i]] &&
-			       date_values[perm[j]] == date_values[perm[i]]) {
-				j++;
-			}
-			idx_t chosen = perm[i];
-			for (idx_t k = i; k < j; k++) {
-				if (!row_is_existing[perm[k]]) {
-					chosen = perm[k];
-				}
-			}
-			dedup_perm.push_back(chosen);
-			i = j;
-		}
-		perm = std::move(dedup_perm);
-		total_rows = perm.size();
-	}
-
-	// Build sorted collection by re-appending rows in sorted order.
-	// source_chunks was cached during the extract pass above — no second scan.
-	// OPTIMIZATION: Build sorted chunks and flush them in RG-sized batches,
-	// avoiding one full intermediate CDC.
-	auto t_build = std::chrono::steady_clock::now();
-
-	// Precompute chunk boundaries for global row → chunk mapping.
-	vector<idx_t> chunk_starts(source_chunks.size() + 1);
-	chunk_starts[0] = 0;
-	for (idx_t i = 0; i < source_chunks.size(); i++) {
-		chunk_starts[i + 1] = chunk_starts[i] + source_chunks[i]->size();
-	}
-
-	// Flush directly: build sorted chunks and append to a RG-sized CDC, flush
-	// when it reaches RG_SIZE rows.
-	// OPTIMIZATION: When already_sorted, the perm is identity and all source
-	// chunks are in the correct order. We can flush source chunks directly
-	// to the partition writer, skipping the selection-vector gather.
 	const idx_t RG_SIZE = 131072;
+
+	// --- already_sorted fast path: flush source buffers directly ---
+	// When input is already sorted by (symbol, date) and there's no existing
+	// data, we can flush the source buffer chunks directly without sorting.
 	if (already_sorted) {
+		auto t_build = std::chrono::steady_clock::now();
 		auto sorted_direct = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
 		ColumnDataAppendState direct_append;
 		sorted_direct->InitializeAppend(direct_append);
-		for (auto &src_chunk : source_chunks) {
-			sorted_direct->Append(direct_append, *src_chunk);
-			if (sorted_direct->Count() >= RG_SIZE) {
-				FlushToPartition(pp, *sorted_direct);
-				sorted_direct = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-				sorted_direct->InitializeAppend(direct_append);
+		for (auto &buf_pair : buffers) {
+			auto &buf = buf_pair.first;
+			if (!buf || buf->Count() == 0) {
+				continue;
+			}
+			ColumnDataScanState scan_state;
+			buf->InitializeScan(scan_state, all_cols);
+			DataChunk chunk;
+			buf->InitializeScanChunk(scan_state, chunk);
+			while (buf->Scan(scan_state, chunk)) {
+				if (chunk.size() == 0) {
+					continue;
+				}
+				// Append only the first sql_types.size() columns (the
+				// ColumnDataAppend uses the collection's column count).
+				sorted_direct->Append(direct_append, chunk);
+				if (sorted_direct->Count() >= RG_SIZE) {
+					FlushToPartition(pp, *sorted_direct);
+					sorted_direct = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+					sorted_direct->InitializeAppend(direct_append);
+				}
 			}
 		}
 		if (sorted_direct->Count() > 0) {
 			FlushToPartition(pp, *sorted_direct);
 		}
-	} else {
-	auto sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-	ColumnDataAppendState sorted_append;
-	sorted->InitializeAppend(sorted_append);
-	DataChunk out_chunk;
-	out_chunk.Initialize(context, bind_data.sql_types);
-
-	idx_t perm_pos = 0;
-	while (perm_pos < total_rows) {
-		// Group consecutive perm entries that fall in the same source chunk.
-		idx_t current_row = perm[perm_pos];
-		// Find which chunk this row belongs to.
-		idx_t chunk_idx = 0;
-		while (chunk_idx + 1 < chunk_starts.size() && chunk_starts[chunk_idx + 1] <= current_row) {
-			chunk_idx++;
+		auto t_flush = std::chrono::steady_clock::now();
+		if (g_timing_enabled) {
+			g_build_us.fetch_add(elapsed_us(t_build));
+			g_flush_us.fetch_add(elapsed_us(t_flush));
+			g_sort_us.fetch_add(elapsed_us(t_total));
 		}
-		auto &src = *source_chunks[chunk_idx];
-		idx_t chunk_start = chunk_starts[chunk_idx];
+		return;
+	}
 
-		SelectionVector sel(STANDARD_VECTOR_SIZE);
-		idx_t sel_count = 0;
-		while (perm_pos < total_rows && sel_count < STANDARD_VECTOR_SIZE) {
-			idx_t row = perm[perm_pos];
-			// Check if this row is in the same chunk.
-			if (row >= chunk_starts[chunk_idx] && row < chunk_starts[chunk_idx + 1]) {
-				sel.set_index(sel_count, row - chunk_start);
-				sel_count++;
-				perm_pos++;
-			} else {
-				break;
-			}
+	// --- Sort path: use DuckDB's Sort class ---
+	auto t_perm = std::chrono::steady_clock::now();
+
+	// For MERGE mode (has_existing), we append an extra "is_existing" flag
+	// column to the sort input so it is preserved through the sort. This
+	// lets us dedup after sorting without needing the sort permutation.
+	vector<LogicalType> sort_input_types = merged_types;
+	idx_t existing_flag_col = DConstants::INVALID_INDEX;
+	if (has_existing) {
+		existing_flag_col = sort_input_types.size();
+		sort_input_types.push_back(LogicalType::BOOLEAN);
+	}
+
+	// Build BoundOrderByNode for (symbol ASC, date ASC).
+	vector<BoundOrderByNode> orders;
+	orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+	                    make_uniq<BoundReferenceExpression>(merged_types[symbol_col],
+	                                                        static_cast<storage_t>(symbol_col)));
+	orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+	                    make_uniq<BoundReferenceExpression>(merged_types[date_col],
+	                                                        static_cast<storage_t>(date_col)));
+
+	// Output projection: all sort_input_types columns.
+	vector<idx_t> projection_map;
+	for (idx_t c = 0; c < sort_input_types.size(); c++) {
+		projection_map.push_back(c);
+	}
+
+	// Create the Sort object and set up sink/source states.
+	Sort sort(context, orders, sort_input_types, projection_map);
+
+	ThreadContext thread_ctx(context);
+	ExecutionContext exec_ctx(context, thread_ctx, nullptr);
+	InterruptState interrupt;
+
+	auto global_sink = sort.GetGlobalSinkState(context);
+	auto local_sink = sort.GetLocalSinkState(exec_ctx);
+
+	// Sink all source buffer chunks into the Sort. If has_existing, we
+	// create a chunk with an extra is_existing flag column.
+	DataChunk sink_chunk;
+	sink_chunk.Initialize(context, sort_input_types);
+	for (auto &buf_pair : buffers) {
+		auto &buf = buf_pair.first;
+		bool is_existing = buf_pair.second;
+		if (!buf || buf->Count() == 0) {
+			continue;
 		}
-		if (sel_count > 0) {
-			out_chunk.Reset();
-			for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
-				VectorOperations::Copy(src.data[c], out_chunk.data[c], sel,
-				                       sel_count, 0, 0);
+		ColumnDataScanState scan_state;
+		buf->InitializeScan(scan_state, all_cols);
+		DataChunk chunk;
+		buf->InitializeScanChunk(scan_state, chunk);
+		while (buf->Scan(scan_state, chunk)) {
+			if (chunk.size() == 0) {
+				continue;
 			}
-			out_chunk.SetCardinality(sel_count);
-			sorted->Append(sorted_append, out_chunk);
+			idx_t rows = chunk.size();
+			sink_chunk.Reset();
+			sink_chunk.SetCardinality(rows);
+			// Copy merged_types columns from the source chunk.
+			for (idx_t c = 0; c < merged_types.size(); c++) {
+				VectorOperations::Copy(chunk.data[c], sink_chunk.data[c], rows, 0, 0);
+			}
+			// Set the is_existing flag column (if present).
+			if (has_existing) {
+				auto &flag_vec = sink_chunk.data[existing_flag_col];
+				auto *flag_data = FlatVector::GetData<bool>(flag_vec);
+				for (idx_t r = 0; r < rows; r++) {
+					flag_data[r] = is_existing;
+				}
+			}
+			OperatorSinkInput sink_input {*global_sink, *local_sink, interrupt};
+			sort.Sink(exec_ctx, sink_chunk, sink_input);
+		}
+	}
 
-			// Flush when we reach RG_SIZE rows.
-			if (sorted->Count() >= RG_SIZE) {
-				FlushToPartition(pp, *sorted);
-				sorted = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-				sorted->InitializeAppend(sorted_append);
+	// Combine + Finalize the sort.
+	OperatorSinkCombineInput combine_input {*global_sink, *local_sink, interrupt};
+	sort.Combine(exec_ctx, combine_input);
+
+	OperatorSinkFinalizeInput finalize_input {*global_sink, interrupt};
+	sort.Finalize(context, finalize_input);
+
+	// Materialize the sorted data into a ColumnDataCollection.
+	auto global_source = sort.GetGlobalSourceState(context, *global_sink);
+	auto local_source = sort.GetLocalSourceState(exec_ctx, *global_source);
+	OperatorSourceInput source_input {*global_source, *local_source, interrupt};
+	sort.MaterializeColumnData(exec_ctx, source_input);
+	auto sorted_cdc = sort.GetColumnData(source_input);
+
+	int64_t perm_u = elapsed_us(t_perm);
+	if (g_timing_enabled) g_perm_us.fetch_add(perm_u);
+
+	// --- Flush the sorted CDC in RG-sized batches ---
+	auto t_build = std::chrono::steady_clock::now();
+
+	auto flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+	ColumnDataAppendState flush_append;
+	flush_buffer->InitializeAppend(flush_append);
+
+	if (sorted_cdc && sorted_cdc->Count() > 0) {
+		vector<column_t> sort_all_cols;
+		for (idx_t c = 0; c < sort_input_types.size(); c++) {
+			sort_all_cols.push_back(c);
+		}
+
+		ColumnDataScanState sort_scan;
+		sorted_cdc->InitializeScan(sort_scan, sort_all_cols);
+		DataChunk sort_chunk;
+		sorted_cdc->InitializeScanChunk(sort_scan, sort_chunk);
+
+		if (has_existing) {
+			// Dedup: for each group of consecutive rows with the same
+			// (symbol, date), keep the last row where is_existing=false
+			// (new data wins), or the first row if no new rows. Since the
+			// Sort is stable and existing data was sunk first, within a
+			// group existing rows come before new rows. So keeping the
+			// last row of each group gives us: the last new row if any new
+			// rows exist, or the last existing row if only existing rows.
+			// (For existing-only groups, any row has the same key values.)
+			bool carry_valid = false;
+			bool carry_has_new = false;
+			string_t carry_sym;
+			int64_t carry_date = 0;
+
+			DataChunk dedup_out;
+			dedup_out.Initialize(context, bind_data.sql_types);
+
+			while (sorted_cdc->Scan(sort_scan, sort_chunk)) {
+				if (sort_chunk.size() == 0) {
+					continue;
+				}
+				idx_t chunk_rows = sort_chunk.size();
+
+				auto &sym_vec = sort_chunk.data[symbol_col];
+				UnifiedVectorFormat sym_fmt;
+				sym_vec.ToUnifiedFormat(chunk_rows, sym_fmt);
+				auto sym_data = UnifiedVectorFormat::GetData<string_t>(sym_fmt);
+
+				auto &date_vec = sort_chunk.data[date_col];
+				UnifiedVectorFormat date_fmt;
+				date_vec.ToUnifiedFormat(chunk_rows, date_fmt);
+				bool date_is_ts = (date_vec.GetType().id() == LogicalTypeId::TIMESTAMP);
+				const int64_t *date_data64 = nullptr;
+				const int32_t *date_data32 = nullptr;
+				if (date_is_ts) {
+					date_data64 = UnifiedVectorFormat::GetData<int64_t>(date_fmt);
+				} else {
+					date_data32 = UnifiedVectorFormat::GetData<int32_t>(date_fmt);
+				}
+
+				auto &flag_vec = sort_chunk.data[existing_flag_col];
+				UnifiedVectorFormat flag_fmt;
+				flag_vec.ToUnifiedFormat(chunk_rows, flag_fmt);
+				auto flag_data = UnifiedVectorFormat::GetData<bool>(flag_fmt);
+
+				SelectionVector keep_sel(chunk_rows);
+				idx_t keep_count = 0;
+
+				for (idx_t i = 0; i < chunk_rows; i++) {
+					auto si = sym_fmt.sel->get_index(i);
+					auto di = date_fmt.sel->get_index(i);
+					string_t cur_sym = sym_data[si];
+					int64_t cur_date = date_is_ts
+					                    ? static_cast<int64_t>(date_data64[di])
+					                    : static_cast<int64_t>(date_data32[di]);
+					auto fi = flag_fmt.sel->get_index(i);
+					bool cur_is_existing = flag_data[fi];
+
+					bool continues_carry = carry_valid &&
+					                       cur_sym == carry_sym &&
+					                       cur_date == carry_date;
+
+					if (!continues_carry) {
+						carry_valid = true;
+						carry_sym = cur_sym;
+						carry_date = cur_date;
+						carry_has_new = false;
+					}
+
+					if (!cur_is_existing) {
+						carry_has_new = true;
+					}
+
+					// Check if next row continues this group.
+					bool group_continues = false;
+					if (i + 1 < chunk_rows) {
+						auto nsi = sym_fmt.sel->get_index(i + 1);
+						auto ndi = date_fmt.sel->get_index(i + 1);
+						string_t next_sym = sym_data[nsi];
+						int64_t next_date = date_is_ts
+						                    ? static_cast<int64_t>(date_data64[ndi])
+						                    : static_cast<int64_t>(date_data32[ndi]);
+						if (cur_sym == next_sym && cur_date == next_date) {
+							group_continues = true;
+						}
+					}
+
+					if (!group_continues) {
+						// Group ends — keep this (last) row.
+						keep_sel.set_index(keep_count, i);
+						keep_count++;
+						carry_valid = false;
+					}
+				}
+
+				if (keep_count > 0) {
+					dedup_out.Reset();
+					dedup_out.SetCardinality(keep_count);
+					for (idx_t c = 0; c < bind_data.sql_types.size(); c++) {
+						VectorOperations::Copy(sort_chunk.data[c], dedup_out.data[c],
+						                       keep_sel, keep_count, 0, 0);
+					}
+					flush_buffer->Append(flush_append, dedup_out);
+					if (flush_buffer->Count() >= RG_SIZE) {
+						FlushToPartition(pp, *flush_buffer);
+						flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+						flush_buffer->InitializeAppend(flush_append);
+					}
+				}
+			}
+		} else {
+			// No dedup needed: flush sorted chunks directly.
+			while (sorted_cdc->Scan(sort_scan, sort_chunk)) {
+				if (sort_chunk.size() == 0) {
+					continue;
+				}
+				flush_buffer->Append(flush_append, sort_chunk);
+				if (flush_buffer->Count() >= RG_SIZE) {
+					FlushToPartition(pp, *flush_buffer);
+					flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+					flush_buffer->InitializeAppend(flush_append);
+				}
 			}
 		}
 	}
 
-	// Flush remaining rows.
-	if (sorted->Count() > 0) {
-		FlushToPartition(pp, *sorted);
+	if (flush_buffer->Count() > 0) {
+		FlushToPartition(pp, *flush_buffer);
 	}
-	} // end else (not already_sorted)
 
 	auto t_flush = std::chrono::steady_clock::now();
 
@@ -942,7 +1064,7 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 	}
 
 	// Discover table structure.
-	// OVERWRITE=false (MERGE): skip partition alignment check — the merge
+	// OVERWRITE=false (MERGE): skip partition alignment check 鈥?the merge
 	// may temporarily break alignment (e.g. index was just merged but
 	// panel/ma hasn't been yet); the merge will restore alignment.
 	TablePlan plan;
@@ -1193,7 +1315,7 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 	// In PARALLEL_COPY_TO_FILE mode, multiple threads call Sink concurrently.
 	// The source reader (parquet scan) runs in parallel, giving ~3.7x speedup.
 	// Buffers arrive out-of-order; the FlushWorker accumulates all buffers per
-	// partition and sorts by (symbol, date) before flushing — zero out-of-order.
+	// partition and sorts by (symbol, date) before flushing 鈥?zero out-of-order.
 
 	const auto count = input.size();
 	auto &part_vec = input.data[bind_data.partition_col_pos];
@@ -1272,7 +1394,7 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 	const string &first_pk = eval_pk(first_date_val);
 
 	// Fast path: check if the entire chunk belongs to one partition.
-	// Compare the last row's date value — if same partition key as first,
+	// Compare the last row's date value 鈥?if same partition key as first,
 	// we can skip the per-row scan entirely.
 	auto last_pi = part_fmt.sel->get_index(count - 1);
 	if (!part_fmt.validity.RowIsValid(last_pi)) {
@@ -1283,7 +1405,7 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 		: static_cast<int64_t>(raw_data32[last_pi]);
 
 	if (first_date_val == last_date_val) {
-		// Entire chunk is one partition — fast path, no per-row scan.
+		// Entire chunk is one partition 鈥?fast path, no per-row scan.
 		// But we still need to check if this chunk's partition matches
 		// the previous chunk's partition (run_partition_key).
 		// Since we don't track cross-chunk state, just append directly.
@@ -1436,7 +1558,7 @@ static void AlignedCopyFinalize(ClientContext &context, FunctionData &bind_data_
 // concurrently with per-thread LocalState. The FlushWorker thread pool
 // handles parallel Parquet encoding. Buffers arrive out-of-order; each
 // FlushWorker accumulates all buffers for its partitions, then sorts by
-// (symbol, date) before flushing — guaranteeing correct in-partition order
+// (symbol, date) before flushing 鈥?guaranteeing correct in-partition order
 // with zero out-of-order rows.
 static CopyFunctionExecutionMode AlignedCopyExecutionMode(bool preserve_insertion_order, bool supports_batch_index) {
 	return CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;

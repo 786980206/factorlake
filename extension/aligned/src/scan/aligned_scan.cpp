@@ -1534,6 +1534,10 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 		// call.
 		bool use_scratch = !lstate.row_filters.empty() || !gstate.projection_ids.empty();
 		auto &target = use_scratch ? *lstate.scratch : output;
+		// The memcpy fast path writes FLAT data directly (not dictionary slices),
+		// so it's safe with the scratch chunk too — as long as there are no
+		// row filters (which may shrink the output cardinality mid-vector).
+		bool can_fast_copy = false; // lstate.row_filters.empty();
 		// Position map of the assembly target: the scratch chunk is indexed by
 		// column_ids position, the executor's output chunk by projection rank.
 		const auto &pos_map = use_scratch ? gstate.scratch_pos : gstate.projected_pos;
@@ -1555,7 +1559,7 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 			}
 			const auto &parts = gstate.kept_parts[gi].empty() ? bind.plan.groups[gi].parts : gstate.kept_parts[gi];
 			ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, pos_map, parts,
-			                gstate.group_filters[gi], !use_scratch);
+			                gstate.group_filters[gi], can_fast_copy);
 		}
 
 		// Fill the virtual partition column (e.g. "year" = "2024") from the
