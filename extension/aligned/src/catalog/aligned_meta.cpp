@@ -149,33 +149,77 @@ void AlignedMetaFunction(ClientContext &context, TableFunctionInput &data, DataC
 	}
 	output.SetValue(8, 0, Value(partitions_str));
 
-	// schema: "col_name:type,col_name:type,..." (full table schema: all
-	// unique columns from index group first, then non-index group columns
-	// that don't already appear, in group order)
-	string schema_str;
-	case_insensitive_set_t seen_cols;
+	// Determine which bare column names are duplicated across non-index
+	// groups. Duplicated names must use the qualified "lv1.lv2.col" form
+	// to be queryable; unique names use the bare name.
+	case_insensitive_map_t<idx_t> non_index_col_counts;
 	for (auto &g : plan.groups) {
+		if (g.manifest.group == "index") {
+			continue;
+		}
+		for (auto &col : g.column_order) {
+			non_index_col_counts[col]++;
+		}
+	}
+
+	// Collect index column names for shadow detection.
+	case_insensitive_set_t index_cols;
+	if (!plan.groups.empty()) {
+		for (auto &ic : plan.groups[0].column_order) {
+			index_cols.insert(ic);
+		}
+	}
+
+	// schema: "queryable_name:type,..." — index columns use bare names,
+	// non-index unique columns use bare names, cross-group duplicated
+	// columns use qualified "lv1.lv2.col" (one entry per owning group).
+	// Index-shadow columns (same name in index) are skipped from non-index
+	// groups (they are the index column, not a separate queryable column).
+	string schema_str;
+	case_insensitive_set_t seen_bare;
+	for (auto &g : plan.groups) {
+		bool is_index = (g.manifest.group == "index");
 		for (idx_t c = 0; c < g.column_order.size(); c++) {
 			auto &col_name = g.column_order[c];
-			if (seen_cols.find(col_name) != seen_cols.end()) {
-				continue; // skip duplicate column names across groups
+			if (!is_index && index_cols.count(col_name) > 0) {
+				// Index shadow: the scan path ignores this column in
+				// non-index groups. Skip it from the schema too.
+				continue;
 			}
-			seen_cols.insert(col_name);
-			if (!schema_str.empty()) {
-				schema_str += ",";
+			bool duplicated = false;
+			if (!is_index) {
+				auto it = non_index_col_counts.find(col_name);
+				duplicated = (it != non_index_col_counts.end() && it->second > 1);
 			}
-			schema_str += col_name;
-			schema_str += ":";
-			schema_str += g.schema_types[c].ToString();
+			if (is_index || !duplicated) {
+				// Bare name: skip if already seen.
+				if (seen_bare.find(col_name) != seen_bare.end()) {
+					continue;
+				}
+				seen_bare.insert(col_name);
+				if (!schema_str.empty()) {
+					schema_str += ",";
+				}
+				schema_str += col_name;
+				schema_str += ":";
+				schema_str += g.schema_types[c].ToString();
+			} else {
+				// Duplicated: qualified name, one per owning group.
+				if (!schema_str.empty()) {
+					schema_str += ",";
+				}
+				schema_str += g.lv1 + "." + g.lv2 + "." + col_name;
+				schema_str += ":";
+				schema_str += g.schema_types[c].ToString();
+			}
 		}
 	}
 	output.SetValue(9, 0, Value(schema_str));
 
-	// column_mapping: "bare_name:lv1.lv2.bare_name;bare_name2:lv1.lv2.bare_name2;..."
-	// Maps EVERY non-index column to its qualified "lv1.lv2.col" alias.
-	// Index-shadow columns (same name as an index column) are skipped.
-	// Cross-group duplicated columns appear once per owning group, since
-	// they can only be referenced via their qualified name.
+	// column_mapping: "queryable_name:lv1.lv2.col;..." for every non-index
+	// column. queryable_name = bare name for unique columns, qualified
+	// "lv1.lv2.col" for cross-group duplicated columns (which are their
+	// own alias). Index-shadow columns are skipped.
 	string mapping_str;
 	for (auto &g : plan.groups) {
 		if (g.manifest.group == "index") {
@@ -184,24 +228,23 @@ void AlignedMetaFunction(ClientContext &context, TableFunctionInput &data, DataC
 		for (idx_t c = 0; c < g.column_order.size(); c++) {
 			auto &col_name = g.column_order[c];
 			// Skip columns that also exist in the index group (shadows).
-			bool in_index = false;
-			if (!plan.groups.empty()) {
-				for (auto &ic : plan.groups[0].column_order) {
-					if (StringUtil::CIEquals(ic, col_name)) {
-						in_index = true;
-						break;
-					}
-				}
-			}
-			if (in_index) {
+			if (index_cols.count(col_name) > 0) {
 				continue;
 			}
+			bool duplicated = false;
+			auto cnt_it = non_index_col_counts.find(col_name);
+			if (cnt_it != non_index_col_counts.end() && cnt_it->second > 1) {
+				duplicated = true;
+			}
+			auto qualified = g.lv1 + "." + g.lv2 + "." + col_name;
 			if (!mapping_str.empty()) {
 				mapping_str += ";";
 			}
-			mapping_str += col_name;
+			// For unique columns: bare_name:lv1.lv2.col
+			// For duplicated columns: lv1.lv2.col:lv1.lv2.col (self-alias)
+			mapping_str += duplicated ? qualified : col_name;
 			mapping_str += ":";
-			mapping_str += g.lv1 + "." + g.lv2 + "." + col_name;
+			mapping_str += qualified;
 		}
 	}
 	output.SetValue(10, 0, Value(mapping_str));

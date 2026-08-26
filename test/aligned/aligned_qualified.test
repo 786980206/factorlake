@@ -57,8 +57,45 @@ SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT column_mapping FROM align
 ----
 alpha001:factor.alpha.alpha001;alpha002:factor.alpha.alpha002;ma5:fieldset.ma.ma5;ma20:fieldset.ma.ma20
 
-# --- aligned_meta column_mapping via group_filter ---
+# --- setup: table with cross-group duplicated column (vwap) ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT * FROM aligned_create('dt', 'index', 'symbol VARCHAR, date DATE, close DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT * FROM aligned_create('dt', 'factor/alpha', 'close DOUBLE, vwap DOUBLE, alpha001 DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT * FROM aligned_create('dt', 'panel/ma', 'close DOUBLE, vwap DOUBLE, ma5 DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close) TO 'dt' (FORMAT aligned, GROUP 'index')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close, 100.0::DOUBLE AS vwap, 0.3::DOUBLE AS alpha001) TO 'dt' (FORMAT aligned, GROUP 'factor/alpha', MERGE true)
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close, 200.0::DOUBLE AS vwap, 1.0::DOUBLE AS ma5) TO 'dt' (FORMAT aligned, GROUP 'panel/ma', MERGE true)
+
+# --- schema: duplicated vwap uses qualified name, unique cols use bare ---
 query T
-SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT column_mapping FROM aligned_meta('qt')
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT replace(schema, ',', ';') FROM aligned_meta('dt')
 ----
-alpha001:factor.alpha.alpha001;alpha002:factor.alpha.alpha002;ma5:fieldset.ma.ma5;ma20:fieldset.ma.ma20
+symbol:VARCHAR;date:DATE;close:DOUBLE;factor.alpha.vwap:DOUBLE;alpha001:DOUBLE;panel.ma.vwap:DOUBLE;ma5:DOUBLE
+
+# --- column_mapping: duplicated vwap is self-aliased, unique cols bare→qualified ---
+query T
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT column_mapping FROM aligned_meta('dt')
+----
+factor.alpha.vwap:factor.alpha.vwap;alpha001:factor.alpha.alpha001;panel.ma.vwap:panel.ma.vwap;ma5:panel.ma.ma5
+
+# --- query duplicated vwap via COLUMNS() qualified name ---
+query R
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT COLUMNS('factor.alpha.vwap') FROM aligned_scan('dt') WHERE symbol='000001'
+----
+100.0
+
+# --- query panel.ma.vwap via COLUMNS() ---
+query R
+SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT COLUMNS('panel.ma.vwap') FROM aligned_scan('dt') WHERE symbol='000001'
+----
+200.0
