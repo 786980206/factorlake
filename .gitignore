@@ -43,3 +43,5 @@ ddl_test/
 bench_test_pc/
 bench_test_pcd/
 bench_test_pcm/
+
+bench_copy_data/
