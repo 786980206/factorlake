@@ -2106,3 +2106,41 @@ Bug、死代码、性能问题和陈旧注释。
 - SQLLogicTest：246/246 PASS
 - PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
 
+
+## 2026-08-27 — 代码审计修复（compaction/IO 路径审计）
+
+### 死代码移除
+
+- `aligned_compactor.cpp`: 移除未用 `#include <future>`, `<mutex>`, 重复
+  `#include "io/parquet_io.hpp"`
+- `aligned_drop.cpp`: 移除未用 `#include "duckdb/parallel/async_result.hpp"`
+
+### 代码复用
+
+- `aligned_compactor.cpp`: 两处内联 reader-setup 代码改用
+  `OpenPartReaderAllColumns`（消除 ~20 行重复）
+  - `MergePartsToWriter`: 使用 helper + 保留 schema 校验
+  - `StageOneJob` multi-part: 使用 helper
+
+### Bug 修复
+
+- **5.2: all-0-row 目录不合并**：当目录中所有 parts 均为 0-row 时，compactor
+  直接返回保留多个 0-row parts。修复为合并为单个 0-row 占位 part。
+- **IsAlreadyNormalized**: 单个 0-row 占位 part 视为已规范化（无需合并），
+  多个 0-row parts 才需要合并。
+
+### 注释修复
+
+- `aligned_compactor.hpp`: 移除过时 commit-marker/sidecar 协议描述，
+  改为两阶段 _tmp/ staging + atomic move
+- `aligned_drop.hpp`: 移除错误的 `_tmp/` staging 声明（drop 不创建 _tmp/）
+- `parquet_io.hpp`: OpenPartReaderNamedColumns 注释移除 'aligned_compactor'
+- `aligned_compactor.cpp`: 修复 15 处 UTF-8 mojibake（闂?→--/<=）
+- `aligned_compactor.cpp`: `to_take == chunk_rows` 条件改为
+  `chunk_consumed == 0 && to_take == chunk_rows`
+
+### 测试结果
+
+- SQLLogicTest：246/246 PASS
+- PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
+
