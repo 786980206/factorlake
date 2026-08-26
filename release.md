@@ -2144,3 +2144,40 @@ Bug、死代码、性能问题和陈旧注释。
 - SQLLogicTest：246/246 PASS
 - PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
 
+
+## 2026-08-27 — F3 DDL 锁修复 + manifest/resolver/groups/meta 审计
+
+### Bug 修复
+
+- **F3: DDL 路径缺少 TableWriteLock（修复）**：`AlignedSchemaEntry::CreateTable`
+  添加条件式 `TableWriteLock`——仅当表目录已存在时获取锁（新表创建无并发写入者，
+  不需锁）。锁在 `EnsureTablesLoaded` 前释放避免 re-discovery 冲突。之前失败原因：
+  `TableWriteLock` 构造函数会为新表创建空目录，创建失败后残留空目录导致
+  `EnsureTablesLoaded` 报 INTERNAL Error。
+
+### 死代码移除
+
+- `manifest.cpp`: 移除 `NextPartIndexForPartition`（无调用方，DML 删除后遗留）
+- `manifest.hpp`: 移除 `PartInfo::partition_parts`（write-only 字段）
+- `manifest.cpp`: 移除 `PartFooterInfo::row_count`（无调用方读取）
+- `aligned_groups.cpp`: 移除未用 `#include string_util.hpp`, `async_result.hpp`
+- `aligned_meta.cpp`: 移除未用 `#include string_util.hpp`, `async_result.hpp`
+
+### 注释修复
+
+- `manifest.hpp`: v7→v8 主键契约注释（col0=symbol, col1=DATE/TIMESTAMP 位置约束）
+- `manifest.cpp`: 移除过时 'explicit from the manifest' 注释
+- `manifest.cpp`: `substr`-before-`ParsePartName` 顺序修复（先校验后 strip）
+- `manifest.cpp`: error 消息移除 'v6' 版本标签
+- `extension.cpp`: 移除 Phase 7/8/4 开发阶段标签
+- `extension.cpp`: OVERWRITE→'Automatic per-partition overwrite on first write'
+- `aligned_groups.hpp`: comma→semicolon 分隔符说明修正
+- `partition_resolver.cpp`: 'keep the part'→'abandon pruning for this group'
+- `aligned_transaction.cpp`: Checkpoint 空体加 `(void)` 抑制 unused warning
+- `AGENTS.md`: §10 共享工具表移除 `NextPartIndexForPartition`
+
+### 测试结果
+
+- SQLLogicTest：246/246 PASS
+- PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
+
