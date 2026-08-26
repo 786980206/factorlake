@@ -1,0 +1,64 @@
+# name: test/aligned/aligned_qualified.test
+# description: aligned_scan qualified column aliases (lv1.lv2.col) + aligned_meta column_mapping
+
+# --- setup: table with index + factor/alpha + fieldset/ma ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT * FROM aligned_create('qt', 'index', 'symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT * FROM aligned_create('qt', 'factor/alpha', 'alpha001 DOUBLE, alpha002 DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT * FROM aligned_create('qt', 'fieldset/ma', 'ma5 DOUBLE, ma20 DOUBLE')
+
+# --- write data ---
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close, 1000::BIGINT AS volume UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 11.0::DOUBLE, 2000::BIGINT ORDER BY symbol) TO 'qt' (FORMAT aligned, GROUP 'index')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 0.3::DOUBLE AS alpha001, 0.5::DOUBLE AS alpha002 UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 0.4::DOUBLE, 0.6::DOUBLE ORDER BY symbol) TO 'qt' (FORMAT aligned, GROUP 'factor/alpha', MERGE true)
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 1.0::DOUBLE AS ma5, 2.0::DOUBLE AS ma20 UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 3.0::DOUBLE, 4.0::DOUBLE ORDER BY symbol) TO 'qt' (FORMAT aligned, GROUP 'fieldset/ma', MERGE true)
+
+# --- bare name still works ---
+query R
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT alpha001 FROM aligned_scan('qt') WHERE symbol='000001'
+----
+0.3
+
+# --- qualified name via COLUMNS() ---
+query R
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT COLUMNS('factor.alpha.alpha001') FROM aligned_scan('qt') WHERE symbol='000001'
+----
+0.3
+
+# --- qualified ma name via COLUMNS() ---
+query R
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT COLUMNS('fieldset.ma.ma5') FROM aligned_scan('qt') WHERE symbol='000001'
+----
+1.0
+
+# --- qualified regex: all factor.alpha columns ---
+query RR
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT COLUMNS('factor.alpha.*') FROM aligned_scan('qt') WHERE symbol='000001'
+----
+0.3,0.5
+
+# --- bare and qualified return same data ---
+query RR
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT alpha001, COLUMNS('factor.alpha.alpha001') FROM aligned_scan('qt') WHERE symbol='000002'
+----
+0.4,0.4
+
+# --- aligned_meta column_mapping field ---
+query T
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT column_mapping FROM aligned_meta('qt')
+----
+alpha001:factor.alpha.alpha001;alpha002:factor.alpha.alpha002;ma5:fieldset.ma.ma5;ma20:fieldset.ma.ma20
+
+# --- aligned_meta column_mapping via group_filter ---
+query T
+SET aligned_data_root = '{TEST_DIR}/qual_data'; SELECT column_mapping FROM aligned_meta('qt')
+----
+alpha001:factor.alpha.alpha001;alpha002:factor.alpha.alpha002;ma5:fieldset.ma.ma5;ma20:fieldset.ma.ma20

@@ -3,6 +3,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
@@ -52,10 +53,11 @@ unique_ptr<FunctionData> AlignedMetaBind(ClientContext &context, TableFunctionBi
 	    LogicalType::VARCHAR,  // groups
 	    LogicalType::VARCHAR,  // partitions
 	    LogicalType::VARCHAR,  // schema
+	    LogicalType::VARCHAR,  // column_mapping
 	};
 	result->names = {"table_name",   "table_path",      "partition_template", "total_rows",
 	                 "group_count",  "partition_count", "part_count",         "groups",
-	                 "partitions",   "schema"};
+	                 "partitions",   "schema",          "column_mapping"};
 	return_types = result->types;
 	names = result->names;
 	return std::move(result);
@@ -168,6 +170,62 @@ void AlignedMetaFunction(ClientContext &context, TableFunctionInput &data, DataC
 		}
 	}
 	output.SetValue(9, 0, Value(schema_str));
+
+	// column_mapping: "bare_name:lv1.lv2.bare_name;bare_name2:lv1.lv2.bare_name2;..."
+	// Maps each non-index unique column's bare name to its qualified
+	// "lv1.lv2.col" alias. Index columns and duplicated cross-group columns
+	// (which only have the qualified name) are not included.
+	string mapping_str;
+	for (auto &g : plan.groups) {
+		if (g.manifest.group == "index") {
+			continue;
+		}
+		for (idx_t c = 0; c < g.column_order.size(); c++) {
+			auto &col_name = g.column_order[c];
+			// Skip columns that also exist in the index group (shadows).
+			bool in_index = false;
+			if (!plan.groups.empty()) {
+				for (auto &ic : plan.groups[0].column_order) {
+					if (StringUtil::CIEquals(ic, col_name)) {
+						in_index = true;
+						break;
+					}
+				}
+			}
+			if (in_index) {
+				continue;
+			}
+			// Skip duplicated cross-group columns (only have qualified name).
+			bool duplicated = false;
+			for (auto &g2 : plan.groups) {
+				if (g2.manifest.group == "index") {
+					continue;
+				}
+				if (g2.manifest.group == g.manifest.group) {
+					continue;
+				}
+				for (auto &c2 : g2.column_order) {
+					if (StringUtil::CIEquals(c2, col_name)) {
+						duplicated = true;
+						break;
+					}
+				}
+				if (duplicated) {
+					break;
+				}
+			}
+			if (duplicated) {
+				continue;
+			}
+			if (!mapping_str.empty()) {
+				mapping_str += ";";
+			}
+			mapping_str += col_name;
+			mapping_str += ":";
+			mapping_str += g.lv1 + "." + g.lv2 + "." + col_name;
+		}
+	}
+	output.SetValue(10, 0, Value(mapping_str));
 
 	output.SetCardinality(1);
 }

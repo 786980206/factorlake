@@ -45,6 +45,9 @@ struct AlignedGroupScanState {
 	vector<idx_t> out_positions; // table output position per read column
 	vector<LogicalType> read_types;
 	vector<idx_t> missing_positions; // table output positions absent from this part (NULL fill)
+	vector<pair<idx_t, idx_t>> dup_out_positions; // (source_out_pos, dup_out_pos) for
+	                                              // qualified-alias columns (same
+	                                              // parquet column, copy after read)
 	// Parquet output chunk (read columns only). Held by unique_ptr because
 	// DataChunk is neither copyable nor movable (which would make this state
 	// immovable and break vector<AlignedGroupScanState> reallocation).
@@ -212,37 +215,49 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 
 	for (auto gi : order) {
 		auto &group = plan.groups[gi];
+		// Ensure output_positions_qualified is sized the same as column_order.
+		group.output_positions_qualified.assign(group.column_order.size(), DConstants::INVALID_INDEX);
 		// Column types come from the group schema (the group's last part's
 		// footer, captured at plan time). The group schema is the LAST part's
-		// schema 鈥攐lder parts lacking evolution columns read as NULL at scan
-		// time (contract 搂8). O(1) lookup, no per-column part scan.
+		// schema — older parts lacking evolution columns read as NULL at scan
+		// time (contract §8). O(1) lookup, no per-column part scan.
 		for (idx_t ci = 0; ci < group.column_order.size(); ci++) {
 			auto &col = group.column_order[ci];
 			auto &col_type = group.schema_types[ci];
 			if (gi == index_group) {
-				// index columns are authoritative: bare names
+				// index columns are authoritative: bare names only
 				group.output_positions.push_back(names.size());
 				names.push_back(col);
 				types.push_back(col_type);
 				continue;
 			}
 			if (index_columns.count(col) > 0) {
-				// Contract 搂2.2e.1: duplicate of an index column 鈥攊gnored
+				// Contract §2.2e.1: duplicate of an index column — ignored
 				group.output_positions.push_back(DConstants::INVALID_INDEX);
 				continue;
 			}
 			auto owners = col_groups.find(col);
 			bool duplicated = owners != col_groups.end() && owners->second.size() > 1;
 			if (duplicated) {
-				// Contract 搂2.2e.2: duplicated across non-index groups 鈥攖he
+				// Contract §2.2e.2: duplicated across non-index groups — the
 				// qualified name is the ONLY way to reference it
 				auto qualified = group.lv1 + "." + group.lv2 + "." + col;
 				group.output_positions.push_back(names.size());
 				names.push_back(qualified);
 				types.push_back(col_type);
 			} else {
+				// Unique non-index column: register BOTH the bare name and
+				// the qualified "lv1.lv2.col" alias. The bare name is the
+				// primary output position; the qualified alias gets a
+				// separate output position that the scan fills by copying
+				// the same parquet column.
 				group.output_positions.push_back(names.size());
 				names.push_back(col);
+				types.push_back(col_type);
+
+				auto qualified = group.lv1 + "." + group.lv2 + "." + col;
+				group.output_positions_qualified[ci] = names.size();
+				names.push_back(qualified);
 				types.push_back(col_type);
 			}
 		}
@@ -522,11 +537,20 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 	for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 		auto &group = bind.plan.groups[gi];
 		for (auto full_pos : group.output_positions) {
-			// A group is active when ANY of its columns is requested 鈥?
+			// A group is active when ANY of its columns is requested
 			// including filter-only columns that are pruned from the output.
 			if (full_pos != DConstants::INVALID_INDEX && requested[full_pos]) {
 				result->group_active[gi] = true;
 				break;
+			}
+		}
+		if (!result->group_active[gi]) {
+			// Also check qualified-alias positions.
+			for (auto full_pos : group.output_positions_qualified) {
+				if (full_pos != DConstants::INVALID_INDEX && requested[full_pos]) {
+					result->group_active[gi] = true;
+					break;
+				}
 			}
 		}
 	}
@@ -566,7 +590,9 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
 				auto &group = bind.plan.groups[gi];
 				for (idx_t li = 0; li < group.column_order.size(); li++) {
-					if (group.output_positions[li] == full_col) {
+					if (group.output_positions[li] == full_col ||
+					    (li < group.output_positions_qualified.size() &&
+					     group.output_positions_qualified[li] == full_col)) {
 						result->group_filters[gi].push_back({group.column_order[li], &filter});
 						ApplyPartitionPruning(bind, gi, group.column_order[li], filter, result->kept_parts[gi]);
 						break;
@@ -679,44 +705,75 @@ static void OpenPart(ClientContext &context, const AlignedTableBindData &bind, i
 	// Build the read mapping in group column order; only requested columns
 	// are read from the parquet file (projection pushdown). File columns are
 	// resolved against the OPEN reader's schema (the plan only stores the
-	// group schema 鈥攖he last part's 鈥攕o older schema-evolution parts find
+	// group schema — the last part's — so older schema-evolution parts find
 	// their columns here and newer columns are NULL-filled as missing).
 	g.read_cols.clear();
 	g.out_positions.clear();
 	g.read_types.clear();
 	g.missing_positions.clear();
+	g.dup_out_positions.clear();
 	for (idx_t i = 0; i < group.column_order.size(); i++) {
 		if (group.output_positions[i] == DConstants::INVALID_INDEX) {
 			// Shadowed duplicate column (see ResolveColumnTypes): skip entirely
 			continue;
 		}
 		auto projected = projected_pos[group.output_positions[i]];
-		if (projected == DConstants::INVALID_INDEX) {
-			// Column not requested by this query: do not read it
+		auto projected_q = DConstants::INVALID_INDEX;
+		if (i < group.output_positions_qualified.size() &&
+		    group.output_positions_qualified[i] != DConstants::INVALID_INDEX) {
+			projected_q = projected_pos[group.output_positions_qualified[i]];
+		}
+		// If neither the bare nor the qualified alias is requested, skip.
+		if (projected == DConstants::INVALID_INDEX && projected_q == DConstants::INVALID_INDEX) {
 			continue;
 		}
 		auto &col = group.column_order[i];
 		auto it = g.col_map.find(col);
+		idx_t file_idx;
+		bool found = true;
 		if (it == g.col_map.end()) {
-			g.missing_positions.push_back(projected);
-			continue;
+			found = false;
+			file_idx = 0; // placeholder
+		} else {
+			file_idx = it->second;
+			// Cross-part type consistency: the plan schema uses the last part's
+			// types; every part must agree on a column's type (schema evolution
+			// only adds/removes columns, never changes a type).
+			if (group.schema_types[i] != g.reader->columns[file_idx].type) {
+				throw InternalException(
+				    "Aligned table '%s' group '%s' column '%s' has type %s in this part "
+				    "but %s in the group schema (cross-part type mismatch is not allowed)",
+				    bind.plan.table_name, group.manifest.group, col,
+				    g.reader->columns[file_idx].type.ToString(), group.schema_types[i].ToString());
+			}
 		}
-		auto file_idx = it->second;
-		// Cross-part type consistency: the plan schema uses the last part's
-		// types; every part must agree on a column's type (schema evolution
-		// only adds/removes columns, never changes a type). A mismatch would
-		// otherwise crash cryptically inside VectorOperations::Copy via
-		// ConstantVector::VerifyVectorType 鈥攆ail fast with a clear message.
-		if (group.schema_types[i] != g.reader->columns[file_idx].type) {
-			throw InternalException(
-			    "Aligned table '%s' group '%s' column '%s' has type %s in this part "
-			    "but %s in the group schema (cross-part type mismatch is not allowed)",
-			    bind.plan.table_name, group.manifest.group, col,
-			    g.reader->columns[file_idx].type.ToString(), group.schema_types[i].ToString());
+		// Read the parquet column once; route to whichever output positions
+		// are requested (bare name, qualified alias, or both).
+		idx_t first_out = DConstants::INVALID_INDEX;
+		if (projected != DConstants::INVALID_INDEX) {
+			if (!found) {
+				g.missing_positions.push_back(projected);
+			} else if (first_out == DConstants::INVALID_INDEX) {
+				first_out = projected;
+				g.read_cols.push_back(file_idx);
+				g.out_positions.push_back(projected);
+				g.read_types.push_back(g.reader->columns[file_idx].type);
+			} else {
+				g.dup_out_positions.emplace_back(first_out, projected);
+			}
 		}
-		g.read_cols.push_back(file_idx);
-		g.out_positions.push_back(projected);
-		g.read_types.push_back(g.reader->columns[file_idx].type);
+		if (projected_q != DConstants::INVALID_INDEX) {
+			if (!found) {
+				g.missing_positions.push_back(projected_q);
+			} else if (first_out == DConstants::INVALID_INDEX) {
+				first_out = projected_q;
+				g.read_cols.push_back(file_idx);
+				g.out_positions.push_back(projected_q);
+				g.read_types.push_back(g.reader->columns[file_idx].type);
+			} else {
+				g.dup_out_positions.emplace_back(first_out, projected_q);
+			}
+		}
 	}
 
 	// Columns to read from the parquet file (file-local indices)
@@ -862,11 +919,25 @@ static void NullFillGroupRange(DataChunk &output, idx_t output_offset, const Gro
 		auto &mask = FlatVector::Validity(vec);
 		idx_t first = output_offset + (from - window_start);
 		idx_t last = output_offset + (to - window_start);
-		// First SetInvalid initializes the mask (AllValid 鈫?explicit bits);
+		// First SetInvalid initializes the mask (AllValid → explicit bits);
 		// subsequent calls use SetInvalidUnsafe to skip the branch.
 		mask.SetInvalid(first);
 		for (idx_t r = first + 1; r < last; r++) {
 			mask.SetInvalidUnsafe(r);
+		}
+		// Also NULL-fill the qualified alias output position if present.
+		if (i < group.output_positions_qualified.size() &&
+		    group.output_positions_qualified[i] != DConstants::INVALID_INDEX) {
+			auto projected_q = projected_pos[group.output_positions_qualified[i]];
+			if (projected_q != DConstants::INVALID_INDEX) {
+				auto &qvec = output.data[projected_q];
+				qvec.SetVectorType(VectorType::FLAT_VECTOR);
+				auto &qmask = FlatVector::Validity(qvec);
+				qmask.SetInvalid(first);
+				for (idx_t r = first + 1; r < last; r++) {
+					qmask.SetInvalidUnsafe(r);
+				}
+			}
 		}
 	}
 }
@@ -1014,6 +1085,17 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 					mask.SetInvalidUnsafe(r);
 				}
 			}
+			for (auto &dup : g.dup_out_positions) {
+				auto &vec = output.data[dup.second];
+				vec.SetVectorType(VectorType::FLAT_VECTOR);
+				auto &mask = FlatVector::Validity(vec);
+				idx_t first = output_offset + placed + (fill_from - w_start);
+				idx_t last = output_offset + placed + (fill_to - w_start);
+				mask.SetInvalid(first);
+				for (idx_t r = first + 1; r < last; r++) {
+					mask.SetInvalidUnsafe(r);
+				}
+			}
 		}
 		idx_t read_need = need - skip_rows;
 		idx_t segment_pos = 0; // rows of this chunk's wanted range already placed
@@ -1031,6 +1113,11 @@ static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &
 				for (idx_t i = 0; i < g.read_cols.size(); i++) {
 					VectorOperations::Copy(g.carry_chunk->data[i], output.data[g.out_positions[i]], c_src + c_count, c_src,
 					                       c_dst);
+				}
+				// Replicate to qualified-alias output positions.
+				for (auto &dup : g.dup_out_positions) {
+					VectorOperations::Copy(output.data[dup.first], output.data[dup.second],
+					                       c_dst + c_count, c_dst, c_dst);
 				}
 				segment_pos += c_count;
 				if (c_to > g.carry_win_start_row) {
@@ -1126,6 +1213,11 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 				// of copied rows is source_count - source_offset.
 				VectorOperations::Copy(g.chunk->data[i], output.data[g.out_positions[i]], src_offset + copy_count,
 				                       src_offset, dst_offset);
+			}
+			// Replicate to qualified-alias output positions.
+			for (auto &dup : g.dup_out_positions) {
+				VectorOperations::Copy(output.data[dup.first], output.data[dup.second],
+				                       dst_offset + copy_count, dst_offset, dst_offset);
 			}
 			segment_pos += copy_count;
 			g.parquet_pos += chunk_rows;

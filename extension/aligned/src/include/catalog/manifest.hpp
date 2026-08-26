@@ -75,6 +75,10 @@ struct GroupPlan {
 	vector<string> column_order; // GROUP schema = the group's last part's columns
 	vector<LogicalType> schema_types; // aligned with column_order
 	vector<idx_t> output_positions; // table output position per column_order entry
+	vector<idx_t> output_positions_qualified; // qualified-name output position
+	                                           // (INVALID_INDEX when none); the
+	                                           // qualified alias "lv1.lv2.col"
+	                                           // for non-index unique columns
 	string lv1; // first path level of the group ("factor"); empty for "index"
 	string lv2; // second path level ("alpha101"); empty for "index"
 	string partition_source; // the index schema's DATE/TIMESTAMP column (col1)
