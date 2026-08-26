@@ -99,3 +99,34 @@ query R
 SET aligned_data_root = '{TEST_DIR}/qual_dup'; SELECT COLUMNS('panel.ma.vwap') FROM aligned_scan('dt') WHERE symbol='000001'
 ----
 200.0
+
+# --- null-fill for qualified alias when partition is missing ---
+# index has 2 partitions; factor/alpha only has 1 → qualified alias must NULL-fill
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_null'; SELECT * FROM aligned_create('nt', 'index', 'symbol VARCHAR, date DATE, close DOUBLE', partition_template => 'date=%Y-%m-%d')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_null'; SELECT * FROM aligned_create('nt', 'factor/alpha', 'alpha001 DOUBLE')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_null'; COPY (SELECT 'AAA'::VARCHAR AS symbol, DATE '2026-01-01' AS date, 10.0::DOUBLE AS close) TO 'nt' (FORMAT aligned, GROUP 'index')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_null'; COPY (SELECT 'BBB'::VARCHAR AS symbol, DATE '2026-01-02' AS date, 20.0::DOUBLE AS close) TO 'nt' (FORMAT aligned, GROUP 'index', MERGE true)
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/qual_null'; COPY (SELECT 'AAA'::VARCHAR AS symbol, DATE '2026-01-01' AS date, 10.0::DOUBLE AS close, 0.5::DOUBLE AS alpha001) TO 'nt' (FORMAT aligned, GROUP 'factor/alpha', MERGE true)
+
+# qualified alias only (bare name NOT selected): must NULL-fill missing partition
+query RRT
+SET aligned_data_root = '{TEST_DIR}/qual_null'; SELECT symbol, date, COLUMNS('factor.alpha.alpha001') FROM aligned_scan('nt') ORDER BY date
+----
+AAA,2026-01-01,0.5
+BBB,2026-01-02,NULL
+
+# bare name: must also NULL-fill missing partition
+query RRT
+SET aligned_data_root = '{TEST_DIR}/qual_null'; SELECT symbol, date, alpha001 FROM aligned_scan('nt') ORDER BY date
+----
+AAA,2026-01-01,0.5
+BBB,2026-01-02,NULL

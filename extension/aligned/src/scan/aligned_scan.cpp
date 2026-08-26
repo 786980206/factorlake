@@ -919,26 +919,30 @@ static void NullFillGroupRange(DataChunk &output, idx_t output_offset, const Gro
 	if (from >= to) {
 		return;
 	}
+	idx_t first = output_offset + (from - window_start);
+	idx_t last = output_offset + (to - window_start);
 	for (idx_t i = 0; i < group.column_order.size(); i++) {
 		if (group.output_positions[i] == DConstants::INVALID_INDEX) {
 			continue;
 		}
 		auto projected = projected_pos[group.output_positions[i]];
-		if (projected == DConstants::INVALID_INDEX) {
-			continue;
+		if (projected != DConstants::INVALID_INDEX) {
+			auto &vec = output.data[projected];
+			vec.SetVectorType(VectorType::FLAT_VECTOR);
+			auto &mask = FlatVector::Validity(vec);
+			// First SetInvalid initializes the mask (AllValid → explicit bits);
+			// subsequent calls use SetInvalidUnsafe to skip the branch.
+			mask.SetInvalid(first);
+			for (idx_t r = first + 1; r < last; r++) {
+				mask.SetInvalidUnsafe(r);
+			}
 		}
-		auto &vec = output.data[projected];
-		vec.SetVectorType(VectorType::FLAT_VECTOR);
-		auto &mask = FlatVector::Validity(vec);
-		idx_t first = output_offset + (from - window_start);
-		idx_t last = output_offset + (to - window_start);
-		// First SetInvalid initializes the mask (AllValid → explicit bits);
-		// subsequent calls use SetInvalidUnsafe to skip the branch.
-		mask.SetInvalid(first);
-		for (idx_t r = first + 1; r < last; r++) {
-			mask.SetInvalidUnsafe(r);
-		}
-		// Also NULL-fill the qualified alias output position if present.
+		// Also NULL-fill the qualified alias output position. This must
+		// happen independently of the bare name: a query may request ONLY
+		// the qualified alias (e.g. COLUMNS('lv1.lv2.col')) while the bare
+		// name's projected position is INVALID_INDEX. Skipping here would
+		// leave the qualified output vector uninitialized for missing
+		// partitions (garbage data).
 		if (i < group.output_positions_qualified.size() &&
 		    group.output_positions_qualified[i] != DConstants::INVALID_INDEX) {
 			auto projected_q = projected_pos[group.output_positions_qualified[i]];
