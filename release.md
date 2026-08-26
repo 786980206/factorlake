@@ -1996,3 +1996,47 @@ COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index', MERGE
 - SQLLogicTest：271/271 PASS
 
 
+## 2026-08-27 — 删除全部 DML 实现（INSERT/UPDATE/DELETE 路径）
+
+### 背景
+
+DML（INSERT/UPDATE/DELETE via ATTACH catalog）是早期通过 `AlignedCatalog::PlanInsert/
+PlanDelete/PlanUpdate` 钩子 + `aligned_dml.cpp` + `aligned_mutator.cpp` + `part_rewriter.cpp`
++ `key_resolver.cpp` 实现的行级写入路径。v1.5.5 的标准 DML 算子硬绑定 `DuckTableEntry`
++`DataTable`，自定义存储引擎无法作为扩展完整承接标准 DML 写。COPY TO (FORMAT aligned)
+已成为唯一写入路径，DML 代码不再需要维护。
+
+### 删除的文件
+
+- `extension/aligned/src/execution/aligned_dml.cpp` + `.hpp`
+- `extension/aligned/src/mutator/aligned_mutator.cpp` + `.hpp`
+- `extension/aligned/src/rewriter/part_rewriter.cpp` + `.hpp`
+- `extension/aligned/src/resolver/key_resolver.cpp` + `.hpp`
+- `test/aligned/aligned_dml.test`
+- `test/aligned/aligned_delete_empty.test`
+- `test/test_dml.ps1`
+
+### 提取的共享代码
+
+`TableWriteLock`、`StagedTransaction`、`NextTransactionId` 从 `aligned_mutator.hpp/.cpp`
+提取到新的 `catalog/write_lock.hpp/.cpp`（仍被 compactor、drop、create 使用）。
+
+### 保留的文件
+
+- `aligned_transaction.cpp/.hpp` — ATTACH catalog 需要
+- `aligned_catalog.cpp` — `PlanInsert/PlanDelete/PlanUpdate` 改为抛
+  `NotImplementedError`（DuckDB 要求实现纯虚函数）
+- `AlignedScanGetBindInfo` — `get_bind_info` 钩子保留，不影响功能
+
+### 测试改造
+
+所有 SQLLogicTest 中的 `INSERT INTO al.table VALUES(...)` 改为 `COPY (SELECT ...) TO
+'table' (FORMAT aligned, GROUP '...')`。多组写入需要先写 index 组再写非 index 组
+（非 index 组用 `MERGE true` 保持行位置对齐）。`aligned_boundary.test` 移除了
+DML 相关测试段。
+
+### 测试结果
+
+- SQLLogicTest：246/246 PASS（原 271 中删除了 DML 专用测试）
+- PS 套件：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8 全 PASS
+

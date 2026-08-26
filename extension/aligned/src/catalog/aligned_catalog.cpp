@@ -3,14 +3,13 @@
 //! `ATTACH '<root>' AS name (TYPE ALIGNED)` creates an AlignedCatalog over the
 //! parquet column-group data root. Tables are LOGICAL: reads go straight to
 //! the parquet files via the aligned_scan scan; nothing is materialized.
-//! Standard DML routes through the catalog's PlanInsert/PlanDelete/PlanUpdate
-//! hooks (the same mechanism DuckLake uses).
+//! DML (INSERT/UPDATE/DELETE) is not supported — use COPY TO (FORMAT aligned)
+//! for bulk writes and MERGE for incremental updates.
 
 #include "catalog/aligned_catalog.hpp"
 
 #include "catalog/manifest.hpp"
 #include "catalog/aligned_create.hpp"
-#include "execution/aligned_dml.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
@@ -28,6 +27,7 @@
 #include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/storage/database_size.hpp"
 #include "scan/aligned_scan.hpp"
+#include "resolver/partition_resolver.hpp"
 #include "transaction/aligned_transaction.hpp"
 
 namespace duckdb {
@@ -50,6 +50,34 @@ TableFunction AlignedTableEntry::GetScanFunction(ClientContext &context, unique_
 	vector<LogicalType> types;
 	vector<string> names;
 	bind_data = AlignedBindForCatalog(context, root, name, types, names);
+
+	// Add the virtual partition column to the scan bind data (but NOT to the
+	// catalog entry's column schema, which is used for DML binding).
+	auto &scan_bind = bind_data->Cast<AlignedTableBindData>();
+	if (!scan_bind.plan.groups.empty()) {
+		auto &index_group = scan_bind.plan.groups[0];
+		if (!index_group.manifest.partitioning.empty()) {
+			auto &tmpl = index_group.manifest.partitioning[0].template_str;
+			string part_col = PartitionColumnName(tmpl);
+			if (!part_col.empty()) {
+				bool collision = false;
+				for (auto &n : scan_bind.names) {
+					if (StringUtil::CIEquals(n, part_col)) {
+						collision = true;
+						break;
+					}
+				}
+				if (!collision) {
+					scan_bind.partition_col_name = part_col;
+					scan_bind.partition_col_idx = scan_bind.names.size();
+					scan_bind.names.push_back(part_col);
+					scan_bind.types.push_back(LogicalType::VARCHAR);
+					types.push_back(LogicalType::VARCHAR);
+					names.push_back(part_col);
+				}
+			}
+		}
+	}
 
 	// Same shape/flags as the registered aligned_scan function: projection &
 	// filter pushdown reach the scan through these flags.
@@ -399,114 +427,17 @@ PhysicalOperator &AlignedCatalog::PlanCreateTableAs(ClientContext &context, Phys
 
 PhysicalOperator &AlignedCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalInsert &op, optional_ptr<PhysicalOperator> plan) {
-	D_ASSERT(plan);
-	// Build an explicit group→column mapping from the INSERT column list.
-	// When the user specifies a subset of columns (e.g. INSERT INTO t (symbol,
-	// date, alpha001)), only the groups owning those columns need rewriting.
-	// Groups whose columns were all default-filled (not in the INSERT list)
-	// can be skipped entirely by the mutator — no RewritePart.
-	// column_index_map[physical_col] = position in the INSERT's value list,
-	// or INVALID_INDEX if the column was not specified (gets default/NULL).
-	string explicit_mapping;
-	if (!op.column_index_map.empty()) {
-		auto &entry_tbl = op.table.Cast<AlignedTableEntry>();
-		TablePlan tbl_plan;
-		BuildTablePlan(context, entry_tbl.GetRoot(), entry_tbl.name, tbl_plan);
-		// Build a map from physical column name → column_index_map value.
-		case_insensitive_map_t<idx_t> col_map;
-		for (auto &col : entry_tbl.GetColumns().Physical()) {
-			auto mapped = op.column_index_map[col.Physical()];
-			col_map[col.Name()] = mapped;
-		}
-		for (auto &group : tbl_plan.groups) {
-			vector<string> explicit_cols;
-			for (auto &col_name : group.column_order) {
-				auto it = col_map.find(col_name);
-				if (it == col_map.end()) {
-					continue;
-				}
-				if (it->second != DConstants::INVALID_INDEX) {
-					explicit_cols.push_back(col_name);
-				}
-			}
-			if (!explicit_cols.empty()) {
-				if (!explicit_mapping.empty()) {
-					explicit_mapping += ";";
-				}
-				explicit_mapping += group.manifest.group + ":";
-				for (idx_t i = 0; i < explicit_cols.size(); i++) {
-					if (i > 0) {
-						explicit_mapping += ",";
-					}
-					explicit_mapping += explicit_cols[i];
-				}
-			}
-		}
-	}
-
-	if (!op.column_index_map.empty()) {
-		plan = planner.ResolveDefaultsProjection(op, *plan);
-	}
-	auto &entry = op.table.Cast<AlignedTableEntry>();
-	vector<string> col_names;
-	for (auto &col : entry.GetColumns().Physical()) {
-		col_names.push_back(col.Name());
-	}
-	auto row_types = entry.GetTypes();
-	auto &insert = planner.Make<PhysicalAlignedInsert>(op.types, std::move(row_types), std::move(col_names),
-	                                                   entry.name, entry.GetRoot(), op.estimated_cardinality,
-	                                                   std::move(explicit_mapping));
-	insert.children.push_back(*plan);
-	return insert;
+	throw NotImplementedException("aligned attach: INSERT is not supported. Use COPY TO (FORMAT aligned) for writes.");
 }
 
 PhysicalOperator &AlignedCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalDelete &op, PhysicalOperator &plan) {
-	auto &entry = op.table.Cast<AlignedTableEntry>();
-	auto &del = planner.Make<PhysicalAlignedDelete>(op.types, entry.name, entry.GetRoot(),
-	                                                op.estimated_cardinality);
-	del.children.push_back(plan);
-	return del;
+	throw NotImplementedException("aligned attach: DELETE is not supported.");
 }
 
 PhysicalOperator &AlignedCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalUpdate &op, PhysicalOperator &plan) {
-	auto &entry = op.table.Cast<AlignedTableEntry>();
-	// Per SET column: table column name and the group that owns it (from the
-	// table plan's group schemas). Used to stage [date, symbol, set...] and to
-	// build the upsert mapping.
-	vector<string> set_names;
-	vector<string> set_groups;
-	vector<LogicalType> ignore_types;
-	vector<string> ignore_names;
-	auto bind_data = AlignedBindForCatalog(context, entry.GetRoot(), entry.name, ignore_types, ignore_names);
-	auto &bind_plan = bind_data->Cast<AlignedTableBindData>().plan;
-	for (auto &cidx : op.columns) {
-		auto name = entry.GetColumns().GetColumn(cidx).Name();
-		set_names.push_back(name);
-		string grp;
-		for (auto &g : bind_plan.groups) {
-			for (auto &cn : g.column_order) {
-				if (StringUtil::CIEquals(cn, name)) {
-					grp = g.manifest.group;
-					break;
-				}
-			}
-			if (!grp.empty()) {
-				break;
-			}
-		}
-		set_groups.push_back(grp);
-		if (grp.empty()) {
-			throw BinderException("aligned UPDATE: column '%s' is not part of any column group", name);
-		}
-	}
-	auto &upd = planner.Make<PhysicalAlignedUpdate>(op.types, std::move(set_names), std::move(set_groups), entry.name,
-	                                                entry.GetRoot(), op.estimated_cardinality)
-	                 .Cast<PhysicalAlignedUpdate>();
-	upd.expressions = std::move(op.expressions);
-	upd.children.push_back(plan);
-	return upd;
+	throw NotImplementedException("aligned attach: UPDATE is not supported. Use COPY TO (FORMAT aligned, MERGE true) for updates.");
 }
 
 DatabaseSize AlignedCatalog::GetDatabaseSize(ClientContext &context) {

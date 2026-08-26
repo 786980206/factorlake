@@ -2,7 +2,7 @@
 
 #include "catalog/manifest.hpp"
 #include "io/parquet_io.hpp"
-#include "mutator/aligned_mutator.hpp"
+#include "catalog/write_lock.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"

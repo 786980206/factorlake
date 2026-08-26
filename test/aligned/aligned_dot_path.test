@@ -15,12 +15,15 @@ SET aligned_data_root = '{TEST_DIR}/.data_root'; SELECT group_name, columns, par
 index,sym;date;close,1
 
 # aligned_scan must return schema (not INTERNAL Error)
-query TTTTTT
+# The default partition_template is month=%Y-%m, so a virtual "month"
+# VARCHAR partition column is appended after the real columns.
+query TTTTTTTT
 SET aligned_data_root = '{TEST_DIR}/.data_root'; DESCRIBE SELECT * FROM aligned_scan('dot_tbl')
 ----
 sym,VARCHAR,YES,NULL,NULL,NULL
 date,DATE,YES,NULL,NULL,NULL
 close,DOUBLE,YES,NULL,NULL,NULL
+month,VARCHAR,YES,NULL,NULL,NULL
 
 # count must be 0
 query I

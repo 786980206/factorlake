@@ -3,12 +3,17 @@
 #              after ATTACH (aligned_create + aligned_drop stale catalog bug)
 # Each statement batch includes ATTACH to preserve session scope.
 
-# --- create table 1, ATTACH, insert, verify ---
+# --- create table 1, COPY data, verify via ATTACH scan ---
 statement ok
 SET aligned_data_root = '{TEST_DIR}/cat_refresh'; SELECT * FROM aligned_create('t1', 'index', 'sym VARCHAR, date DATE, close DOUBLE')
 
 statement ok
-SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); INSERT INTO al.t1 (sym, date, close) VALUES ('000001', DATE '2024-01-01', 10.5); SELECT sym, date, close FROM al.t1
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; COPY (SELECT '000001'::VARCHAR AS sym, DATE '2024-01-01' AS date, 10.5::DOUBLE AS close) TO 't1' (FORMAT aligned, GROUP 'index')
+
+query TTD
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); SELECT sym, date, close FROM al.t1
+----
+000001,2024-01-01,10.5
 
 # --- drop table 1 ---
 statement ok
@@ -18,9 +23,9 @@ SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh
 statement ok
 SET aligned_data_root = '{TEST_DIR}/cat_refresh'; SELECT * FROM aligned_create('t2', 'index', 'sym VARCHAR, date DATE, close DOUBLE')
 
-# INSERT into the new table via a fresh ATTACH — must succeed
+# COPY into the new table — must succeed
 statement ok
-SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); INSERT INTO al.t2 (sym, date, close) VALUES ('000002', DATE '2024-01-02', 20.0)
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; COPY (SELECT '000002'::VARCHAR AS sym, DATE '2024-01-02' AS date, 20.0::DOUBLE AS close) TO 't2' (FORMAT aligned, GROUP 'index')
 
 query TTD
 SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); SELECT sym, date, close FROM al.t2
@@ -32,7 +37,7 @@ statement ok
 SET aligned_data_root = '{TEST_DIR}/cat_refresh'; SELECT * FROM aligned_create('t3', 'index', 'sym VARCHAR, date DATE, val DOUBLE')
 
 statement ok
-SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); INSERT INTO al.t3 (sym, date, val) VALUES ('000003', DATE '2024-01-03', 30.0)
+SET aligned_data_root = '{TEST_DIR}/cat_refresh'; COPY (SELECT '000003'::VARCHAR AS sym, DATE '2024-01-03' AS date, 30.0::DOUBLE AS val) TO 't3' (FORMAT aligned, GROUP 'index')
 
 query TTD
 SET aligned_data_root = '{TEST_DIR}/cat_refresh'; ATTACH '{TEST_DIR}/cat_refresh' AS al (TYPE ALIGNED); SELECT sym, date, val FROM al.t3

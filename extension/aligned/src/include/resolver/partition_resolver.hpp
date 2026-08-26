@@ -29,6 +29,15 @@ bool EvaluatePartitionTemplate(const string &template_str, int64_t value, bool i
 //! "date=%Y-%m-%d", "month=%Y-%m", "year=%Y".
 bool IsKnownTemplate(const string &template_str);
 
+//! Returns the partition column name prefix of a template: "year" for
+//! "year=%Y", "month" for "month=%Y-%m", "date" for "date=%Y-%m-%d".
+//! Returns "" for unknown templates.
+string PartitionColumnName(const string &template_str);
+
+//! Returns the value portion of a partition key (strips the "name=" prefix).
+//! e.g. "year=2024" -> "2024", "month=2024-01" -> "2024-01".
+string PartitionKeyValue(const string &partition_key);
+
 //! Computes the default partition key from a template, based on the current
 //! date. For "year=%Y" it's "year=<current_year>"; for "month=%Y-%m" it's
 //! "month=<current_year>-<current_month>"; for "date=%Y-%m-%d" it's the

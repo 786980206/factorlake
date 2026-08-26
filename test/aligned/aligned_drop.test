@@ -7,21 +7,28 @@ ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); CREATE TABLE al.drop_tbl (sy
 ----
 0
 
-# insert rows across two months
+# COPY rows across two months — index group first
+statement ok
+SET aligned_data_root = '{TEST_DIR}/drop_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close, 1000::BIGINT AS volume UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 11.0::DOUBLE, 2000::BIGINT ORDER BY symbol) TO 'drop_tbl' (FORMAT aligned, GROUP 'index')
+
+# factor/alpha group — needs symbol/date as hidden sort keys (MERGE to preserve row alignment)
+statement ok
+SET aligned_data_root = '{TEST_DIR}/drop_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 0.3::DOUBLE AS alpha001, 0.5::DOUBLE AS alpha002 UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 0.4::DOUBLE, 0.6::DOUBLE ORDER BY symbol) TO 'drop_tbl' (FORMAT aligned, GROUP 'factor/alpha', MERGE true)
+
+# verify both groups readable
 query I
-ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); INSERT INTO al.drop_tbl VALUES ('000001', DATE '2026-01-15', 10.5, 1000, 0.3, 0.5); INSERT INTO al.drop_tbl VALUES ('000002', DATE '2026-02-20', 11.0, 2000, 0.4, 0.6); SELECT count(*) FROM al.drop_tbl
+ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.drop_tbl
 ----
 2
 
-# verify both groups readable
 query RRRR
 ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT close, volume, alpha001, alpha002 FROM al.drop_tbl WHERE symbol = '000001'
 ----
 10.5,1000,0.3,0.5
 
 # --- drop a single non-index column group ---
-# factor/alpha has 3 partition dirs (month=1970-01 placeholder, month=2026-01,
-# month=2026-02), each with 1 parquet file = 3 dirs + 3 files
+# factor/alpha has 3 partition dirs (month=2026-08 placeholder, month=2026-01, month=2026-02)
+# each with 1 parquet file = 3 dirs + 3 files
 query III
 ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT * FROM aligned_drop('drop_tbl', 'factor/alpha', root => '{TEST_DIR}/drop_data')
 ----
@@ -58,8 +65,6 @@ SELECT * FROM aligned_drop('nonexistent', 'index')
 no data root
 
 # --- drop index = drop entire table ---
-# mytable has: index/ (2 dirs + 2 files), factor/alpha already dropped.
-# _tmp/ may exist. Total dirs and files vary, so just verify the table is gone.
 statement ok
 ATTACH '{TEST_DIR}/drop_data' AS al (TYPE ALIGNED); SELECT * FROM aligned_drop('drop_tbl', 'index', root => '{TEST_DIR}/drop_data')
 

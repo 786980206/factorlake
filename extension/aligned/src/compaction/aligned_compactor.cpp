@@ -1,7 +1,7 @@
 #include "compaction/aligned_compactor.hpp"
 
 #include "catalog/manifest.hpp"
-#include "mutator/aligned_mutator.hpp"
+#include "catalog/write_lock.hpp"
 #include "io/parquet_io.hpp"
 
 #include "duckdb/common/exception.hpp"

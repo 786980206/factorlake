@@ -2,15 +2,17 @@
 # description: CREATE TABLE on ATTACH ... TYPE ALIGNED catalog — schema + placeholder parquet + partition creation
 
 # --- basic create table: all columns default to index group ---
-# Use multi-statement batches to preserve ATTACH session state.
 query I
 ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.basic_tbl (symbol VARCHAR, date DATE, close DOUBLE, volume BIGINT); SELECT count(*) FROM al.basic_tbl
 ----
 0
 
-# insert + verify
+# COPY data + verify
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-09-01' AS date, 10.5::DOUBLE AS close, 1000::BIGINT AS volume) TO 'basic_tbl' (FORMAT aligned, GROUP 'index')
+
 query I
-ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.basic_tbl VALUES ('000001', DATE '2026-09-01', 10.5, 1000); SELECT count(*) FROM al.basic_tbl
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.basic_tbl
 ----
 1
 
@@ -25,9 +27,17 @@ ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.multi_tbl 
 ----
 0
 
-# insert + verify
+# COPY index group first (includes symbol, date, close, volume)
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_data'; COPY (SELECT '000002'::VARCHAR AS symbol, DATE '2026-09-02' AS date, 20.5::DOUBLE AS close, 2000::BIGINT AS volume) TO 'multi_tbl' (FORMAT aligned, GROUP 'index')
+
+# COPY factor/alpha group (alpha001 only — symbol/date are hidden sort keys from index)
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_data'; COPY (SELECT '000002'::VARCHAR AS symbol, DATE '2026-09-02' AS date, 0.3::DOUBLE AS alpha001) TO 'multi_tbl' (FORMAT aligned, GROUP 'factor/alpha')
+
+# verify
 query RRR
-ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.multi_tbl VALUES ('000002', DATE '2026-09-02', 20.5, 2000, 0.3); SELECT close, volume, alpha001 FROM al.multi_tbl WHERE symbol = '000002'
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); SELECT close, volume, alpha001 FROM al.multi_tbl WHERE symbol = '000002'
 ----
 20.5,2000,0.3
 
@@ -37,9 +47,12 @@ ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.basic_tbl 
 ----
 0
 
-# insert into pre-created partition
+# COPY into pre-created partition
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_data'; COPY (SELECT '000003'::VARCHAR AS symbol, DATE '2026-10-01' AS date, 30.5::DOUBLE AS close, 3000::BIGINT AS volume) TO 'basic_tbl' (FORMAT aligned, GROUP 'index')
+
 query R
-ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.basic_tbl VALUES ('000003', DATE '2026-10-01', 30.5, 3000); SELECT close FROM al.basic_tbl WHERE symbol = '000003'
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); SELECT close FROM al.basic_tbl WHERE symbol = '000003'
 ----
 30.5
 
@@ -73,9 +86,12 @@ ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); CREATE TABLE al.date_tbl (
 ----
 0
 
-# insert into date-partitioned table
+# COPY into date-partitioned table
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_data'; COPY (SELECT '000004'::VARCHAR AS symbol, DATE '2026-09-03' AS date, 40.5::DOUBLE AS close) TO 'date_tbl' (FORMAT aligned, GROUP 'index')
+
 query R
-ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); INSERT INTO al.date_tbl VALUES ('000004', DATE '2026-09-03', 40.5); SELECT close FROM al.date_tbl WHERE symbol = '000004'
+ATTACH '{TEST_DIR}/create_data' AS al (TYPE ALIGNED); SELECT close FROM al.date_tbl WHERE symbol = '000004'
 ----
 40.5
 
@@ -99,20 +115,23 @@ invalid date
 
 # === extend column group ===
 
-# create a table with only index group, insert data
+# create a table with only index group, COPY all 3 rows at once
 statement ok
-ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (symbol VARCHAR, date DATE, close DOUBLE) WITH (groups = 'index:close'); INSERT INTO al.ext_tbl VALUES ('000001', DATE '2026-09-01', 10.5); INSERT INTO al.ext_tbl VALUES ('000002', DATE '2026-09-01', 20.5)
+SET aligned_data_root = '{TEST_DIR}/extend_data'; ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (symbol VARCHAR, date DATE, close DOUBLE) WITH (groups = 'index:close')
+
+statement ok
+SET aligned_data_root = '{TEST_DIR}/extend_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-09-01' AS date, 10.5::DOUBLE AS close UNION ALL SELECT '000002'::VARCHAR, DATE '2026-09-01', 20.5::DOUBLE UNION ALL SELECT '000003'::VARCHAR, DATE '2026-09-01', 30.5::DOUBLE ORDER BY symbol) TO 'ext_tbl' (FORMAT aligned, GROUP 'index')
 
 # extend: add a new column group 'fieldset/ma' to existing table
 # columns in CREATE TABLE define the new group's columns (no symbol/date needed)
 statement ok
 ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); CREATE TABLE al.ext_tbl (ma5 DOUBLE, ma20 DOUBLE) WITH (groups = 'fieldset/ma:ma5,ma20')
 
-# after extend: table has 6 columns (symbol, date, close, ma5, ma20)
+# after extend: table has 5 columns (symbol, date, close, ma5, ma20)
 query I
 ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al.ext_tbl
 ----
-2
+3
 
 # new columns are NULL for existing rows
 query RRRR
@@ -120,9 +139,12 @@ ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); SELECT symbol, close, ma5,
 ----
 000001,10.5,NULL,NULL
 
-# insert a new row with all columns (including the new group's columns)
+# COPY 000003's ma data into fieldset/ma group (MERGE to preserve existing NULL placeholder rows)
+statement ok
+SET aligned_data_root = '{TEST_DIR}/extend_data'; COPY (SELECT '000003'::VARCHAR AS symbol, DATE '2026-09-01' AS date, 0.1::DOUBLE AS ma5, 0.2::DOUBLE AS ma20) TO 'ext_tbl' (FORMAT aligned, GROUP 'fieldset/ma', MERGE true)
+
 query RRRR
-ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); INSERT INTO al.ext_tbl VALUES ('000003', DATE '2026-09-01', 30.5, 0.1, 0.2); SELECT symbol, close, ma5, ma20 FROM al.ext_tbl WHERE symbol = '000003'
+ATTACH '{TEST_DIR}/extend_data' AS al (TYPE ALIGNED); SELECT symbol, close, ma5, ma20 FROM al.ext_tbl WHERE symbol = '000003'
 ----
 000003,30.5,0.1,0.2
 

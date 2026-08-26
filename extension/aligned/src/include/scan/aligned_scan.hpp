@@ -17,6 +17,13 @@ struct AlignedTableBindData : public TableFunctionData {
 	//! Owning catalog entry when scanned through an attached table (Phase 8);
 	//! nullptr for direct aligned_scan() calls.
 	class TableCatalogEntry *catalog_entry = nullptr;
+	//! Virtual partition column (e.g. "year" of type VARCHAR). Populated when
+	//! the table's partition template prefix does not collide with an existing
+	//! column name. When set, the scan materializes the partition key value
+	//! (e.g. "2024") for every row and filters on it are used for partition
+	//! pruning. Empty name = no virtual partition column.
+	string partition_col_name;
+	idx_t partition_col_idx = DConstants::INVALID_INDEX; // position in names/types
 };
 
 //! Bind without going through TableFunctionBindInput (used by the attached

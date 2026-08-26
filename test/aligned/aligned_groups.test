@@ -27,11 +27,20 @@ factor/alpha,alpha001;alpha002,1
 fieldset/ma,ma5;ma20,1
 index,symbol;date;close;volume,1
 
-# --- insert data, then partition_count increases ---
+# --- COPY data, then partition_count increases ---
+# index group
 statement ok
-SET aligned_data_root = '{TEST_DIR}/groups_data'; ATTACH '{TEST_DIR}/groups_data' AS al (TYPE ALIGNED); INSERT INTO al.grp_tbl (symbol, date, close, volume, alpha001, alpha002, ma5, ma20) VALUES ('000001', DATE '2026-01-15', 10.5, 1000, 0.3, 0.5, 1.0, 2.0); INSERT INTO al.grp_tbl (symbol, date, close, volume, alpha001, alpha002, ma5, ma20) VALUES ('000002', DATE '2026-02-20', 11.0, 2000, 0.4, 0.6, 3.0, 4.0); DETACH al
+SET aligned_data_root = '{TEST_DIR}/groups_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close, 1000::BIGINT AS volume UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 11.0::DOUBLE, 2000::BIGINT ORDER BY symbol) TO 'grp_tbl' (FORMAT aligned, GROUP 'index')
 
-# --- now each group has 3 partitions (1970-01 placeholder + 2026-01 + 2026-02) ---
+# factor/alpha group (symbol/date as hidden sort keys, MERGE to preserve alignment)
+statement ok
+SET aligned_data_root = '{TEST_DIR}/groups_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 0.3::DOUBLE AS alpha001, 0.5::DOUBLE AS alpha002 UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 0.4::DOUBLE, 0.6::DOUBLE ORDER BY symbol) TO 'grp_tbl' (FORMAT aligned, GROUP 'factor/alpha', MERGE true)
+
+# fieldset/ma group (symbol/date as hidden sort keys, MERGE to preserve alignment)
+statement ok
+SET aligned_data_root = '{TEST_DIR}/groups_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 1.0::DOUBLE AS ma5, 2.0::DOUBLE AS ma20 UNION ALL SELECT '000002'::VARCHAR, DATE '2026-02-20', 3.0::DOUBLE, 4.0::DOUBLE ORDER BY symbol) TO 'grp_tbl' (FORMAT aligned, GROUP 'fieldset/ma', MERGE true)
+
+# --- now each group has 3 partitions (2026-08 placeholder + 2026-01 + 2026-02) ---
 query TI rowsort
 SET aligned_data_root = '{TEST_DIR}/groups_data'; SELECT group_name, partition_count FROM aligned_groups('grp_tbl')
 ----

@@ -99,8 +99,7 @@ Parquet footer 推导：
   分区内按 `(symbol, date)` 升序排列。
   **TIMESTAMP 键**（v9）：当 col1 为 TIMESTAMP 时，键为完整 timestamp 值
   （微秒级），不截断为日期——同一天内同一标的的多个时间戳（如分钟 K 线）是不同
-  键。KeyResolver 内部键类型为 `int64_t`（兼容 date_t 和 timestamp_t），分区目录
-  求值时自动提取日期部分。
+  键。COPY 写入时按完整 timestamp 值排序，分区目录求值时自动提取日期部分。
 - **不持久化的信息**：表名（←目录名）、schema（←Parquet footer）、
   行数/行区间（←part 文件名 `{idx:04d}-{rows:10d}`）、Row Group 大小（←编译常量
   131072）、事务号、Column Group 列表（←glob）、分区模板（←目录结构）。
@@ -142,7 +141,7 @@ AlignedTableScan
 
 ---
 
-## 7. Writer（COPY TO / aligned_create / aligned_compact / aligned_drop / CREATE TABLE / DML）
+## 7. Writer（COPY TO / aligned_create / aligned_compact / aligned_drop / CREATE TABLE）
 
 ```
 aligned_scan(table, root=...)                    → (table columns)
@@ -229,25 +228,11 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday' (FORMAT aligned
   - **新组推断**：`aligned_create('table', 'group')` 2-arg 形式创建空组目录，
     首次 COPY 时从 query 列推断 schema（排除 index key 列 symbol/date）。
 
-- **标准 DML**：ATTACH 后直接用 `INSERT` / `UPDATE` / `DELETE` 操作
-  `al.<table>`，内部通过 `AlignedUpsertFromCollection` /
-  `AlignedDeleteFromCollection` 直写 parquet 列组。`aligned_upsert` /
-  `aligned_delete` 表函数已删除——标准 DML 完全替代。
-
-- **v8 mutator**：按主键 `(symbol, date)` 插入/更新/删除，只重写受影响 part。
-  删除逻辑：删空单 part 分区 → 整分区移除；删空多 part 分区最高索引 part →
-  直接移除该 part；删空多 part 分区中间 part → 原地重写为 0 行空文件
-  （保留文件名索引，保持索引连续）。
-- **Atomic Commit**：先写 `_tmp/transaction-<id>/`，全部成功后 move 成正式
-  partition；崩溃则丢弃（`_tmp/` 对 Reader 不可见）。无 sidecar、无 marker。
 - **映射列类型 = 组内已存类型**（组 schema），非源文件类型——跨 part 列类型必须
   一致；首写空表回退源类型。新分区只建在映射过的 Group。未知 mapping Group →
   BinderException fail-fast。mapping 可选（已存在表按列名自动推断）。
 - **Schema Evolution**：新列在老 part 上读到 NULL，不重写历史。
-- **Append-to-Last-Part**（`ALIGNED_DEFAULT_PART_ROWS = 1048576`）：upsert 追加
-  到末 part 时若行数 < 阈值则重写末 part 并追加（减少碎片化）；跨组一致性预检，
-  任一不满足则整分区回退新建 part。
-- **并发写互斥**（`.aligned_write.lock`）：mutator/compactor 执行前创建 lock 文件
+- **并发写互斥**（`.aligned_write.lock`）：COPY/compactor 执行前创建 lock 文件
   （RAII），已有 lock 则拒绝。crash 残留用户手动删除。
 - **Compaction**：`aligned_compact(table, 'all')` 单事务合并所有组，原子切换。
   同目录必须同列集（拒绝 schema-evolution 合并）。**两阶段提交**：所有组的合并
@@ -279,16 +264,6 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 - 列组扩展：表已存在时指定至少一个非 index Group；新 Group 的每个已存在分区
   写 N 行全 NULL 占位 parquet（满足分区对齐契约）；已有 Group 不被触碰。
 
-### 标准 DML（DuckLake 式逻辑 Attach）
-
-`ATTACH '<root>' AS al (TYPE ALIGNED)` → 表保持逻辑表，SELECT 走 aligned 扫描，
-标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子
-直写 parquet 列组。`DETACH al;` 卸载。
-
-**注意**：v1.5.5 的标准 DML 算子硬绑定 `DuckTableEntry`+`DataTable`，自定义存储
-引擎无法作为扩展承接标准 DML 写。方案是通过 catalog 的 PlanInsert/PlanDelete/
-PlanUpdate 钩子返回自定义 sink 算子，直接调 mutator 的 C++ API。
-
 ---
 
 ## 8. 不做
@@ -310,15 +285,12 @@ Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
 ```
 extension/aligned/src/
 ├── extension.cpp
-├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp  aligned_groups.cpp  aligned_meta.cpp
-├── resolver/      partition_resolver.cpp  key_resolver.cpp
+├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp  aligned_groups.cpp  aligned_meta.cpp  write_lock.cpp
+├── resolver/      partition_resolver.cpp
 ├── scan/          aligned_scan.cpp
 ├── copy/          aligned_copy.cpp
-├── mutator/       aligned_mutator.cpp
-├── rewriter/      part_rewriter.cpp
 ├── compaction/    aligned_compactor.cpp  aligned_drop.cpp
 ├── io/            parquet_io.cpp
-├── execution/     aligned_dml.cpp
 └── transaction/   aligned_transaction.cpp
 ```
 
@@ -343,9 +315,9 @@ extension/aligned/src/
 | | `AlignedCopyGlobalState` | 拥有 N 个 FlushWorker 线程池 + partition→worker affinity |
 | | `AlignedCopySink` | 并行 run detection + project + push RG buffer 到 FlushWorker |
 | | `FlushWorker::WorkerLoop` | PopJob → ParquetWriter::Flush（线程私有，无锁）→ 轮转 part 文件 |
-| `mutator/aligned_mutator` | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
+| `catalog/write_lock` | `TableWriteLock` | 目录 `.aligned_write.lock` 写互斥（RAII） |
+| | `StagedTransaction` | RAII 暂存事务（锁 + txid + `_tmp/` 清理） |
 | | `NextTransactionId` | 共享事务号计数器 |
-| | `ExtractSortedRows` | 向量化提取 (symbol, date) 排序键 |
 
 ---
 
@@ -369,8 +341,8 @@ extension/aligned/src/
 
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
-- PS 脚本（位于 `test/`）：test_aligned 42/42、test_dml 10/10（含 1.1M 行批量 INSERT 测试）、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 271/271 + 4 PS 套件全 PASS
+- PS 脚本（位于 `test/`）：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8
+- 当前总：SQLLogicTest 246/246 + 3 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`
@@ -511,15 +483,6 @@ extension/aligned/src/
   全部收益。按 16 chunks 发 Range → 8 线程 4.2×。
 - **不要依赖 count(rowid)/count(\*) 诊断数据错误**：DuckDB 会用 Cardinality
   统计优化掉扫描。用 `sum(rowid)` + `row_number() OVER ()` 定位。
-- **KeyResolver 定位粒度 = part 文件，不是 RowGroup**：重写的最小单位是 Parquet
-  文件（part），所以用 part 级别的 symbol [min, max] 范围做二分查找即可定位受影响
-  文件。不需要加载 part 内部数据在 RowGroup 级别做二分查找——一旦确定某个 part
-  受影响，整个 part 就要被重写。`LoadSinglePart` 只在需要区分 insert vs update 时
-  加载单个 part 的键数据（O(1 part)），而非 `LoadPartition`（O(N parts)）。
-- **KeyResolver 缓存标志必须在加载成功后设置**：`loaded` / `boundary_loaded` /
-  `part_loaded` 标志必须在 Scan 循环成功完成后才设为 true。如果在循环前设置，
-  循环抛异常（corrupt parquet、IO error）后标志仍为 true，后续调用跳过加载，
-  使用空/不完整统计 → 键定位错误（所有键被判为 insert，或错误的 part 定位）。
 
 ### 工具链陷阱
 
@@ -530,9 +493,8 @@ extension/aligned/src/
 - **`EvaluatePartitionTemplate` int64_t 版本的 date/timestamp 启发式**：
   `value >= 0 && value <= 200000` 判为 date_t，否则判为 timestamp_t。1970 年
   之前的日期（负 date_t）和 epoch 后 200000 微秒内的 timestamp_t 会被误判。
-  **已修复**：新增 `is_timestamp` 类型安全重载，所有调用方（`key_resolver`、
-  `aligned_mutator`、`aligned_copy`）都已改用类型安全版本。旧的启发式重载
-  保留向后兼容但已弃用。
+  **已修复**：新增 `is_timestamp` 类型安全重载，所有调用方都已改用类型安全版本。
+  旧的启发式重载保留向后兼容但已弃用。
 - **读路径列匹配必须大小写不敏感**：`OpenPart` 和 `ComputeRowGroupWindow` 中
   查找 parquet reader 列名必须用 `StringUtil::CIEquals`，与 `parquet_io.cpp`
   一致。跨 part 列名大小写不一致（如 `Symbol` vs `symbol`）不应被静默 NULL 填充。
@@ -547,8 +509,7 @@ extension/aligned/src/
 - **`ParquetReader::Scan` 返回 `BLOCKED` 不是错误**：对象存储异步 I/O 可能返回
   `BLOCKED`（数据未就绪），应 `continue` 重试而非 `break`/throw。本地文件不会
   触发此路径。**所有** Scan 循环都已修复：scan、compactor（`MergePartsToWriter`、
-  多 part 分流）、`part_rewriter`（`FetchOldChunk`）、
-  `key_resolver`（`LoadPartition`、`LoadSinglePart`）、`aligned_mutator`。
+  多 part 分流）。
 - **Compaction Phase 1 并行化**：各分区目录的暂存独立（各自有 reader/writer），
   可并行处理。线程池用 `std::thread` + `std::atomic` work queue，每个 worker
   创建自己的 `ParquetReader`/`ParquetWriter`/`ScanState`/`DataChunk`/`Collection`。

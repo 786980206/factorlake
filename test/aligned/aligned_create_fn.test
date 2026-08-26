@@ -2,7 +2,7 @@
 # description: aligned_create table function — create table or add column group
 
 # --- create new table (group='index') ---
-# table dir + index dir + 1 placeholder partition dir = 2 dirs, 1 parquet file
+# table dir + index dir + 1 placeholder partition dir (current month) = 2 dirs, 1 parquet file
 query III
 SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE')
 ----
@@ -14,14 +14,18 @@ ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); SELECT count(*) FROM al
 ----
 0
 
-# insert + verify
-query RR
-ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5); SELECT close FROM al.mytable WHERE symbol = '000001'
+# COPY data + verify
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; COPY (SELECT '000001'::VARCHAR AS symbol, DATE '2026-01-15' AS date, 10.5::DOUBLE AS close) TO 'mytable' (FORMAT aligned, GROUP 'index')
+
+query R
+ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); SELECT close FROM al.mytable WHERE symbol = '000001'
 ----
 10.5
 
 # --- add a column group to existing table ---
-# factor/alpha has 2 partition dirs (month=1970-01 placeholder + month=2026-01)
+# factor/alpha gets a placeholder for each index partition.
+# Index has 2 partitions (month=2026-08 placeholder + month=2026-01 with data)
 # = 2 dirs, 2 parquet files
 query II
 SET aligned_data_root = '{TEST_DIR}/create_fn_data'; SELECT dirs_created, files_created FROM aligned_create('mytable', 'factor/alpha', 'alpha001 DOUBLE, alpha002 DOUBLE')
@@ -34,9 +38,16 @@ ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); SELECT alpha001, alpha0
 ----
 NULL,NULL
 
-# insert + verify alpha columns
+# COPY 000002 into index group first, then factor/alpha group
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; COPY (SELECT '000002'::VARCHAR AS symbol, DATE '2026-02-01' AS date, 20.0::DOUBLE AS close) TO 'mytable' (FORMAT aligned, GROUP 'index')
+
+# factor/alpha group (MERGE true to preserve existing rows)
+statement ok
+SET aligned_data_root = '{TEST_DIR}/create_fn_data'; COPY (SELECT '000002'::VARCHAR AS symbol, DATE '2026-02-01' AS date, 0.3::DOUBLE AS alpha001, 0.5::DOUBLE AS alpha002) TO 'mytable' (FORMAT aligned, GROUP 'factor/alpha', MERGE true)
+
 query RR
-ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); INSERT INTO al.mytable VALUES ('000002', DATE '2026-02-01', 20.0, 0.3, 0.5); SELECT alpha001, alpha002 FROM al.mytable WHERE symbol = '000002'
+ATTACH '{TEST_DIR}/create_fn_data' AS al (TYPE ALIGNED); SELECT alpha001, alpha002 FROM al.mytable WHERE symbol = '000002'
 ----
 0.3,0.5
 

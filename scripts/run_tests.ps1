@@ -4,7 +4,6 @@
 #   .\scripts\run_tests.ps1              # run all suites
 #   .\scripts\run_tests.ps1 -Suite sql   # SQLLogicTest only
 #   .\scripts\run_tests.ps1 -Suite aligned # test_aligned.ps1 only
-#   .\scripts\run_tests.ps1 -Suite dml    # test_dml.ps1 only
 #   .\scripts\run_tests.ps1 -Suite compaction # test_compaction.ps1 only
 #   .\scripts\run_tests.ps1 -Suite parallel    # test_parallel.ps1 only
 #
@@ -43,13 +42,6 @@ if ($Suite -eq 'all' -or $Suite -eq 'sql') {
 if ($Suite -eq 'all' -or $Suite -eq 'aligned') {
     Run-Suite 'test_aligned' {
         & powershell -ExecutionPolicy Bypass -File (Join-Path $repo 'test\test_aligned.ps1')
-        if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" }
-    }
-}
-
-if ($Suite -eq 'all' -or $Suite -eq 'dml') {
-    Run-Suite 'test_dml' {
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $repo 'test\test_dml.ps1')
         if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" }
     }
 }

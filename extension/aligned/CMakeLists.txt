@@ -19,13 +19,10 @@ set(ALIGNED_EXTENSION_FILES
     src/catalog/aligned_create_fn.cpp
     src/catalog/aligned_groups.cpp
     src/catalog/aligned_meta.cpp
+    src/catalog/write_lock.cpp
     src/io/parquet_io.cpp
     src/resolver/partition_resolver.cpp
-    src/resolver/key_resolver.cpp
-    src/rewriter/part_rewriter.cpp
-    src/mutator/aligned_mutator.cpp
     src/scan/aligned_scan.cpp
-    src/execution/aligned_dml.cpp
     src/transaction/aligned_transaction.cpp
     src/compaction/aligned_compactor.cpp
     src/compaction/aligned_drop.cpp

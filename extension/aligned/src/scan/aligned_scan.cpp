@@ -143,6 +143,12 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	// Filter-column removal (projection_ids): which scanned columns the final
 	// output keeps (indexes into the scanned column list)
 	vector<idx_t> projection_ids;
+	// Virtual partition column: scratch slot (column_ids index) and effective
+	// output position (INVALID when pruned or not requested).
+	idx_t partition_scratch = DConstants::INVALID_INDEX;
+	idx_t partition_pos = DConstants::INVALID_INDEX;
+	// True when a filter on the partition column was used for partition pruning.
+	bool partition_pruned = false;
 };
 
 struct AlignedScanLocalState : public LocalTableFunctionState {
@@ -263,10 +269,43 @@ static void ResolveColumnTypes(ClientContext &context, TablePlan &plan, vector<s
 //===----------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, const string &root, const string &table,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<string> &names,
+                                                    bool add_partition_col = true) {
 	auto result = make_uniq<AlignedTableBindData>();
 	BuildTablePlan(context, root, table, result->plan);
 	ResolveColumnTypes(context, result->plan, result->names, result->types);
+
+	// Virtual partition column: derived from the index group's partition
+	// template prefix ("year", "month", or "date"). Added as a VARCHAR column
+	// after all real columns, materialized from the part's partition_key
+	// during scan. Skipped when the name collides with an existing column
+	// (e.g. "date" template when the index group already has a "date" column).
+	// Also skipped for the catalog bind path (DML schema must match the real
+	// physical columns).
+	if (add_partition_col && !result->plan.groups.empty()) {
+		auto &index_group = result->plan.groups[0];
+		if (!index_group.manifest.partitioning.empty()) {
+			auto &tmpl = index_group.manifest.partitioning[0].template_str;
+			string part_col = PartitionColumnName(tmpl);
+			if (!part_col.empty()) {
+				// Check for name collision with existing columns (case-insensitive)
+				bool collision = false;
+				for (auto &n : result->names) {
+					if (StringUtil::CIEquals(n, part_col)) {
+						collision = true;
+						break;
+					}
+				}
+				if (!collision) {
+					result->partition_col_name = part_col;
+					result->partition_col_idx = result->names.size();
+					result->names.push_back(part_col);
+					result->types.push_back(LogicalType::VARCHAR);
+				}
+			}
+		}
+	}
+
 	result->total_rows = result->plan.row_count;
 	return_types = result->types;
 	names = result->names;
@@ -275,7 +314,7 @@ static unique_ptr<FunctionData> AlignedBindInternal(ClientContext &context, cons
 
 unique_ptr<FunctionData> AlignedBindForCatalog(ClientContext &context, const string &root, const string &table,
                                                vector<LogicalType> &return_types, vector<string> &names) {
-	return AlignedBindInternal(context, root, table, return_types, names);
+	return AlignedBindInternal(context, root, table, return_types, names, false);
 }
 unique_ptr<FunctionData> AlignedBind(ClientContext &context, TableFunctionBindInput &input,
                                      vector<LogicalType> &return_types, vector<string> &names) {
@@ -366,6 +405,10 @@ static vector<pair<idx_t, idx_t>> BuildIntervals(const vector<PartInfo> &parts) 
 	return intervals;
 }
 
+// Forward declaration: defined after ApplyRowFilters, used in AlignedInitGlobal.
+static void ApplyPartitionColumnPruning(const AlignedTableBindData &bind, const ConstantFilter &filter,
+                                         vector<PartInfo> &kept);
+
 //! Intersects two sorted, disjoint interval lists.
 static vector<pair<idx_t, idx_t>> IntersectIntervals(const vector<pair<idx_t, idx_t>> &a,
                                                      const vector<pair<idx_t, idx_t>> &b) {
@@ -432,6 +475,14 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			result->rowid_pos = out_pos;
 			continue;
 		}
+		// Virtual partition column: track its position, but do NOT route it
+		// to any group (it is materialized from the index group's part list).
+		if (bind.partition_col_idx != DConstants::INVALID_INDEX && col_id == bind.partition_col_idx) {
+			result->partition_scratch = i;
+			result->partition_pos = out_pos;
+			requested[col_id] = 1; // makes the index group active
+			continue;
+		}
 		if (col_id >= bind.names.size()) {
 			throw InternalException("aligned_scan: column id %llu out of range (schema has %llu columns)", col_id,
 			                        bind.names.size());
@@ -467,6 +518,13 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			}
 		}
 	}
+	// The virtual partition column is materialized from the index group's
+	// part list, so the index group must be active when it is requested.
+	if (bind.partition_col_idx != DConstants::INVALID_INDEX && requested[bind.partition_col_idx]) {
+		if (!bind.plan.groups.empty()) {
+			result->group_active[0] = true;
+		}
+	}
 
 	// Filters (Phase 3): input.filters keys are projected positions
 	result->group_filters.resize(bind.plan.groups.size());
@@ -482,6 +540,16 @@ unique_ptr<GlobalTableFunctionState> AlignedInitGlobal(ClientContext &context, T
 			// The filter definition is shared by all threads; each thread
 			// initializes its own TableFilterState (see AlignedInitLocal).
 			result->row_filters.push_back({key, &filter, nullptr});
+
+			// Virtual partition column filter: prune the index group's parts
+			// by matching the partition_key value (e.g. "year=2024" -> "2024").
+			if (bind.partition_col_idx != DConstants::INVALID_INDEX && full_col == bind.partition_col_idx) {
+				if (filter.filter_type == TableFilterType::CONSTANT_COMPARISON) {
+					ApplyPartitionColumnPruning(bind, filter.Cast<ConstantFilter>(), result->kept_parts[0]);
+					result->partition_pruned = true;
+				}
+				continue; // not a group-level filter
+			}
 
 			// Find the group owning this column (for RG pruning + partition pruning)
 			for (idx_t gi = 0; gi < bind.plan.groups.size(); gi++) {
@@ -1122,6 +1190,118 @@ static void ApplyRowFilters(ClientContext &context, DataChunk &chunk, vector<Ali
 }
 
 //===----------------------------------------------------------------------===//
+// Partition column materialization
+//===----------------------------------------------------------------------===//
+
+//! Fills the virtual partition column for the rows [chunk_start, chunk_start +
+//! count) using the index group's part list. Each part's partition_key (e.g.
+//! "year=2024") is stripped to its value ("2024") and written as a VARCHAR.
+//! Rows not covered by any part (missing partition) are NULL-filled.
+static void FillPartitionColumn(const AlignedTableBindData &bind, idx_t partition_out_pos,
+                                idx_t chunk_start, idx_t count, DataChunk &target) {
+	if (partition_out_pos == DConstants::INVALID_INDEX) {
+		return; // partition column not requested
+	}
+	auto &index_group = bind.plan.groups[0];
+	const auto &parts = index_group.parts;
+	auto &vec = target.data[partition_out_pos];
+	vec.SetVectorType(VectorType::FLAT_VECTOR);
+	auto data = FlatVector::GetData<string_t>(vec);
+	auto &validity = FlatVector::Validity(vec);
+
+	idx_t part_idx = 0;
+	// Advance to the first part overlapping chunk_start
+	while (part_idx < parts.size() && parts[part_idx].start_row + parts[part_idx].row_count <= chunk_start) {
+		part_idx++;
+	}
+
+	for (idx_t i = 0; i < count; i++) {
+		idx_t row = chunk_start + i;
+		// Advance past exhausted parts
+		while (part_idx < parts.size() && parts[part_idx].start_row + parts[part_idx].row_count <= row) {
+			part_idx++;
+		}
+		if (part_idx >= parts.size() || row < parts[part_idx].start_row) {
+			// Row not covered by any part (missing partition): NULL
+			validity.SetInvalid(i);
+			continue;
+		}
+		// Extract the value portion from the partition key
+		auto &part = parts[part_idx];
+		string value = PartitionKeyValue(part.partition_key);
+		data[i] = StringVector::AddString(vec, value);
+	}
+}
+
+//! Prunes the index group's parts by a string constant filter on the virtual
+//! partition column. The filter value is compared against the value portion
+//! of each part's partition_key (e.g. "2024" matches "year=2024").
+static void ApplyPartitionColumnPruning(const AlignedTableBindData &bind, const ConstantFilter &filter,
+                                         vector<PartInfo> &kept) {
+	auto &index_group = bind.plan.groups[0];
+	const auto &base = kept.empty() ? index_group.parts : kept;
+
+	// Extract the comparison value as a string
+	auto &filter_value = filter.constant;
+	string cmp_str;
+	if (filter_value.type().id() == LogicalTypeId::VARCHAR) {
+		cmp_str = StringValue::Get(filter_value);
+	} else {
+		// Non-string filter on a VARCHAR partition column: convert to string
+		cmp_str = filter_value.ToString();
+	}
+
+	auto cmp = filter.comparison_type;
+	if (cmp == ExpressionType::COMPARE_EQUAL) {
+		vector<PartInfo> result;
+		for (auto &part : base) {
+			if (PartitionKeyValue(part.partition_key) == cmp_str) {
+				result.push_back(part);
+			}
+		}
+		kept = std::move(result);
+	} else if (cmp == ExpressionType::COMPARE_NOTEQUAL) {
+		vector<PartInfo> result;
+		for (auto &part : base) {
+			if (PartitionKeyValue(part.partition_key) != cmp_str) {
+				result.push_back(part);
+			}
+		}
+		kept = std::move(result);
+	} else {
+		// Range comparisons on string partition values (lexicographic)
+		// work for year (4-digit) and month (YYYY-MM) formats.
+		vector<PartInfo> result;
+		for (auto &part : base) {
+			string val = PartitionKeyValue(part.partition_key);
+			int rc = val.compare(cmp_str);
+			bool keep = false;
+			switch (cmp) {
+			case ExpressionType::COMPARE_GREATERTHAN:
+				keep = rc > 0;
+				break;
+			case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+				keep = rc >= 0;
+				break;
+			case ExpressionType::COMPARE_LESSTHAN:
+				keep = rc < 0;
+				break;
+			case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+				keep = rc <= 0;
+				break;
+			default:
+				keep = true; // unknown comparison: keep
+				break;
+			}
+			if (keep) {
+				result.push_back(part);
+			}
+		}
+		kept = std::move(result);
+	}
+}
+
+//===----------------------------------------------------------------------===//
 // Scan
 //===----------------------------------------------------------------------===//
 
@@ -1207,6 +1387,16 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 			const auto &parts = gstate.kept_parts[gi].empty() ? bind.plan.groups[gi].parts : gstate.kept_parts[gi];
 			ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, pos_map, parts,
 			                gstate.group_filters[gi]);
+		}
+
+		// Fill the virtual partition column (e.g. "year" = "2024") from the
+		// index group's part list. The value is derived from the part's
+		// partition_key, not from parquet data.
+		if (bind.partition_col_idx != DConstants::INVALID_INDEX) {
+			idx_t part_out_pos = use_scratch ? gstate.partition_scratch : gstate.partition_pos;
+			if (part_out_pos != DConstants::INVALID_INDEX) {
+				FillPartitionColumn(bind, part_out_pos, chunk_start, chunk_rows, target);
+			}
 		}
 
 		// Replicate duplicated column requests before filtering so all

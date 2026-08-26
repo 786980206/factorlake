@@ -91,6 +91,25 @@ bool IsKnownTemplate(const string &template_str) {
 	       template_str == "year=%Y";
 }
 
+string PartitionColumnName(const string &template_str) {
+	if (template_str.rfind("year=", 0) == 0) {
+		return "year";
+	} else if (template_str.rfind("month=", 0) == 0) {
+		return "month";
+	} else if (template_str.rfind("date=", 0) == 0) {
+		return "date";
+	}
+	return "";
+}
+
+string PartitionKeyValue(const string &partition_key) {
+	auto eq = partition_key.find('=');
+	if (eq == string::npos) {
+		return partition_key;
+	}
+	return partition_key.substr(eq + 1);
+}
+
 string DefaultPartitionKey(const string &template_str) {
 	// Use the current date (not 1970 epoch) for the default partition.
 	auto now_ts = Timestamp::GetCurrentTimestamp();
