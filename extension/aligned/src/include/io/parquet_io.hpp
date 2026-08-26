@@ -43,7 +43,7 @@ unique_ptr<ParquetReader> OpenPartReaderAllColumns(ClientContext &context, const
 //! Opens a ParquetReader for `path`, selects only the named columns (by
 //! case-insensitive name match), and calls InitializeScan. Returns the reader
 //! (with column_ids set) and the scan state. Throws IOException if a name is
-//! not found. Used by aligned_copy (MERGE) and aligned_compactor.
+//! not found. Used by aligned_copy (MERGE).
 unique_ptr<ParquetReader> OpenPartReaderNamedColumns(ClientContext &context, const string &path,
                                                       const vector<string> &col_names,
                                                       vector<LogicalType> &out_types,

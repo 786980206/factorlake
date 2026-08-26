@@ -8,7 +8,6 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
-#include "duckdb/parallel/async_result.hpp"
 
 namespace duckdb {
 

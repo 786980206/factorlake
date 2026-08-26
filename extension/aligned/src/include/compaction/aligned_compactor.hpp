@@ -6,18 +6,16 @@
 namespace duckdb {
 
 // aligned_compact(table_name, group_name, root=...)
-// Compacts a column group's parts (Phase 7): for every partition directory
-// with more than one part, merges them into a single part (same partition
-// value, same row range, same column set — schema evolution within a
-// directory is rejected). The new part is staged under
-// <table>/_tmp/transaction-<txid>/, then committed atomically:
-//  1. write the new part + sidecar
-//  2. replace the directory's commit marker with the new part name
-//  3. delete the old part files + sidecars
-// A crash before step 2 leaves the old parts visible (the staged part is
-// discarded); after step 2 the new part is authoritative and the old files
-// are simply orphaned (invisible, cleaned on the next compaction).
-// Returns one row: (dirs_compacted, parts_before, parts_after).
+// Compacts a column group's parts: for every partition directory with more
+// than one part, merges them into a normalized set of parts (1M rows per part,
+// last part ≤ 1M). Same partition value, same row range, same column set —
+// schema evolution within a directory is rejected. Two-phase commit:
+//  1. Stage all merged parts under <table>/_tmp/transaction-<txid>/
+//  2. If all groups succeed: move staged parts into place + delete old files
+// If any group fails: clean up _tmp, table state unchanged (old parts remain).
+// Phase 1 (per-partition merge) is parallelized across partition directories;
+// Phase 2 (move + delete) is serial. Returns (dirs_compacted, parts_before,
+// parts_after).
 unique_ptr<FunctionData> AlignedCompactBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<string> &names);
 

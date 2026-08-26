@@ -11,19 +11,16 @@
 #include "duckdb/parallel/async_result.hpp"
 #include "parquet_reader.hpp"
 #include "parquet_writer.hpp"
-#include "io/parquet_io.hpp"
 
 #include <map>
-#include <future>
 #include <thread>
 #include <atomic>
-#include <mutex>
 
 namespace duckdb {
 
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 // Bind data / state
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 
 struct AlignedCompactBindData : public TableFunctionData {
 	TablePlan plan;
@@ -38,9 +35,9 @@ struct AlignedCompactGlobalState : public GlobalTableFunctionState {
 	idx_t parts_after = 0;
 };
 
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 // Bind
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 
 unique_ptr<FunctionData> AlignedCompactBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<string> &names) {
@@ -84,20 +81,20 @@ unique_ptr<GlobalTableFunctionState> AlignedCompactInitGlobal(ClientContext &con
 	return make_uniq<AlignedCompactGlobalState>();
 }
 
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 // Helpers
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 
 //! Check whether a partition's parts are already normalized: every part
 //! (except possibly the last) has exactly ALIGNED_DEFAULT_PART_ROWS, and the
-//! last has ≤ ALIGNED_DEFAULT_PART_ROWS. Any 0-row placeholder part means
-//! the partition is NOT normalized — 0-row parts should be absorbed by
+//! last has <= ALIGNED_DEFAULT_PART_ROWS. Any 0-row placeholder part means
+//! the partition is NOT normalized -- 0-row parts should be absorbed by
 //! compaction (per AGENTS.md: "0-row placeholder parts are merged absorbed").
 static bool IsAlreadyNormalized(const vector<const PartInfo *> &parts) {
 	for (idx_t i = 0; i < parts.size(); i++) {
 		idx_t rc = parts[i]->row_count;
 		if (rc == 0) {
-			// 0-row part present → not normalized, should be absorbed.
+			// 0-row part present -- not normalized, should be absorbed.
 			return false;
 		}
 		if (i < parts.size() - 1) {
@@ -105,7 +102,7 @@ static bool IsAlreadyNormalized(const vector<const PartInfo *> &parts) {
 				return false;
 			}
 		} else {
-			// Last part: can be ≤ threshold
+			// Last part: can be <= threshold
 			if (rc > ALIGNED_DEFAULT_PART_ROWS) {
 				return false;
 			}
@@ -134,28 +131,17 @@ static idx_t MergePartsToWriter(ClientContext &context, FileSystem &fs,
 		if (part->row_count == 0) {
 			continue; // skip 0-row placeholder parts
 		}
-		auto part_reader =
-		    make_uniq<ParquetReader>(context, OpenFileInfo(part->path), ParquetOptions(context));
+		ParquetReaderScanState scan_state;
+		auto part_reader = OpenPartReaderAllColumns(context, part->path, scan_state);
 		// Validate schema matches the reference
 		if (part_reader->columns.size() != columns.size()) {
-			throw IOException("Aligned table: cannot compact — parts have different column counts");
+			throw IOException("Aligned table: cannot compact -- parts have different column counts");
 		}
 		for (idx_t ci = 0; ci < columns.size(); ci++) {
 			if (part_reader->columns[ci].name != columns[ci]) {
-				throw IOException("Aligned table: cannot compact — parts have different column sets");
+				throw IOException("Aligned table: cannot compact -- parts have different column sets");
 			}
 		}
-		for (idx_t i = 0; i < part_reader->columns.size(); i++) {
-			part_reader->column_ids.push_back(MultiFileLocalColumnId(i));
-		}
-		ParquetReaderScanState scan_state;
-		vector<PartitionStatistics> rg_stats;
-		part_reader->GetPartitionStats(rg_stats);
-		vector<idx_t> all_rgs;
-		for (idx_t i = 0; i < rg_stats.size(); i++) {
-			all_rgs.push_back(i);
-		}
-		part_reader->InitializeScan(context, scan_state, all_rgs);
 		DataChunk chunk;
 		chunk.Initialize(context, col_types);
 		while (true) {
@@ -165,7 +151,7 @@ static idx_t MergePartsToWriter(ClientContext &context, FileSystem &fs,
 				break;
 			}
 			if (async_type == AsyncResultType::BLOCKED) {
-				// Async not ready (e.g. object storage) — retry.
+				// Async not ready (e.g. object storage) -- retry.
 				continue;
 			}
 			if (chunk.size() == 0) {
@@ -185,9 +171,9 @@ static idx_t MergePartsToWriter(ClientContext &context, FileSystem &fs,
 	return total_rows;
 }
 
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 // Parallel Phase 1 staging
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 
 // One unit of staging work, collected up-front before any thread starts.
 // All pointer fields point into the bind data's plan, which is immutable
@@ -248,7 +234,7 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 	// Target number of output parts (ceil(total_rows / threshold), min 1).
 	idx_t num_parts = (total_rows + ALIGNED_DEFAULT_PART_ROWS - 1) / ALIGNED_DEFAULT_PART_ROWS;
 	if (num_parts == 0) {
-		num_parts = 1; // all 0-row → keep one 0-row part
+		num_parts = 1; // all 0-row -- keep one 0-row part
 	}
 
 	// Find the first non-zero part as the schema reference. If all parts are
@@ -268,7 +254,7 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 	// Validate contiguity (parts must be contiguous in row space).
 	for (idx_t i = 1; i < job.parts.size(); i++) {
 		if (job.parts[i]->start_row != job.parts[i - 1]->start_row + job.parts[i - 1]->row_count) {
-			throw IOException("Aligned table: group '%s': cannot compact directory '%s' — parts are not "
+			throw IOException("Aligned table: group '%s': cannot compact directory '%s' -- parts are not "
 			                  "contiguous (alignment violation)",
 			                  job.group_name, job.dir);
 		}
@@ -280,13 +266,13 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 	vector<idx_t> part_row_counts;
 
 	if (num_parts == 1) {
-		// Single output part — merge all source parts into one file.
+		// Single output part -- merge all source parts into one file.
 		string staged_path = job.staged_dir + "/" + FormatPartName(0, total_rows);
 		MergePartsToWriter(context, fs, job.parts, job.columns, job.col_types, staged_path);
 		staged_paths.push_back(staged_path);
 		part_row_counts.push_back(total_rows);
 	} else {
-		// Multiple output parts — read the stream and split at
+		// Multiple output parts -- read the stream and split at
 		// ALIGNED_DEFAULT_PART_ROWS boundaries. One writer per output part,
 		// all owned by this worker.
 		idx_t rgs = ALIGNED_DEFAULT_RG_ROWS;
@@ -313,19 +299,8 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 			if (part->row_count == 0) {
 				continue;
 			}
-			auto part_reader =
-			    make_uniq<ParquetReader>(context, OpenFileInfo(part->path), ParquetOptions(context));
-			for (idx_t i = 0; i < part_reader->columns.size(); i++) {
-				part_reader->column_ids.push_back(MultiFileLocalColumnId(i));
-			}
 			ParquetReaderScanState scan_state;
-			vector<PartitionStatistics> rg_stats;
-			part_reader->GetPartitionStats(rg_stats);
-			vector<idx_t> all_rgs;
-			for (idx_t i = 0; i < rg_stats.size(); i++) {
-				all_rgs.push_back(i);
-			}
-			part_reader->InitializeScan(context, scan_state, all_rgs);
+			auto part_reader = OpenPartReaderAllColumns(context, part->path, scan_state);
 			DataChunk chunk;
 			chunk.Initialize(context, job.col_types);
 			while (true) {
@@ -335,7 +310,7 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 					break;
 				}
 				if (async_type == AsyncResultType::BLOCKED) {
-					// Async not ready (e.g. object storage) — retry.
+					// Async not ready (e.g. object storage) -- retry.
 					continue;
 				}
 				if (chunk.size() == 0) {
@@ -365,7 +340,8 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 							part_row_counts.push_back(this_part_rows);
 						}
 						// Append a slice of the chunk.
-						if (to_take == chunk_rows) {
+						// Fast path: append whole chunk (only when chunk_consumed == 0).
+						if (chunk_consumed == 0 && to_take == chunk_rows) {
 							buffer->Append(append_state, chunk);
 						} else {
 							SelectionVector sel(to_take);
@@ -411,9 +387,9 @@ static StagingResult StageOneJob(ClientContext &context, FileSystem &fs, const S
 	return result;
 }
 
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 // Compaction
-//===----------------------------------------------------------------------===//
+//===------------------------------------===//
 
 void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind = data.bind_data->Cast<AlignedCompactBindData>();
@@ -428,7 +404,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 
 	// Acquire the table-level write lock (file-based mutual exclusion across
 	// concurrent COPY / compactor invocations). The lock and the staged
-	// transaction are held for both phases — no additional locking is needed
+	// transaction are held for both phases -- no additional locking is needed
 	// inside the parallel workers.
 	TableWriteLock write_lock(fs, bind.plan.table_path);
 	StagedTransaction txn(fs, bind.plan.table_path);
@@ -560,7 +536,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 		}
 	}
 
-	// === Phase 2: Commit — move all staged parts into place, then delete old
+	// === Phase 2: Commit -- move all staged parts into place, then delete old
 	// (kept sequential; only Phase 1 was parallelized) ===
 	for (auto &pm : pending_moves) {
 		auto slash = pm.target_path.find_last_of("/\\");
@@ -568,7 +544,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 		fs.MoveFile(pm.staged_path, pm.target_path);
 	}
 	// Delete old files (but skip any that happen to have the same name as a
-	// new file — those were overwritten by the move).
+	// new file -- those were overwritten by the move).
 	std::set<string> new_paths;
 	for (auto &pm : pending_moves) {
 		new_paths.insert(pm.target_path);

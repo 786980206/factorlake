@@ -12,8 +12,8 @@ namespace duckdb {
 //  - group_name = <other>  → deletes only that column group's directory tree
 //
 // Acquires the table-level write lock (TableWriteLock) for mutual exclusion
-// with concurrent writers. Uses the shared NextTransactionId for the
-// _tmp/transaction-<txid>/ staging directory (cleanup marker only).
+// with concurrent writers. Mints a NextTransactionId for the return value
+// (no _tmp/ staging — drop deletes directories directly).
 //
 // Returns one row: (dirs_removed BIGINT, files_removed BIGINT, txid BIGINT)
 unique_ptr<FunctionData> AlignedDropBind(ClientContext &context, TableFunctionBindInput &input,
