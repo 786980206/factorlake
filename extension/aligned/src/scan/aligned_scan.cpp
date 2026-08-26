@@ -118,7 +118,8 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	// equal to the parquet Row Group size means each thread typically processes
 	// one complete RG before re-claiming, maximizing window reuse.
 	static constexpr idx_t CLAIM_RANGE = 64 * STANDARD_VECTOR_SIZE;
-	mutex cursor_lock;
+	mutex cursor_lock;           // only for interval advancement
+	atomic<idx_t> atomic_next_row{0}; // lock-free range claim
 	idx_t interval_idx = 0;
 	idx_t next_row = 0; // cursor within the current active interval
 	// Projection pushdown : full schema position -> output chunk position
@@ -1494,33 +1495,48 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 		// claim; the actual scan runs outside it with this thread's own local
 		// state.
 		if (lstate.range_next >= lstate.range_end) {
-			lock_guard<mutex> lock(gstate.cursor_lock);
-			while (gstate.interval_idx < gstate.active_intervals.size() &&
-			       gstate.next_row >= gstate.active_intervals[gstate.interval_idx].second) {
-				gstate.interval_idx++;
-				gstate.next_row = gstate.interval_idx < gstate.active_intervals.size()
-				                      ? gstate.active_intervals[gstate.interval_idx].first
-				                      : gstate.next_row;
+			// Lock-free fast path: try to claim the next range atomically.
+			// Only fall back to the mutex when we need to advance the interval
+			// (rare — happens once per interval, not per claim).
+			idx_t cur = gstate.atomic_next_row.load(std::memory_order_relaxed);
+			idx_t interval_end;
+			{
+				// Peek at the current interval under the lock to get its end.
+				// The lock is held briefly — only for reading interval bounds,
+				// not for the scan itself.
+				lock_guard<mutex> lock(gstate.cursor_lock);
+				while (gstate.interval_idx < gstate.active_intervals.size() &&
+				       gstate.next_row >= gstate.active_intervals[gstate.interval_idx].second) {
+					gstate.interval_idx++;
+					gstate.next_row = gstate.interval_idx < gstate.active_intervals.size()
+					                      ? gstate.active_intervals[gstate.interval_idx].first
+					                      : gstate.next_row;
+				}
+				if (gstate.interval_idx >= gstate.active_intervals.size()) {
+					output.SetCardinality(0);
+					return;
+				}
+				idx_t interval_start = gstate.active_intervals[gstate.interval_idx].first;
+				if (gstate.next_row < interval_start) {
+					gstate.next_row = interval_start;
+				}
+				interval_end = gstate.active_intervals[gstate.interval_idx].second;
+				// Sync atomic with mutex-protected value
+				gstate.atomic_next_row.store(gstate.next_row, std::memory_order_relaxed);
+				cur = gstate.next_row;
 			}
-			if (gstate.interval_idx >= gstate.active_intervals.size()) {
-				output.SetCardinality(0);
-				return;
+			idx_t range_end = MinValue<idx_t>(cur + AlignedScanGlobalState::CLAIM_RANGE, interval_end);
+			// CAS to claim [cur, range_end)
+			if (gstate.atomic_next_row.compare_exchange_strong(cur, range_end,
+			        std::memory_order_relaxed, std::memory_order_relaxed)) {
+				// Claim succeeded
+				lstate.range_next = cur;
+				lstate.range_end = range_end;
+				gstate.next_row = range_end; // keep mutex-protected var in sync
+			} else {
+				// CAS failed — another thread claimed first. Retry the loop.
+				continue;
 			}
-			// The shared cursor is initialized to 0, but a pruned scan's first
-			// active interval can begin at a nonzero row (e.g. a partition
-			// filter that keeps only day2..). Snap the cursor up to the current
-			// interval's start, otherwise the first claim starts at row 0 and
-			// underflows against the data's actual start_row (partition pruning
-			// on any non-first partition would crash with a huge row number).
-			idx_t interval_start = gstate.active_intervals[gstate.interval_idx].first;
-			if (gstate.next_row < interval_start) {
-				gstate.next_row = interval_start;
-			}
-			idx_t interval_end = gstate.active_intervals[gstate.interval_idx].second;
-			idx_t range_end = MinValue<idx_t>(gstate.next_row + AlignedScanGlobalState::CLAIM_RANGE, interval_end);
-			lstate.range_next = gstate.next_row;
-			lstate.range_end = range_end;
-			gstate.next_row = range_end;
 		}
 		idx_t chunk_start = lstate.range_next;
 		idx_t chunk_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, lstate.range_end - chunk_start);
