@@ -145,6 +145,11 @@ AlignedTableScan
 
 ```
 aligned_scan(table, root=...)                    → (table columns)
+aligned_scan(table, group_filter, root=...)     → (index + filtered group columns)
+  # group_filter: 列组名或逗号分隔列表（如 'factor/alpha101' 或
+  # 'factor/alpha101,fieldset/ma'）。指定后仅扫描匹配的列组 + index 组
+  # （index 始终包含，提供主键列 symbol/date）。未指定时所有列组可用，
+  # 投影下推自然限制打开的 parquet 文件。
 aligned_groups(table, root=...)                  → (group_name, columns, partition_count)
   # 注意：aligned_groups 的 columns 输出用分号 `;` 分隔列名（避免与
   # SQLLogicTest 的逗号分隔输出格式混淆），而 groups 选项映射字符串和
@@ -341,7 +346,7 @@ extension/aligned/src/
 ### 测试
 - SQLLogicTest：`python test/run_sqllogictest.py`（auto-discover `test/aligned/*.test`）
 - PS 脚本（位于 `test/`）：test_aligned 42/42、test_compaction 16/16、test_parallel 8/8
-- 当前总：SQLLogicTest 246/246 + 3 PS 套件全 PASS
+- 当前总：SQLLogicTest 260/260 + 3 PS 套件全 PASS
 
 ### 扩展发布
 - `extension/aligned/CMakeLists.txt` 加 `build_loadable_extension`
