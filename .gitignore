@@ -18,6 +18,7 @@ example/
 bench/out/
 bench_data*
 bench_native_*
+bench_sort*
 bench_min/
 
 # Misc
