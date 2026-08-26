@@ -92,12 +92,23 @@ bool IsKnownTemplate(const string &template_str) {
 }
 
 string DefaultPartitionKey(const string &template_str) {
+	// Use the current date (not 1970 epoch) for the default partition.
+	auto now_ts = Timestamp::GetCurrentTimestamp();
+	date_t today = Timestamp::GetDate(now_ts);
+	int32_t year = Date::ExtractYear(today);
+	int32_t month = Date::ExtractMonth(today);
+	int32_t day = Date::ExtractDay(today);
+
 	if (template_str.rfind("date=", 0) == 0) {
-		return "date=1970-01-01";
+		return "date=" + Date::Format(year, month, day);
 	} else if (template_str.rfind("month=", 0) == 0) {
-		return "month=1970-01";
+		char buf[16];
+		snprintf(buf, sizeof(buf), "month=%04d-%02d", year, month);
+		return buf;
 	} else if (template_str.rfind("year=", 0) == 0) {
-		return "year=1970";
+		char buf[16];
+		snprintf(buf, sizeof(buf), "year=%04d", year);
+		return buf;
 	}
 	throw BinderException("aligned CREATE TABLE: invalid partition_template '%s' "
 	                       "(expected 'date=%%Y-%%m-%%d', 'month=%%Y-%%m', or 'year=%%Y')",

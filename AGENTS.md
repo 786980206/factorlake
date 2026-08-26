@@ -155,6 +155,9 @@ aligned_create(table, group, columns, root=..., partition_template=...)  → (di
 aligned_create(table, group, root=..., partition_template=...)            → (dirs_created, files_created, txid)  -- 2-arg 空组
 aligned_compact(table, group_name, root=...)     → (dirs_compacted, parts_before, parts_after)
 aligned_drop(table, group_name, root=...)         → (dirs_removed, files_removed, txid)
+aligned_meta(table, root=...)                    → (table_name, table_path, partition_template,
+                                                    total_rows, group_count, partition_count,
+                                                    part_count, groups, partitions, schema)
 ```
 
 - **COPY TO (FORMAT aligned)**：批量写入主路径，走 DuckDB CopyFunction 框架。
@@ -307,7 +310,7 @@ Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
 ```
 extension/aligned/src/
 ├── extension.cpp
-├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp  aligned_groups.cpp
+├── catalog/       manifest.cpp  aligned_catalog.cpp  aligned_create.cpp  aligned_create_fn.cpp  aligned_groups.cpp  aligned_meta.cpp
 ├── resolver/      partition_resolver.cpp  key_resolver.cpp
 ├── scan/          aligned_scan.cpp
 ├── copy/          aligned_copy.cpp

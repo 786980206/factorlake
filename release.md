@@ -1959,3 +1959,40 @@ COPY (SELECT * FROM mock) TO 'cnstk_ixday' (FORMAT aligned, GROUP 'index', MERGE
 - PS test suite：test_aligned 42/42、test_dml 10/10、test_compaction 16/16、
   test_parallel 8/8 ALL PASSED
 
+## 2026-08-26: DefaultPartitionKey 改用当前日期 + aligned_meta 函数
+
+### DefaultPartitionKey 改用当前日期（不再创建 1970 分区）
+
+- `DefaultPartitionKey` 原先硬编码 `1970-01-01`/`1970-01`/`1970` 作为默认分区键
+- 改为使用 `Timestamp::GetCurrentTimestamp()` + `Timestamp::GetDate()` 获取当前日期
+- `year=%Y` → `year=<current_year>`（如 `year=2026`）
+- `month=%Y-%m` → `month=<current_year>-<current_month>`
+- `date=%Y-%m-%d` → `date=<current_date>`
+- 文件：`extension/aligned/src/resolver/partition_resolver.cpp`、
+  `extension/aligned/src/include/resolver/partition_resolver.hpp`
+
+### aligned_meta 表函数
+
+新增 `aligned_meta(table_name, root=...)` 表函数，返回单行元数据：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| table_name | VARCHAR | 逻辑表名（目录名） |
+| table_path | VARCHAR | 表目录绝对路径 |
+| partition_template | VARCHAR | 分区模板（如 `year=%Y`） |
+| total_rows | BIGINT | 总行数（index 组） |
+| group_count | BIGINT | 列组数量 |
+| partition_count | BIGINT | 分区数量 |
+| part_count | BIGINT | parquet 文件总数（所有组） |
+| groups | VARCHAR | `group:col1,col2;group:col1,...` |
+| partitions | VARCHAR | `key1,key2,...`（index 组分区键） |
+| schema | VARCHAR | `col:type,col:type,...`（去重逻辑表 schema） |
+
+- 文件：`extension/aligned/src/catalog/aligned_meta.cpp`、
+  `extension/aligned/src/include/catalog/aligned_meta.hpp`
+- 注册：`extension/aligned/src/extension.cpp`
+- CMakeLists：`extension/aligned/CMakeLists.txt`
+- schema 列去重：跨组同名列只出现一次（index 组优先）
+- SQLLogicTest：271/271 PASS
+
+

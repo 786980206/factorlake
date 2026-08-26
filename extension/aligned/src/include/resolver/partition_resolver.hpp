@@ -29,9 +29,10 @@ bool EvaluatePartitionTemplate(const string &template_str, int64_t value, bool i
 //! "date=%Y-%m-%d", "month=%Y-%m", "year=%Y".
 bool IsKnownTemplate(const string &template_str);
 
-//! Computes the default partition key from a template. For "month=%Y-%m" the
-//! default is "month=1970-01" (epoch); for "date=%Y-%m-%d" it's "date=1970-01-01";
-//! for "year=%Y" it's "year=1970". Throws BinderException on unknown templates.
+//! Computes the default partition key from a template, based on the current
+//! date. For "year=%Y" it's "year=<current_year>"; for "month=%Y-%m" it's
+//! "month=<current_year>-<current_month>"; for "date=%Y-%m-%d" it's the
+//! full current date. Throws BinderException on unknown templates.
 string DefaultPartitionKey(const string &template_str);
 
 //! Validates that a partition key matches the given template kind, including

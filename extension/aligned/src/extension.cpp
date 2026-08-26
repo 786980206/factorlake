@@ -3,6 +3,7 @@
 #include "catalog/aligned_catalog.hpp"
 #include "catalog/aligned_create_fn.hpp"
 #include "catalog/aligned_groups.hpp"
+#include "catalog/aligned_meta.hpp"
 #include "compaction/aligned_compactor.hpp"
 #include "compaction/aligned_drop.hpp"
 #include "copy/aligned_copy.hpp"
@@ -34,6 +35,15 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	                                 AlignedGroupsFunction, AlignedGroupsBind, AlignedGroupsInitGlobal, nullptr);
 	aligned_groups_fn.named_parameters["root"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(aligned_groups_fn);
+
+	// aligned_meta(table_name, root=...)
+	// Returns a single row of comprehensive metadata: table_name, table_path,
+	// partition_template, total_rows, group_count, partition_count,
+	// part_count, groups, partitions, schema.
+	TableFunction aligned_meta_fn("aligned_meta", {LogicalType::VARCHAR},
+	                                AlignedMetaFunction, AlignedMetaBind, AlignedMetaInitGlobal, nullptr);
+	aligned_meta_fn.named_parameters["root"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(aligned_meta_fn);
 
 	// Setting that supplies the default data root for aligned_scan(name)
 	auto &db = loader.GetDatabaseInstance();
