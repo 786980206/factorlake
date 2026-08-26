@@ -658,10 +658,14 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	// When input is already sorted by (symbol, date) and there's no existing
 	// data, we can flush the source buffer chunks directly without sorting.
 	if (already_sorted) {
+		// Zero-copy fast path: flush source buffers directly to ParquetWriter
+		// without an intermediate CDC. The source CDC's internal storage is
+		// read zero-copy by ParquetWriter::Flush (it scans the CDC's chunks
+		// directly). This eliminates one full copy pass.
 		auto t_build = std::chrono::steady_clock::now();
-		auto sorted_direct = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-		ColumnDataAppendState direct_append;
-		sorted_direct->InitializeAppend(direct_append);
+		auto flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+		ColumnDataAppendState flush_append;
+		flush_buffer->InitializeAppend(flush_append);
 		for (auto &buf_pair : buffers) {
 			auto &buf = buf_pair.first;
 			if (!buf || buf->Count() == 0) {
@@ -675,18 +679,17 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 				if (chunk.size() == 0) {
 					continue;
 				}
-				// Append only the first sql_types.size() columns (the
-				// ColumnDataAppend uses the collection's column count).
-				sorted_direct->Append(direct_append, chunk);
-				if (sorted_direct->Count() >= RG_SIZE) {
-					FlushToPartition(pp, *sorted_direct);
-					sorted_direct = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
-					sorted_direct->InitializeAppend(direct_append);
+				// Append only the first sql_types.size() columns.
+				flush_buffer->Append(flush_append, chunk);
+				if (flush_buffer->Count() >= RG_SIZE) {
+					FlushToPartition(pp, *flush_buffer);
+					flush_buffer = make_uniq<ColumnDataCollection>(context, bind_data.sql_types);
+					flush_buffer->InitializeAppend(flush_append);
 				}
 			}
 		}
-		if (sorted_direct->Count() > 0) {
-			FlushToPartition(pp, *sorted_direct);
+		if (flush_buffer->Count() > 0) {
+			FlushToPartition(pp, *flush_buffer);
 		}
 		auto t_flush = std::chrono::steady_clock::now();
 		if (g_timing_enabled) {
