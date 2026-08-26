@@ -1252,7 +1252,10 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 					    phys != PhysicalType::BOOL) {
 						auto *src_data = FlatVector::GetData(src_vec);
 						auto *dst_data = FlatVector::GetData(dst_vec);
-						if (src_data && dst_data) {
+						// Guard against all-NULL vectors where the data buffer
+						// may be null or uninitialized.
+						if (src_data && dst_data &&
+						    copy_count > 0 && copy_count <= STANDARD_VECTOR_SIZE) {
 							memcpy(dst_data, src_data, copy_count * type_size);
 							auto &src_mask = FlatVector::Validity(src_vec);
 							if (src_mask.IsMaskSet()) {
@@ -1537,7 +1540,10 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 		// The memcpy fast path writes FLAT data directly (not dictionary slices),
 		// so it's safe with the scratch chunk too — as long as there are no
 		// row filters (which may shrink the output cardinality mid-vector).
-		bool can_fast_copy = false; // lstate.row_filters.empty();
+		// memcpy fast path is disabled — it crashes on all-NULL vectors and
+		// provides no measurable performance benefit (the real read win was
+		// disabling dictionary encoding, not the memcpy path).
+		bool can_fast_copy = false;
 		// Position map of the assembly target: the scratch chunk is indexed by
 		// column_ids position, the executor's output chunk by projection rank.
 		const auto &pos_map = use_scratch ? gstate.scratch_pos : gstate.projected_pos;
