@@ -290,12 +290,22 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction tr
 	}
 
 	const string &root = catalog.Cast<AlignedCatalog>().GetRoot();
+	auto &fs = FileSystem::GetFileSystem(transaction.GetContext());
+	string table_dir = root + "/" + base.table;
+
+	// Acquire write lock for mutual exclusion with concurrent writers.
+	// Only lock if the table directory already exists (new table creation
+	// has no concurrent writers to exclude — the table doesn't exist yet).
+	// Locking a non-existent table creates an empty directory, which breaks
+	// EnsureTablesLoaded when CreateTable throws (e.g. invalid columns).
+	unique_ptr<TableWriteLock> write_lock;
+	if (fs.DirectoryExists(table_dir)) {
+		write_lock = make_uniq<TableWriteLock>(fs, table_dir);
+	}
 
 	if (!partition_key.empty()) {
-		// Partition creation mode: table must already exist
 		AlignedCreatePartition(transaction.GetContext(), root, base.table, partition_key);
 	} else {
-		// Table creation mode
 		vector<ColumnDefinition> cols;
 		for (auto &col : columns.Logical()) {
 			cols.push_back(col.Copy());
@@ -303,6 +313,7 @@ optional_ptr<CatalogEntry> AlignedSchemaEntry::CreateTable(CatalogTransaction tr
 		AlignedCreateTable(transaction.GetContext(), root, base.table, cols,
 		                   groups_option, partition_template_option);
 	}
+	write_lock.reset(); // release lock before EnsureTablesLoaded
 
 	// Force re-discovery of tables (the new table is now on disk)
 	{
