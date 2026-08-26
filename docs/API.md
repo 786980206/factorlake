@@ -1,7 +1,7 @@
 # FactorLake / AlignedTable — API 对接文档
 
 > 本文档面向需要通过 DuckDB 对接 AlignedTable 存储引擎的项目。
-> 涵盖 ATTACH 挂载、标准 SQL 增删改查、COPY TO 批量写入、表函数 API 及全部参数说明。
+> 涵盖 ATTACH 挂载、COPY TO 批量写入、表函数 API 及全部参数说明。
 
 ---
 
@@ -10,7 +10,7 @@
 1. [扩展安装与加载](#1-扩展安装与加载)
 2. [快速开始](#2-快速开始)
 3. [ATTACH 挂载](#3-attach-挂载)
-4. [增删改查（标准 SQL）](#4-增删改查标准-sql)
+4. [标准 DML 不支持](#4-标准-dml-不支持)
 5. [COPY TO (FORMAT aligned) — 批量写入](#5-copy-to-format-aligned-批量写入)
 6. [表函数 API](#6-表函数-api)
 7. [配置项](#7-配置项)
@@ -92,9 +92,9 @@ con.execute("LOAD aligned;")
 con.execute("SET aligned_data_root = '/data';")
 con.execute("SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE');").fetchall()
 
-# ATTACH + 标准 DML
+# ATTACH + 批量写入（COPY TO）
 con.execute("ATTACH '/data' AS al (TYPE ALIGNED);")
-con.execute("INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5);")
+con.execute("COPY (SELECT '000001' AS symbol, DATE '2026-01-15' AS date, 10.5 AS close) TO 'mytable' (FORMAT aligned, GROUP 'index');")
 print(con.execute("SELECT * FROM al.mytable;").fetchall())
 con.execute("DETACH al;")
 ```
@@ -116,20 +116,15 @@ SET aligned_data_root = 'D:/data/factorlake';
 -- 3. 建表（通过表函数，group='index' 表示新建表）
 SELECT * FROM aligned_create('mytable', 'index', 'symbol VARCHAR, date DATE, close DOUBLE');
 
--- 4. 挂载为逻辑数据库（ATTACH 后可用标准 SQL 增删改查）
+-- 4. 挂载为逻辑数据库（ATTACH 后可用标准 SQL 查询）
 ATTACH 'D:/data/factorlake' AS al (TYPE ALIGNED);
 
--- 5. 插入数据
-INSERT INTO al.mytable VALUES ('000001', DATE '2026-01-15', 10.5);
+-- 5. 批量写入数据（COPY TO 是唯一的写入路径）
+COPY (SELECT '000001' AS symbol, DATE '2026-01-15' AS date, 10.5 AS close)
+  TO 'mytable' (FORMAT aligned, GROUP 'index');
 
 -- 6. 查询
 SELECT symbol, date, close FROM al.mytable WHERE date = DATE '2026-01-15';
-
--- 7. 更新
-UPDATE al.mytable SET close = 11.0 WHERE symbol = '000001' AND date = DATE '2026-01-15';
-
--- 8. 删除
-DELETE FROM al.mytable WHERE symbol = '000001' AND date = DATE '2026-01-15';
 ```
 
 ---
@@ -180,63 +175,27 @@ SELECT * FROM aligned_scan('cnstk_ixday') WHERE date = DATE '2026-08-17';
 
 ---
 
-## 4. 增删改查（标准 SQL）
+## 4. 标准 DML 不支持
 
-ATTACH 后，对 `al.<table>` 的标准 `INSERT` / `UPDATE` / `DELETE` / `SELECT` 直接生效，
-无需调用表函数。引擎通过 catalog 钩子（`PlanInsert` / `PlanUpdate` / `PlanDelete`）
-将 DML 操作路由到 Parquet 列组的直写。
+标准 DML（INSERT/UPDATE/DELETE）不支持。使用 COPY TO (FORMAT aligned) 进行写入，MERGE true 进行增量合并。
 
-### 4.1 SELECT（查）
+ATTACH 后仅支持 `SELECT` 查询（详见 §3）：
 
 ```sql
-SELECT <columns> FROM al.<table> [WHERE <conditions>];
+ATTACH 'D:/data/factorlake' AS al (TYPE ALIGNED);
+SELECT symbol, date, close FROM al.<table> WHERE date = DATE '2026-01-15';
+DETACH al;
 ```
 
-- 支持 Projection Pushdown（只读涉及的列组）。
-- 支持 Filter Pushdown（分区裁剪 + Parquet Row Group 裁剪）。
-- 支持并行扫描。
-
-### 4.2 INSERT（增）
-
-```sql
-INSERT INTO al.<table> [(col1, col2, ...)] VALUES (...), (...), ...;
-INSERT INTO al.<table> SELECT ... FROM ...;
-```
-
-- **Upsert 语义**：主键 `(symbol, date)` 已存在则更新对应列，不存在则插入。
-- **大批量自动分批**：单次 INSERT 超过 1M 行时自动分批提交（每批 1M 行，各自独立事务），避免 OOM。
-- 返回值：标准 `Count`（插入的行数）。
-
-### 4.3 UPDATE（改）
-
-```sql
-UPDATE al.<table> SET <col> = <value> [, ...] WHERE <conditions>;
-```
-
-- **Upsert 语义**：匹配的行被原地重写（重写受影响的 part 文件）。
-- `WHERE` 条件通过扫描索引组定位 rowid，再解析为 `(symbol, date)` 主键。
-- 仅重写 SET 列所在的列组，未涉及的列组不读写。
-
-### 4.4 DELETE（删）
-
-```sql
-DELETE FROM al.<table> WHERE <conditions>;
-```
-
-- `WHERE` 条件通过扫描索引组定位 rowid，再解析为 `(symbol, date)` 主键。
-- 删除规则：
-  - 删空单 part 分区 → 整个分区目录移除。
-  - 删空多 part 分区的最高索引 part → 直接移除该 part。
-  - 删空多 part 分区的内部 part → **原地重写为 0 行空文件**（保留文件名索引，保持 index 分区内索引连续）。
+写入请使用 [COPY TO (FORMAT aligned)](#5-copy-to-format-aligned-批量写入)（详见 §5）。
 
 ---
 
 ## 5. COPY TO (FORMAT aligned) — 批量写入
 
-`COPY TO (FORMAT aligned)` 是**批量写入主路径**，走 DuckDB CopyFunction 框架，适用于
-大批量数据的一次性灌入（如因子批算、历史回填）。相比标准 DML（§4 的 INSERT upsert
-逐行语义），COPY TO 走单向数据流 pipeline（Sink → Combine → Flush → Finalize），
-吞吐更高，尤其适合整组覆盖写入场景。
+`COPY TO (FORMAT aligned)` 是**批量写入主路径**（也是唯一的写入路径），走 DuckDB
+CopyFunction 框架，适用于大批量数据的一次性灌入（如因子批算、历史回填）。它走单向
+数据流 pipeline（Sink → Combine → Flush → Finalize），吞吐高，尤其适合整组覆盖写入场景。
 
 ### 5.1 语法
 
@@ -249,8 +208,8 @@ COPY (SELECT ...) TO '<table_name>' (FORMAT aligned, GROUP '<group_name>');
 | `FORMAT aligned` | 固定关键字 | 是 | 指定使用 AlignedTable 批量写入。`TO` 后的字符串是**逻辑表名**（数据根目录下的子目录），不是文件路径。 |
 | `GROUP '<group_name>'` | VARCHAR | 是 | 目标列组：`'index'` 或 `'panel/ma'`、`'factor/alpha'` 等 `lv1/lv2` 两级路径。 |
 
-> **注意**：`GROUP` 选项是**必填**的——COPY TO 必须明确写入哪个列组，不像标准 DML
-> 那样由 catalog 自动路由。`TO` 后的字符串是**逻辑表名**，不是文件路径。
+> **注意**：`GROUP` 选项是**必填**的——COPY TO 必须明确写入哪个列组。`TO` 后的字符串是
+> **逻辑表名**，不是文件路径。
 
 ### 5.2 新组首次写入（schema 从 query 推断）
 
@@ -333,7 +292,7 @@ COPY (SELECT symbol, date, close, volume
 
 ## 6. 表函数 API
 
-除了标准 SQL DML，还提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
+提供 5 个表函数，适用于不 ATTACH 的场景或需要细粒度控制的场景。
 
 ### 6.0 `aligned_create` — 建表 / 扩展列组
 
@@ -606,17 +565,17 @@ SELECT * FROM aligned_create('mytable', 'index',
 -- col2+ = close, volume (数据列)
 ```
 
-后续所有 INSERT / UPDATE / DELETE / scan 操作均使用建表时的列名，引擎从 Parquet
-footer 动态提取实际列名传递给内部链路（mutator、key resolver、DML executor），**绝不
-硬编码 `"symbol"` 或 `"date"`**。
+后续所有查询 / scan 操作均使用建表时的列名，引擎从 Parquet footer 动态提取实际列名
+传递给内部链路（scan、COPY writer），**绝不硬编码 `"symbol"` 或 `"date"`**。
 
 ```sql
--- 插入时用实际列名
-ATTACH 'D:/data' AS al (TYPE ALIGNED);
-INSERT INTO al.mytable (ticker, trade_date, close, volume)
-    VALUES ('000001', DATE '2026-01-15', 10.5, 1000);
+-- 写入时用实际列名（COPY TO 是唯一的写入路径）
+SET aligned_data_root = 'D:/data';
+COPY (SELECT '000001' AS ticker, DATE '2026-01-15' AS trade_date, 10.5 AS close, 1000 AS volume)
+  TO 'mytable' (FORMAT aligned, GROUP 'index');
 
 -- 查询时同样用实际列名
+ATTACH 'D:/data' AS al (TYPE ALIGNED);
 SELECT ticker, trade_date, close FROM al.mytable WHERE trade_date = DATE '2026-01-15';
 ```
 
@@ -663,51 +622,7 @@ unique_ptr<FunctionData> AlignedBindForCatalog(
 
 用于在不经过 `TableFunctionBindInput` 的情况下绑定扫描（catalog 内部使用）。
 
-### 9.2 内存 Upsert
-
-```cpp
-UpsertResult AlignedUpsertFromCollection(
-    ClientContext &context,
-    const string &table_name,
-    const string &root,
-    const string &mapping,
-    ColumnDataCollection &source_collection,
-    const vector<string> &source_col_names);
-```
-
-| 参数 | 说明 |
-|------|------|
-| `context` | DuckDB ClientContext |
-| `table_name` | 逻辑表名 |
-| `root` | 数据根目录 |
-| `mapping` | 列→组映射字符串（可为空，自动推断） |
-| `source_collection` | 内存中的行数据（DuckDB ColumnDataCollection） |
-| `source_col_names` | collection 的列名列表 |
-
-**返回**：`UpsertResult { idx_t rows_inserted, rows_updated, parts_rewritten }`
-
-跳过临时 Parquet 文件的双写，直接从内存 collection 执行 upsert。`PhysicalAlignedInsert` 使用此接口。
-
-### 9.3 内存 Delete
-
-```cpp
-DeleteResult AlignedDeleteFromCollection(
-    ClientContext &context,
-    const string &table_name,
-    const string &root,
-    ColumnDataCollection &keys_collection);
-```
-
-| 参数 | 说明 |
-|------|------|
-| `context` | DuckDB ClientContext |
-| `table_name` | 逻辑表名 |
-| `root` | 数据根目录 |
-| `keys_collection` | 主键 collection，必须恰好两列 `(symbol VARCHAR, date DATE/TIMESTAMP)` |
-
-**返回**：`DeleteResult { idx_t rows_deleted, parts_rewritten }`
-
-### 9.4 建表
+### 9.2 建表
 
 ```cpp
 void AlignedCreateTable(
@@ -725,16 +640,16 @@ void AlignedCreatePartition(
     const string &partition_key);
 ```
 
-### 9.5 写锁（RAII）
+### 9.3 写锁（RAII）
 
 ```cpp
 TableWriteLock lock(fs, table_path);
 ```
 
 在 `<table_path>/.aligned_write.lock` 创建锁文件；已存在则抛异常。析构时删除锁文件。
-mutator 和 compactor 内部自动使用。崩溃残留需手动删除。
+COPY writer 和 compactor 内部自动使用。崩溃残留需手动删除。
 
-### 9.6 事务 ID
+### 9.4 事务 ID
 
 ```cpp
 idx_t NextTransactionId();
@@ -760,6 +675,3 @@ idx_t NextTransactionId();
 | `aligned_groups` | `group_name` | 列组路径 |
 | | `columns` | 该组的列名列表（分号分隔） |
 | | `partition_count` | 该组的分区数 |
-| `INSERT` (标准 SQL) | `Count` | 插入的行数 |
-| `UPDATE` (标准 SQL) | `Count` | 更新的行数 |
-| `DELETE` (标准 SQL) | `Count` | 删除的行数 |

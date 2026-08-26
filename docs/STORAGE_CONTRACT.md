@@ -206,32 +206,12 @@ aligned_create(table, group, columns, root=..., partition_template=...)  → (di
 aligned_compact(table, group_name, root=...)  → (dirs_compacted, parts_before, parts_after)
 -- 删除列组 / 整表
 aligned_drop(table, group_name, root=...)     → (dirs_removed, files_removed, txid)
-
--- 标准 DML（via ATTACH ... TYPE ALIGNED）
-INSERT INTO al.<table> ...   → Count
-UPDATE al.<table> SET ...     → Count
-DELETE FROM al.<table> ...   → Count
 ```
 
+> **注意**：标准 DML（INSERT/UPDATE/DELETE）不再支持。唯一写入路径是 COPY TO (FORMAT aligned)。
+
 - `mapping` 对已存在的表可省略（按列名自动推断所属 Group）；空表首写必须显式给出。
-- 主键 = `(symbol, date)`；已存在 → 更新（只重写受影响 part），不存在 → 插入。
 - 映射列类型 = 组内已存类型（组 schema），不是源文件类型。
-- **Part 增长策略（Append-to-Last-Part）**：当 upsert 追加到已有分区末尾
-  （key 排在该分区所有现有 `(symbol, date)` 之后）且该分区最后一个 part 行数
-  < `ALIGNED_DEFAULT_PART_ROWS`（1048576）时，**优先重写最后一个 part 并
-  追加新行**（而非新建 part），减少 part 碎片化。该决策需跨组一致：若任一组
-  的末 part 在不同索引、行数不同、已达阈值或缺少某映射列（schema evolution），
-  则**整分区回退**为新建 part。单个 batch 可小幅超限（不做硬截断）。
-- **大批量 INSERT 分批提交**：标准 INSERT 通过 catalog 钩子直写 parquet 列组。
-  当单次 INSERT 行数 > 1M 时，自动分批调用 mutator（每批 1M 行，各自独立事务），
-  避免 10M+ 行全量物化到内存导致 OOM。每批重新获取写锁 + 重读表 plan（拾取前批
-  写入的 part）。
-- **提交协议**：
-  1. 写入 `<table>/_tmp/transaction-<txid>/`，`_tmp/` 对 Reader 不可见。
-  2. 提交时 part 以 v6 名 `{idx:04d}-{rows:10d}.parquet` 落位（rename 到正式位置）。
-  3. 崩溃 → 丢弃 `_tmp/transaction-<txid>/`（读端从不读 `_tmp/`）。
-- DELETE：删空最高索引 part → 直接移除；删空单 part 分区 → 整分区移除；
-  删空内部 part → 原地重写为 0 行空文件（保留文件名索引，保持 index 连续）。
 - **Compaction**（`aligned_compact(table, 'all')`）：合并所有组的多 part 分区为
   单 part（同目录必须同列集，拒绝 schema-evolution 合并）。**两阶段提交**：所有组
   的合并 part 先全部写入 `_tmp/`，全部成功后再统一 move 到目标目录并删除旧 part；

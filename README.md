@@ -42,7 +42,7 @@ SELECT * FROM aligned_compact('cnstk_ixday', 'all', root => '/data');
 SELECT * FROM aligned_drop('cnstk_ixday', 'factor/alpha101', root => '/data');
 
 -- Attach（DuckLake 式逻辑 Attach，推荐）：把数据根挂载为 catalog 数据库，
--- 表保持「逻辑表」——SELECT 走 aligned 扫描，标准 DML 直接读写底层 parquet 列组：
+-- 表保持「逻辑表」——SELECT 走 aligned 扫描（ATTACH 仅用于读访问，写入请用 COPY TO）：
 ATTACH '/data' AS al (TYPE ALIGNED);
 
 -- 建表（DDL 方式，写 0 行占位 parquet，footer 携带 schema）：
@@ -56,11 +56,8 @@ CREATE TABLE al.cnstk_ixday (cols...) WITH (partition='month=2026-10');
 CREATE TABLE al.cnstk_ixday (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,ma20');
 
 SELECT * FROM al.cnstk_ixday;
-INSERT INTO al.cnstk_ixday (date, symbol, close, alpha001, ma5)
-  VALUES (DATE '2026-09-01', '009999', 99.5, 1.5, 2.5);
-UPDATE al.cnstk_ixday SET close = 123.4 WHERE symbol = '009999';
-DELETE FROM al.cnstk_ixday WHERE symbol = '009999';
--- INSERT/UPDATE 按 (symbol, date) 主键 upsert，只重写受影响 part；原子提交。
+-- 注意：ATTACH + 标准 DML（INSERT/UPDATE/DELETE）不再支持。
+-- 唯一写入路径是 COPY TO (FORMAT aligned)，见下方示例。
 -- DETACH al; 即可卸载（数据始终在 parquet 列组里）。
 
 -- 批量写入（COPY TO，推荐大批量数据加载）：
@@ -94,12 +91,12 @@ COPY (SELECT symbol, date, ma5, ma20 FROM source ORDER BY symbol, date)
 | 过滤下推 | ✅ | Hive 分区剪枝 + Parquet Row Group stats 剪枝 + 行级 filter（`WHERE date=...` 剪到 1/4 数据时约 2-3× 收益） |
 | 并行扫描 | ✅ | Aligned Row Group 为任务单元，8 线程实测 ≈4.2× 加速 |
 | 元数据缓存 | ✅ | 复用 DuckDB ObjectCache（LRU 8GiB），footer/schema/RG stats 跨查询共享 |
-| 写入 | ✅ | 标准 DML（INSERT/UPDATE/DELETE）通过 `ATTACH ... TYPE ALIGNED` 使用（v8 mutator）：按 (symbol, date) 主键插入 / 更新 / 删除；只重写受影响 part；`_tmp` 暂存 + 原子提交 |
+| 写入 | ✅ | `COPY TO (FORMAT aligned, GROUP '...')`：per-partition 覆盖/MERGE，自描述文件名，RG 131072 / part 8 RG，ZSTD/V1 |
 | 批量写入 | ✅ | `COPY TO ... (FORMAT aligned, GROUP '...')`：走 DuckDB CopyFunction 框架，per-partition 覆盖，自描述文件名，RG 131072 / part 8 RG，ZSTD/V1，`preserve_insertion_order=false` 启用并行写入（5M 行 7 列 0.8s） |
 | 建表 | ✅ | `aligned_create()` 表函数 + `CREATE TABLE ... WITH (groups=..., partition_template=...)` DDL |
 | 合并 | ✅ | `aligned_compact()`：单事务合并**所有组**，并行暂存各分区目录（Phase 1 多线程），规范化重写（1M rows/part），原子切换 |
 | 删除 | ✅ | `aligned_drop()`：删除列组（`factor/alpha`）或整表（`index`） |
-| catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；标准 INSERT/UPDATE/DELETE 通过 catalog 的 PlanInsert/PlanUpdate/PlanDelete 钩子**直写 parquet 列组** |
+| catalog 集成 | ✅ | `ATTACH '/data' AS al (TYPE ALIGNED)`（DuckLake 式逻辑 attach）：表保持逻辑表，裸名 SELECT 走 aligned 扫描；`ATTACH` 仅用于读访问，`INSERT/UPDATE/DELETE` 抛 `NotImplementedException`，写入请用 `COPY TO (FORMAT aligned)` |
 | 扩展发布 | ✅ | 独立 `aligned.duckdb_extension`（24MB 自包含），`INSTALL` + `LOAD` 即用（见 `docs/EXTENSION_RELEASE.md`） |
 
 不支持（明确不做）：Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）。
