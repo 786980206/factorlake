@@ -163,11 +163,11 @@ aligned_meta(table, root=...)                    → (table_name, table_path, pa
                                                     total_rows, group_count, partition_count,
                                                     part_count, groups, partitions, schema,
                                                     column_mapping)
-  # column_mapping: "bare_name:lv1.lv2.bare_name;..." 映射每个非 index 唯一
-  # 列的裸名到限定名。index 列和跨组重名列不包含在映射中。
-  # 限定列名在 aligned_scan 中可通过 COLUMNS('lv1.lv2.col') 正则引用
-  # （DuckDB SQL 解析器将 . 视为 schema.table.column 分隔符，带点列名
-  # 不能直接用标识符语法引用）。
+  # column_mapping: "bare_name:lv1.lv2.bare_name;..." 映射所有非 index 列
+  # 的裸名到限定名（index shadow 列跳过）。跨组重名列每组各出现一次，
+  # 因为它们只能通过限定名引用。限定列名在 aligned_scan 中可通过
+  # COLUMNS('lv1.lv2.col') 正则引用（DuckDB SQL 解析器将 . 视为
+  # schema.table.column 分隔符，带点列名不能直接用标识符语法引用）。
 ```
 
 - **COPY TO (FORMAT aligned)**：批量写入主路径，走 DuckDB CopyFunction 框架。

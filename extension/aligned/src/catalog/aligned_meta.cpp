@@ -172,9 +172,10 @@ void AlignedMetaFunction(ClientContext &context, TableFunctionInput &data, DataC
 	output.SetValue(9, 0, Value(schema_str));
 
 	// column_mapping: "bare_name:lv1.lv2.bare_name;bare_name2:lv1.lv2.bare_name2;..."
-	// Maps each non-index unique column's bare name to its qualified
-	// "lv1.lv2.col" alias. Index columns and duplicated cross-group columns
-	// (which only have the qualified name) are not included.
+	// Maps EVERY non-index column to its qualified "lv1.lv2.col" alias.
+	// Index-shadow columns (same name as an index column) are skipped.
+	// Cross-group duplicated columns appear once per owning group, since
+	// they can only be referenced via their qualified name.
 	string mapping_str;
 	for (auto &g : plan.groups) {
 		if (g.manifest.group == "index") {
@@ -193,28 +194,6 @@ void AlignedMetaFunction(ClientContext &context, TableFunctionInput &data, DataC
 				}
 			}
 			if (in_index) {
-				continue;
-			}
-			// Skip duplicated cross-group columns (only have qualified name).
-			bool duplicated = false;
-			for (auto &g2 : plan.groups) {
-				if (g2.manifest.group == "index") {
-					continue;
-				}
-				if (g2.manifest.group == g.manifest.group) {
-					continue;
-				}
-				for (auto &c2 : g2.column_order) {
-					if (StringUtil::CIEquals(c2, col_name)) {
-						duplicated = true;
-						break;
-					}
-				}
-				if (duplicated) {
-					break;
-				}
-			}
-			if (duplicated) {
 				continue;
 			}
 			if (!mapping_str.empty()) {
