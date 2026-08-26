@@ -98,14 +98,10 @@ string NormalizePath(const string &path) {
 
 } // namespace
 
-//! Reads footer metadata (row count + schema) of one part file. Under v6 the
-//! row count is ALSO read here (it is not stored in the plan), but it is used
-//! only for the defensive OpenPart check against the file name; the plan's
-//! row bookkeeping comes entirely from the self-describing file names. Only
-//! ONE footer read per group is needed at plan time (the group's last part,
-//! for the schema + the index's date-field contract).
+//! Reads footer schema of one part file. Only ONE footer read per group is
+//! needed at plan time (the group's last part, for the schema + the index's
+//! date-field contract).
 struct PartFooterInfo {
-	idx_t row_count = 0;
 	vector<string> columns;
 	vector<LogicalType> types;
 };
@@ -113,7 +109,6 @@ struct PartFooterInfo {
 static PartFooterInfo ReadPartFooterInfo(ClientContext &context, const string &path) {
 	auto reader = make_uniq<ParquetReader>(context, OpenFileInfo(path), ParquetOptions(context));
 	PartFooterInfo info;
-	info.row_count = reader->NumRows();
 	for (auto &col : reader->columns) {
 		info.columns.push_back(col.name);
 		info.types.push_back(col.type);
@@ -172,16 +167,15 @@ static void AppendPartitionParts(GroupPlan &group, const string &key, const vect
 		part.path = part_paths[j];
 		auto slash = part.path.find_last_of("/\\");
 		string file_name = slash == string::npos ? part.path : part.path.substr(slash + 1);
-		part.part_name = file_name.substr(0, file_name.size() - 8); // strip ".parquet"
 		idx_t index = 0;
 		if (!ParsePartName(file_name, index, part.row_count)) {
 			throw IOException("Aligned table '%s' group '%s': part file '%s' does not match the self-describing "
-			                  "v6 name '{idx:04d}-{rows:10d}.parquet'",
+			                  "name '{idx:04d}-{rows:10d}.parquet'",
 			                  table_name, group.manifest.group, file_name);
 		}
+		part.part_name = file_name.substr(0, file_name.size() - 8); // strip ".parquet"
 		part.partition_key = key;
 		part.partition_index = index;
-		part.partition_parts = part_paths.size();
 		part.start_row = partition_start + running;
 		group.parts.push_back(std::move(part));
 		running += part.row_count;
@@ -495,8 +489,7 @@ static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
 			group.schema_types = last_footer.types;
 		}
 
-		// Partition templates for pruning: explicit from the manifest, else
-		// Partitioning is always derived from the directory layout.
+		// Partition templates for pruning, derived from the directory layout.
 		group.manifest.partitioning =
 		    DerivePartitioningFromPaths(part_paths_for_derive, table_name, acc.name,
 		                                group.partition_source);
@@ -520,23 +513,6 @@ string ResolveDataRoot(ClientContext &context, const Value *root_param, const st
 const GroupPlan &IndexGroup(const TablePlan &plan) {
 	D_ASSERT(!plan.groups.empty());
 	return plan.groups[0];
-}
-
-idx_t NextPartIndexForPartition(const TablePlan &plan, const string &partition_key) {
-	idx_t max_index = 0;
-	for (auto &group : plan.groups) {
-		for (auto &pk : group.partitions) {
-			if (pk.key != partition_key) {
-				continue;
-			}
-			for (idx_t i = pk.first_part; i < pk.first_part + pk.part_count; i++) {
-				if (i < group.parts.size() && group.parts[i].partition_index > max_index) {
-					max_index = group.parts[i].partition_index;
-				}
-			}
-		}
-	}
-	return max_index + 1;
 }
 
 } // namespace duckdb

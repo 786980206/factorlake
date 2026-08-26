@@ -307,7 +307,6 @@ extension/aligned/src/
 | | `CountRecursive` | 递归计数目录/文件（跳过 `.aligned_write.lock`） |
 | `catalog/manifest` | `ResolveDataRoot` | root 参数或 `aligned_data_root` 设置解析 |
 | | `IndexGroup` | 返回 `plan.groups[0]`（index 组不变量） |
-| | `NextPartIndexForPartition` | 跨组最大 partition_index + 1 |
 | `resolver/partition_resolver` | `EvaluatePartitionTemplate` / `IsKnownTemplate` | 三种模板求值/校验 |
 | | `DefaultPartitionKey` / `ValidatePartitionKey` | 默认分区键 / 分区键校验 |
 | `copy/aligned_copy` | `GetAlignedCopyFunction` | 注册 FORMAT aligned CopyFunction（Sink/Combine/Finalize pipeline） |

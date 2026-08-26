@@ -2,10 +2,8 @@
 #include "catalog/manifest.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
-#include "duckdb/parallel/async_result.hpp"
 
 namespace duckdb {
 

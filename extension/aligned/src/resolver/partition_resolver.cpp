@@ -373,8 +373,9 @@ vector<PartInfo> PrunePartsByFilter(const vector<PartInfo> &parts, const vector<
 	for (auto &part : parts) {
 		date_t part_date;
 		if (!ExtractPartitionDate(part, templates, part_date)) {
-			// date cannot be reconstructed (e.g. coarse partitioning):
-			// keep the part — no pruning possible for this group
+			// Abandon pruning for this group: a non-reconstructable date
+			// means the partition granularity is too coarse for range
+			// comparison — return all parts unchanged.
 			return parts;
 		}
 		if (filter.Compare(Value::DATE(part_date))) {

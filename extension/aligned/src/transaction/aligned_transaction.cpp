@@ -36,6 +36,9 @@ void AlignedTransactionManager::RollbackTransaction(Transaction &transaction) {
 }
 
 void AlignedTransactionManager::Checkpoint(ClientContext &context, bool force) {
+	// no-op: aligned storage commits atomically via _tmp + rename (no MVCC).
+	(void)context;
+	(void)force;
 }
 
 } // namespace duckdb

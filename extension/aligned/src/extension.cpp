@@ -51,7 +51,7 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	                             LogicalType::VARCHAR);
 
 	// aligned_compact(table_name, group_name, root=...)
-	// Phase 7: merge a group's parts per partition directory (atomic switch)
+	// Merge a group's parts per partition directory (atomic switch).
 	TableFunction aligned_compact_fn("aligned_compact", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                 AlignedCompactFunction, AlignedCompactBind, AlignedCompactInitGlobal, nullptr);
 	aligned_compact_fn.named_parameters["root"] = LogicalType::VARCHAR;
@@ -88,7 +88,7 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	aligned_create_set.functions.push_back(std::move(aligned_create_fn_3));
 	loader.RegisterFunction(std::move(aligned_create_set));
 
-	// Phase 8: DuckLake-style storage extension. ATTACH '<root>' AS name
+	// Aligned storage extension. ATTACH '<root>' AS name
 	// (TYPE ALIGNED) creates a logical catalog over the parquet column groups:
 	// SELECT reads the parquet files directly (no materialization).
 	RegisterAlignedStorageExtension(db);
@@ -98,10 +98,11 @@ void AlignedExtension::Load(ExtensionLoader &loader) {
 	//   - Hive partitioning by the index group's date/timestamp column
 	//   - Self-describing part file names {idx:04d}-{rows:10d}.parquet
 	//   - ZSTD compression, RG flush at 131072, part limit at 1048576 rows
-	//   - OVERWRITE of the target group's partitions
+	//   - Automatic per-partition overwrite on first write (use MERGE true
+	//     for incremental merge)
 	loader.RegisterFunction(GetAlignedCopyFunction());
 
-	// Phase 4: Parquet metadata cache (footer / schema / row-group stats, LRU
+	// Parquet metadata cache (footer / schema / row-group stats, LRU
 	// via DuckDB's ObjectCache, 8 GiB, validity-checked on access). The parquet
 	// extension registers the option; make it default ON so repeated aligned
 	// scans of the same parts skip footer parsing. Reuse DuckDB's cache rather

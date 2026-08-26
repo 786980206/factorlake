@@ -53,7 +53,6 @@ struct PartInfo {
 	idx_t row_count = 0;
 	string partition_key; // partition value ("2026-08"); "" when unpartitioned
 	idx_t partition_index = 0; // index parsed from the file name (partition-local)
-	idx_t partition_parts = 0; // total parts in the partition (1 => last part)
 };
 
 // One partition of a group: a contiguous run of parts sharing the same key.
@@ -78,17 +77,16 @@ struct GroupPlan {
 	vector<idx_t> output_positions; // table output position per column_order entry
 	string lv1; // first path level of the group ("factor"); empty for "index"
 	string lv2; // second path level ("alpha101"); empty for "index"
-	string partition_source; // the index schema's DATE/TIMESTAMP column among the
-	                         // first two fields — the partition source column
-	string symbol_column; // v7: the index schema's OTHER column among the first
-	                      // two fields — the primary-key symbol column. The
-	                      // index schema's first two columns ARE the primary
-	                      // key (date_col, symbol_col): exactly one of them is
-	                      // DATE/TIMESTAMP (the partition source), the other is
-	                      // the symbol column. Rows are ordered by partition
-	                      // (date ascending) then by symbol ascending within a
-	                      // partition (writer-side sort contract; the reader
-	                      // never validates ordering, only alignment).
+	string partition_source; // the index schema's DATE/TIMESTAMP column (col1)
+	                         // — the partition source column
+	string symbol_column; // the index schema's symbol column (col0) — the
+	                      // primary-key symbol column. The index schema's
+	                      // first two columns ARE the primary key:
+	                      // col0 = symbol (VARCHAR), col1 = DATE/TIMESTAMP.
+	                      // Rows are ordered by partition (date ascending)
+	                      // then by symbol ascending within a partition
+	                      // (writer-side sort contract; the reader never
+	                      // validates ordering, only alignment).
 	bool full_coverage = false; // partition keys == index keys (participates in
 	                            // active-interval intersection at scan time)
 };
@@ -132,10 +130,5 @@ string ResolveDataRoot(ClientContext &context, const Value *root_param, const st
 //! centralizes the "groups[0] == index" invariant so callers don't re-discover
 //! it by name match.
 const GroupPlan &IndexGroup(const TablePlan &plan);
-
-//! Computes the next part index for a partition key across ALL groups —
-//! the maximum partition_index among all groups' partitions with that key,
-//! plus 1. Used by aligned_create and compaction.
-idx_t NextPartIndexForPartition(const TablePlan &plan, const string &partition_key);
 
 } // namespace duckdb
