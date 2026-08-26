@@ -686,10 +686,19 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		for (idx_t i = 0; i < total_rows; i++) {
 			perm[i] = i;
 		}
-		std::stable_sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
-			if (symbol_idx[a] != symbol_idx[b]) return symbol_idx[a] < symbol_idx[b];
-			return date_values[a] < date_values[b];
-		});
+		// Use std::sort (faster introsort) for non-MERGE case (no dedup).
+		// std::stable_sort needed for MERGE to preserve existing/new order.
+		if (has_existing) {
+			std::stable_sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
+				if (symbol_idx[a] != symbol_idx[b]) return symbol_idx[a] < symbol_idx[b];
+				return date_values[a] < date_values[b];
+			});
+		} else {
+			std::sort(perm.begin(), perm.end(), [&](idx_t a, idx_t b) {
+				if (symbol_idx[a] != symbol_idx[b]) return symbol_idx[a] < symbol_idx[b];
+				return date_values[a] < date_values[b];
+			});
+		}
 	}
 
 	int64_t perm_u = elapsed_us(t_perm);
