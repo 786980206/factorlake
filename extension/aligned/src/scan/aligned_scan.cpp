@@ -113,7 +113,11 @@ struct AlignedScanGlobalState : public GlobalTableFunctionState {
 	// scans are sequential, so row-group windows are reused without
 	// re-initialization; re-positioning (InitializeScan + discard to the
 	// wanted start) only happens at range boundaries.
-	static constexpr idx_t CLAIM_RANGE = 16 * STANDARD_VECTOR_SIZE;
+	// CLAIM_RANGE = one Row Group (131072 rows). Larger ranges reduce cursor-lock
+	// contention and per-claim OpenPart overhead at high thread counts; a range
+	// equal to the parquet Row Group size means each thread typically processes
+	// one complete RG before re-claiming, maximizing window reuse.
+	static constexpr idx_t CLAIM_RANGE = 64 * STANDARD_VECTOR_SIZE;
 	mutex cursor_lock;
 	idx_t interval_idx = 0;
 	idx_t next_row = 0; // cursor within the current active interval
