@@ -337,24 +337,20 @@ vector<PartInfo> PrunePartsByFilter(const vector<PartInfo> &parts, const vector<
 		return parts; // != cannot prune
 	}
 
-	// Verify all templates are evaluable first (with the reference value)
-	vector<string> ref_dirs;
-	for (auto &t : templates) {
-		string dir;
-		if (!EvaluatePartitionTemplate(t.template_str, value, dir)) {
-			return parts; // unsupported template: no pruning
-		}
-		ref_dirs.push_back(std::move(dir));
-	}
-
+	// Verify all templates are evaluable with the reference value.
+	// (For EQUAL we also need the evaluated directory paths.)
 	if (cmp == ExpressionType::COMPARE_EQUAL) {
 		// exact directory path match
 		string dir_path;
-		for (auto &d : ref_dirs) {
+		for (auto &t : templates) {
+			string dir;
+			if (!EvaluatePartitionTemplate(t.template_str, value, dir)) {
+				return parts; // unsupported template: no pruning
+			}
 			if (!dir_path.empty()) {
 				dir_path += "/";
 			}
-			dir_path += d;
+			dir_path += dir;
 		}
 		vector<PartInfo> result;
 		for (auto &part : parts) {
@@ -367,8 +363,14 @@ vector<PartInfo> PrunePartsByFilter(const vector<PartInfo> &parts, const vector<
 		return result;
 	}
 
-	// Range comparison: reconstruct each part's partition date and test it
-	// (bounded by the number of parts — no unbounded date iteration)
+	// Range comparison: verify all templates are evaluable, then reconstruct
+	// each part's partition date and test it (bounded by the number of parts).
+	for (auto &t : templates) {
+		string dir;
+		if (!EvaluatePartitionTemplate(t.template_str, value, dir)) {
+			return parts; // unsupported template: no pruning
+		}
+	}
 	vector<PartInfo> result;
 	for (auto &part : parts) {
 		date_t part_date;
