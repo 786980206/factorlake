@@ -21,7 +21,7 @@ unique_ptr<ParquetWriter> CreateParquetWriter(ClientContext &context, FileSystem
 	    duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(), ShreddingType(),
 	    vector<pair<string, string>>(), nullptr, optional_idx(0),
 	    0ULL /* string_dictionary_page_size_limit */, 1, 0.01,
-	    ZStdFileSystem::DefaultCompressionLevel(), ParquetVersion::V1, GeoParquetVersion::V1);
+	    1 /* ZSTD compression level (1 = fast, default 3) */, ParquetVersion::V1, GeoParquetVersion::V1);
 }
 
 string FormatPartName(idx_t index, idx_t rows) {
