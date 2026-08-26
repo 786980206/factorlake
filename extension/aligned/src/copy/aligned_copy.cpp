@@ -9,12 +9,17 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/sorting/sort.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/execution/execution_context.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/thread_context.hpp"
+#include "duckdb/planner/bound_result_modifier.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -500,9 +505,6 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 		return;
 	}
 
-	// OPTIMIZATION: Skip the merge phase. Instead of copying all buffers into a
-	// single merged ColumnDataCollection, we extract sort keys and cache chunks
-	// directly from the source buffers. This eliminates one full O(n) copy.
 	auto t_merge = std::chrono::steady_clock::now();
 
 	vector<LogicalType> merged_types = bind_data.sql_types;
@@ -514,10 +516,6 @@ void AlignedCopyGlobalState::SortAndFlushPartition(PerPartitionState &pp,
 	for (idx_t c = 0; c < merged_types.size(); c++) {
 		all_cols.push_back(c);
 	}
-
-	// Track which rows are from existing data (for dedup).
-	vector<bool> row_is_existing;
-	row_is_existing.reserve(total_rows);
 
 	int64_t merge_us = elapsed_us(t_merge);
 	if (g_timing_enabled) g_merge_us.fetch_add(merge_us);
