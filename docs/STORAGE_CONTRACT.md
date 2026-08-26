@@ -16,13 +16,12 @@ index schema 前两列 = 主键 `(symbol, date)`。
 |------|------|
 | Logical Table | 一张逻辑宽表，如 `cnstk_ixday`，对应 `<data_root>/<table_name>/` |
 | Column Group | Logical Table 的一个物理列子集，如 `index`、`factor/alpha101`，对应表内一个目录 |
-| Canonical Row Space | 该表的逻辑行坐标集合 `{0, 1, ..., R-1}`，R = 表行数（= index 各分区行数之和） |
-| Canonical Key | 定义行语义的列集合 = index Group 的 schema 列（从 Parquet footer 读取，不写入 manifest） |
+| Canonical Row Space | 该表的逻辑行坐标集合 `{0, 1, ..., R-1}`，R = index 各分区行数之和 |
+| Canonical Key | index Group 的 schema 列（从 Parquet footer 读取，不持久化） |
 | Logical Partition | 按 Key 值划分的互斥行子集（如 `date = 2026-08-17` 的所有行） |
-| Physical Partition | 某个 Group 内一个 Hive 风格目录（如 `month=2026-08/`），**单层、各 Group 同一种段** |
-| Part File | 一个 Parquet 文件，**文件名自描述** `{idx:04d}-{rows:10d}.parquet`，是 Group 内最小读取单元 |
+| Physical Partition | 某个 Group 内一个 Hive 风格目录（如 `month=2026-08/`），单层、各 Group 同一种段 |
+| Part File | 一个 Parquet 文件，文件名自描述 `{idx:04d}-{rows:10d}.parquet`，是 Group 内最小读取单元 |
 | Row Group | Parquet 内 Row Group；Writer flush 大小固定 131072 行（编译时常量） |
-| Part File | 一个 Parquet 文件，文件名自描述 `{idx:04d}-{rows:10d}.parquet`；Writer 的 Part 行数软上限 1048576 行（编译时常量 `ALIGNED_DEFAULT_PART_ROWS`） |
 | Aligned Scan | 按行坐标直接组装多 Group 向量的扫描，绝不 JOIN |
 
 ---
@@ -59,8 +58,9 @@ e. **分区段唯一性**：一个 Group 内所有 part 的目录恰好一个 `n
 
 f. **重复列名处理**（按优先级）：
    1. 与 index 重复的列名：非 index Group 中的同名列忽略（index 列权威）。
-   2. 非 index Group 间重复的列名：必须用限定名 `lv1.lv2.col` 引用。
-   3. 非重复列名照常以裸名注册。
+   2. 非 index Group 间重复的列名：必须用限定名 `lv1.lv2.col` 引用
+      （通过 `COLUMNS('lv1.lv2.col')` 正则引用）。
+   3. 非重复列名照常以裸名注册，同时注册 `lv1.lv2.col` 限定别名。
 
 ---
 
@@ -96,6 +96,10 @@ index 行空间的一部分**（缺分区 → 该区行保留、该组列全 NUL
 同一 Group 内的 part 按**规范化相对路径的字符串字典序**排列。
 `part_id = 文件名解析出的 idx 字段`。
 
+行坐标在写入时确定，**永不变更**。Compaction 必须保持行序与行坐标不变
+（只能合并文件，不能重排行）。Writer 按 Key 排序写入（利于分区剪枝）；
+Reader 不得假设有序。
+
 ### 3.4 不变量（7 条）
 
 1. Logical Table 有唯一 Canonical Row Space。
@@ -108,30 +112,13 @@ index 行空间的一部分**（缺分区 → 该区行保留、该组列全 NUL
 
 ---
 
-## 4. Row Ordering
-
-- 行坐标在写入时确定，**永不变更**。
-- Compaction 必须保持行序与行坐标不变（只能合并文件，不能重排行）。
-- Writer 按 Key 排序写入（利于分区剪枝）；Reader 不得假设有序。
-
----
-
-## 5. 无 Manifest（`_table.json` 已删除）
-
-### 5.1 设计
+## 4. 无 Manifest
 
 **没有 `_table.json`，没有 `_group.json`，没有 sidecar，没有 commit marker。**
 目录本身就是 Catalog，文件发现用 Hive layout。所有元数据从目录结构和 Parquet
 footer 推导。
 
-**空表不是有效表**：`BuildTablePlan` 通过 glob 发现 Group，空表（无任何 part）
-返回空 plan。新组首次 COPY TO (FORMAT aligned) 时，从 query 列推断 Group 结构
-（哪些 Group、每 Group 写哪些列）；分区模板默认 `month=%Y-%m`。
-**例外**：`CREATE TABLE` DDL（§9.1）写 0 行占位 parquet，glob 可发现 → 有效表。
-
-### 5.2 不存在的字段
-
-以下信息**不持久化**，全部从目录结构或 Parquet footer 读取：
+### 4.1 不持久化的信息
 
 | 信息 | 来源 |
 |------|------|
@@ -139,45 +126,30 @@ footer 推导。
 | schema（列名+类型） | Parquet footer（每组最后 1 个 part） |
 | 行数 / 行区间 | part 文件名 `{idx:04d}-{rows:10d}` |
 | Row Group 大小 | 编译时常量 131072 |
-| Part 行数软上限 | 编译时常量 1048576（`ALIGNED_DEFAULT_PART_ROWS`，part 文件行数上限） |
+| Part 行数软上限 | 编译时常量 1048576（`ALIGNED_DEFAULT_PART_ROWS`） |
 | 事务号 | 不持久化（无 CAS、无并发控制） |
 | Column Group 列表 | glob `<table>/**/*.parquet` |
 | 分区模板 | 目录结构推导（`year=`/`month=`/`date=` 段） |
 
-### 5.3 组发现
+### 4.2 组发现
 
-- Group 发现：glob `<table>/**/*.parquet`（跳过 `.`/`_` 段），从路径尾部向前扫描目录段，
+- glob `<table>/**/*.parquet`（跳过 `.`/`_` 开头目录），从路径尾部向前扫描目录段，
   跳过 `name=value` 分区段，剩余目录段的最长后缀即 Group。
-- 分区推导：从已有 part 的目录结构推导分区 schema：
-  - 只识别 `year=YYYY`、`month=YYYY-MM`、`date=YYYY-MM-DD` 三种段。
-  - 只识别单层；多层 → 报错。
-  - 无识别段 → 该 Group 无分区（仅当 index 也无分区时合法）。
-- 空表（glob 无任何 part）：`BuildTablePlan` 返回空 plan，Reader 报 "table directory
-  does not exist" 或 0 groups；Writer 从 query 列推断 Group 结构。
+- 分区推导：只识别 `year=YYYY`、`month=YYYY-MM`、`date=YYYY-MM-DD` 三种单层段。
+  多层 → 报错。无识别段 → 该 Group 无分区（仅当 index 也无分区时合法）。
+- 空表（glob 无任何 part）：Reader 报 "table directory does not exist" 或 0 groups；
+  Writer 从 query 列推断 Group 结构。
+  **例外**：`CREATE TABLE` DDL 写 0 行占位 parquet，glob 可发现 → 有效表。
 
----
-
-## 6. Parquet 约定
+### 4.3 Parquet 约定
 
 - 支持类型：`BOOLEAN`、`TINYINT`、`SMALLINT`、`INTEGER`、`BIGINT`、`HUGEINT`、
   `FLOAT`、`DOUBLE`、`DECIMAL`、`DATE`、`TIMESTAMP`、`TIME`、`VARCHAR`。
-- 压缩：默认 `zstd`；统计信息：默认全开（Row Group 裁剪依赖它）。
-- Row Group 大小固定 131072 行（编译时常量，不写入 manifest）。
+- 压缩：`zstd`；统计信息：全开（Row Group 裁剪依赖它）；Parquet 版本 V1。
+- Row Group 大小固定 131072 行（编译时常量）。
 - 同一列在所有 part 中类型必须一致。
 
----
-
-## 7. Part 文件与行区间
-
-- 文件名格式 `{idx:04d}-{rows:10d}.parquet`：`idx` = 分区内索引，`rows` = 文件总行数。
-- 行区间由文件名累加推导，**计划阶段零 footer IO**。
-- 列集合由 Parquet footer 自描述（schema evolution → 缺失列读 NULL）。
-- 组 schema = 组内 rel_path 排序最后 1 个 part 的 footer（每组只读 1 个 footer）。
-- 防御校验：扫描时 footer 实际行数 == 文件名 `rows`，违反 fail-fast。
-
----
-
-## 8. Schema Evolution 与主键契约
+### 4.4 Schema Evolution 与主键契约
 
 - 列集合按 part 自描述（footer）。旧 part 没有的列 → 读为 NULL（不重写历史）。
 - 同一列类型跨 part 必须一致。
@@ -193,32 +165,53 @@ footer 推导。
 
 ---
 
-## 9. 写入与原子提交协议
+## 5. 读取（Aligned Scan）
 
-**API**：
+### 5.1 打开 / 组发现
 
-```
--- 建表 / 扩展列组
-aligned_create(table, group, columns, root=..., partition_template=...)  → (dirs_created, files_created, txid)
--- 合并 part
-aligned_compact(table, group_name, root=...)  → (dirs_compacted, parts_before, parts_after)
--- 删除列组 / 整表
-aligned_drop(table, group_name, root=...)     → (dirs_removed, files_removed, txid)
-```
+1. 一次 glob → 推导 Group 与分区键。
+2. 对每个 Group：按分区键分组 → 从文件名解析行区间 → 校验分区键 ⊆ index →
+   校验共享分区 R_i 一致 → index 分区内索引连续 → 每组读最后 1 个 part 的 footer
+   （组 schema + 日期列契约）→ ValidateRowSpace。
+3. 跨 Group：index 的 R_i 表 = 权威；缺分区组不报错（扫描时 NULL 填充）。
 
-> **注意**：标准 DML 已移除。唯一写入路径是 COPY TO (FORMAT aligned)。
+### 5.2 执行
 
-- 列映射：已存在的表按列名自动推断所属 Group；新组首次 COPY 从 query 列推断 schema。
-- 映射列类型 = 组内已存类型（组 schema），不是源文件类型。
-- **Compaction**（`aligned_compact(table, 'all')`）：合并所有组的多 part 分区为
-  单 part（同目录必须同列集，拒绝 schema-evolution 合并）。**两阶段提交**：所有组
-  的合并 part 先全部写入 `_tmp/`，全部成功后再统一 move 到目标目录并删除旧 part；
-  任一组合并失败则清理 `_tmp`、表状态不变（旧 part 仍在原位）。
+1. 按 `start_row` 把任务切成 Aligned Row Group 粒度。
+2. 每个 task 打开涉及的各 Group part 文件，按列投影读出 Vector，
+   直接填入同一个 DataChunk。**缺分区区间：NULL 填充**。
+3. 禁止：JOIN、横向 concat、Key 比较、物化中间行。
 
-### COPY TO (FORMAT aligned) — 批量写入路径
+### 5.3 剪枝
 
-COPY TO (FORMAT aligned) 是**批量写入主路径**，走 DuckDB CopyFunction 框架
-（`GetAlignedCopyFunction` 注册，Sink/Combine/Finalize pipeline）。
+- **Partition Pruning**：`WHERE date = ...` → 按各 Group 的 partitioning 模板解析目录。
+- **Row Group Pruning**：Parquet min/max 统计。
+- **Projection Pushdown**：只读被选列、只开被选 Group。
+- **Group Filter**：`aligned_scan(table, group_filter)` 仅扫描 index + 指定组。
+- 跨 leaf 传播：各 leaf 的 partition pruning 结果映射到 Logical Row Space 坐标后
+  **相交**为一个全局扫描区间（固定相交，仅限全覆盖组）。
+
+### 5.4 并行
+
+- 任务单位 = Aligned Row Group，共享游标按连续 Range 发放。
+- 8 线程实测 ≈4.2× 加速。
+
+### 5.5 Metadata Cache
+
+- 缓存：Parquet footer / 统计。
+- 键：`(绝对路径, mtime, size)`；LRU 淘汰；不缓存数据页。
+
+---
+
+## 6. 写入
+
+> **标准 DML 已移除**。唯一写入路径是 `COPY TO (FORMAT aligned)`。
+> `aligned_create` / `aligned_compact` / `aligned_drop` / `CREATE TABLE` 是
+> 管理操作（建表、合并、删除）。
+
+### 6.1 COPY TO (FORMAT aligned) — 批量写入
+
+走 DuckDB CopyFunction 框架（`GetAlignedCopyFunction`，Sink/Combine/Finalize pipeline）。
 
 ```sql
 -- 新组首次写入（schema 从 query 推断，排除 index key 列）
@@ -228,33 +221,46 @@ COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday'
 -- 已有组写入（schema 从 last parquet footer 读取，列裁剪到组内列）
 COPY (SELECT * FROM mock ORDER BY symbol, date) TO 'cnstk_ixday'
   (FORMAT aligned, GROUP 'index');
+
+-- 增量合并（MERGE true = 读旧数据 + 新数据 merge 后重写）
+COPY (SELECT * FROM mock) TO 'cnstk_ixday'
+  (FORMAT aligned, GROUP 'panel/ma', MERGE true);
 ```
 
-**写入 pipeline**（单向数据流，唯一写入路径）：
+#### 写入 pipeline
 
 ```
-input chunk
+input chunk (sorted by symbol, date)
     ↓
-Sink: part_data->Append → AlignedPartitionedColumnData (hash 分区)
-    ↓                          (Sink 不碰 ParquetWriter)
-Combine: FlushAppendState → 遍历 partitions → project 到 group schema
-    ↓    → GlobalState::Flush (FlushManager，唯一写入入口)
-Flush: PartitionWriter → ParquetWriter::Flush (写一个 RG)
-       满足 row_groups_per_file (8) → 轮转 part 文件 (rename 临时名 → 自描述名)
+Sink: run detection → project 到 group schema → 累积到 per-partition RG buffer
+    ↓   (PARALLEL_COPY_TO_FILE，多线程并行 source reader + per-thread Sink)
+    ↓   buffer 满 (131072 rows) → PushJob 到 background FlushWorker (FIFO queue)
+Combine: push 剩余 buffer + sentinel
     ↓
-Finalize: 逐分区 Finalize + Rename + 统计校验 (received == written)
+FlushWorker (N threads): PopJob → ParquetWriter::Flush (1 RG)
+    ↓   线程私有 PerPartitionState (无锁)，partition affinity (round-robin)
+    ↓   满 row_groups_per_file (8) → 轮转 part 文件
+Finalize: join threads → 检查 error → 统计校验 (received == written)
 ```
+
+#### 关键行为
 
 - **per-partition 覆盖**：每个分区目录首次写入时自动清理旧 parquet 文件
   （无需 `OVERWRITE true`）。
+- **MERGE true**：增量合并模式——读取受影响分区的已有数据，与新数据按
+  `(symbol, date)` 主键 merge（新数据覆盖旧 key），合并后按正常逻辑排序写入。
+  非 index 组的 MERGE 依赖从 index 组读取 `(symbol, date)` 作为 hidden sort key，
+  **必须在 MERGE index 组之前执行**。
 - **自描述文件名**：先以 `0000-0000000000.parquet` 写入，Finalize 后 rename 为
   `{idx:04d}-{rows:10d}.parquet`（实际行数）；0 行空文件自动删除。
 - **RG / Part 切分**：Row Group flush size = 131072；part 文件上限 = 8 RG
   = 1048576 行（`ALIGNED_DEFAULT_PART_ROWS`）。满 8 RG 轮转新 part。
-  压缩 **ZSTD**、Parquet 版本 **V1**（`CreateParquetWriter` 统一构造参数）。
-- **并行写入**：`SET preserve_insertion_order = false` 启用并行写入
-  （DuckDB pipeline 并发执行 Sink/Combine）；`REGULAR_COPY_TO_FILE` 执行模式
-  保留输入顺序，配合 query 中 `ORDER BY (symbol, date)` 保证分区内有序。
+- **排序**：`PARALLEL_COPY_TO_FILE` 让 source reader 多线程并行扫描；FlushWorker
+  在 sentinel 到达后收集每个分区的所有 buffer，合并后按 `(symbol, date)` 全局
+  排序再 flush——消除 morsel 乱序，0 乱序行。partition affinity（round-robin）
+  保证同一分区的数据只由一个 FlushWorker 线程写入。
+  非 index 组的 group schema 不含 symbol/date 列（key 只存一份），Sink 在 buffer
+  末尾追加 hidden sort key 列，SortAndFlushPartition 排序后剥离。
 - **列裁剪**：只写 group schema 包含的列，按 group schema 顺序重排；输入列类型
   ≠ 组 schema 类型时自动 cast（如 TIMESTAMP → DATE）。
 - **统计校验**：每个 PartitionWriter 跟踪 `received_rows` / `flushed_rows` /
@@ -263,13 +269,9 @@ Finalize: 逐分区 Finalize + Rename + 统计校验 (received == written)
 - **新组推断**：`aligned_create('table', 'group')` 2-arg 形式创建空组目录，
   首次 COPY 时从 query 列推断 schema（排除 index key 列 symbol/date）。
 
----
-
-## 9.1. CREATE TABLE DDL（建表 + 分区创建 + 列组扩展）
+### 6.2 CREATE TABLE DDL
 
 通过标准 `CREATE TABLE ... WITH (...)` 语法在 AlignedTable catalog 上操作。
-
-**语法**：
 
 ```sql
 -- 新建表（写 0 行占位 parquet，footer 携带 schema）
@@ -283,7 +285,8 @@ CREATE TABLE al.<table> (cols...) WITH (partition='month=2026-10');
 CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,ma20');
 ```
 
-**新建表规则**：
+#### 新建表规则
+
 - 前两列必须 (symbol VARCHAR, date DATE/TIMESTAMP)（v8 主键契约）。
 - `groups` 指定列→Group 映射（`;` 分隔组，`:` 分隔组名/列名，`,` 分隔列名）；
   未列出的列默认放入 `index`。非 `index` 组名必须是 `lv1/lv2` 两级路径。
@@ -292,14 +295,16 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
   下写一个 **0 行占位 parquet** `0000-0000000000.parquet`，footer 携带 schema →
   Reader 可通过 glob 发现表结构。
 
-**分区创建规则**：
+#### 分区创建规则
+
 - 表必须已存在。分区键格式必须匹配现有模板（`date=YYYY-MM-DD` 15 字符 /
   `month=YYYY-MM` 13 字符 / `year=YYYY` 9 字符），且日期部分必须是有效的
   日历日期（如 `month=2026-13` 会 fail-fast）。
 - 为每个已发现 Group 在新分区目录下写 0 行占位 parquet。
 - 若 index 已有该分区 → fail-fast "partition already exists"。
 
-**列组扩展规则**：
+#### 列组扩展规则
+
 - 表必须已存在。`CREATE TABLE` 的列定义是新 Group 的列（不需要 symbol/date）。
 - `groups` 必须指定至少一个非 `index` Group。
 - 新 Group 名若已存在 → fail-fast。
@@ -310,7 +315,8 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 - 已有的其他 Group 的 part 文件不被触碰（Schema Evolution：新列在老 part 上
   读为 NULL）。
 
-**验证错误**（全部 fail-fast）：
+#### 验证错误（全部 fail-fast）
+
 - `at least 2 columns required` / `first two columns must be exactly one DATE/TIMESTAMP and one VARCHAR`
 - `table already exists ... specify a non-index group`（表已存在但未指定新 Group）
 - `group already exists`（扩展时组名重复）
@@ -319,36 +325,32 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 - `invalid partition_template` / `partition key does not match template`
 - `partition already exists`（分区已存在）
 
----
+### 6.3 aligned_compact — 合并 part 碎片
 
-## 10. 读取协议（Aligned Scan）
+```
+aligned_compact(table, group_name, root=...)  → (dirs_compacted, parts_before, parts_after)
+```
 
-### 10.1 打开
+- **规范化重写**：每个分区的所有 part 按 `ALIGNED_DEFAULT_PART_ROWS`（1M 行）
+  重新切分——前面的 part 满行（恰好 1M 行），末 part ≤ 1M 行。0 行占位 part
+  被合并吸收。已规范化的分区（单 part ≤ 1M，或多 part 均满行）跳过不重写
+  （`IsAlreadyNormalized` 检查）。
+- **并行暂存**：Phase 1 各分区目录的暂存独立（每个目录的读-写独立），可并行处理。
+  Phase 2（move + delete）仍串行。
+- **两阶段提交**：所有组的合并 part 先写入 `_tmp/`，全部成功后再统一 move 到
+  目标目录 + 删除旧 part；任一组失败则清理 `_tmp`、表状态不变（旧 part 仍在原位）。
+- 同目录必须同列集（拒绝 schema-evolution 合并）。
+- `group_name = 'all'` 合并所有组（单事务原子切换）。
 
-1. 组发现：一次 glob → 推导 Group 与分区键。
-2. 对每个 Group：按分区键分组 → 从文件名解析行区间 → 校验分区键 ⊆ index →
-   校验共享分区 R_i 一致 → index 分区内索引连续 → 每组读最后 1 个 part 的 footer
-   （组 schema + 日期列契约）→ ValidateRowSpace。
-3. 跨 Group：index 的 R_i 表 = 权威；缺分区组不报错（扫描时 NULL 填充）。
+### 6.4 并发写互斥
 
-### 10.2 执行
-
-1. 按 `start_row` 把任务切成 Aligned Row Group 粒度。
-2. 每个 task 打开涉及的各 Group part 文件，按列投影读出 Vector，
-   直接填入同一个 DataChunk。**缺分区区间：NULL 填充**。
-3. 禁止：JOIN、横向 concat、Key 比较、物化中间行。
-
-### 10.3 剪枝
-
-- Partition Pruning：`WHERE date = ...` → 按各 Group 的 partitioning 模板解析目录。
-- Row Group Pruning：Parquet min/max 统计。
-- Projection：只读被选列、只开被选 Group。
-- 跨 leaf 传播：各 leaf 的 partition pruning 结果映射到 Logical Row Space 坐标后
-  **相交**为一个全局扫描区间（固定相交，仅限全覆盖组）。
+- `.aligned_write.lock`：COPY / compactor 执行前创建 lock 文件（RAII），已有 lock
+  则拒绝。crash 残留需手动删除。
+- `_tmp/` 目录：compaction 的暂存区，Reader 永不访问。
 
 ---
 
-## 11. 错误与校验语义
+## 7. 错误与校验语义
 
 | 情形 | 行为 |
 |------|------|
@@ -369,19 +371,7 @@ CREATE TABLE al.<table> (ma5 DOUBLE, ma20 DOUBLE) WITH (groups='fieldset/ma:ma5,
 
 ---
 
-## 12. Metadata Cache
+## 8. 明确不做
 
-- 缓存：Parquet footer / 统计。
-- 键：`(绝对路径, mtime, size)`；LRU 淘汰；不缓存数据页。
-
----
-
-## 13. 保留扩展点（明确不做）
-
-- `canonical_order: "sorted"` + skip index
-- Bloom filter / 二级索引
-- Tombstone / Delta
-- 类型升级
-- 稀疏专用存储
-- 非日期列的 partition source
-- 多层 / 多种分区段混合
+Tombstone/Delta、类型升级、聚合下推（依赖 DuckDB ≥ v1.6 API）、Bloom filter /
+二级索引、稀疏专用存储、非日期列的 partition source、多层/多种分区段混合。
