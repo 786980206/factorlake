@@ -7,8 +7,8 @@
 namespace duckdb {
 
 //! Minimal transaction for the aligned attached database. The aligned storage
-//! has no MVCC of its own — mutators commit atomically via _tmp + rename, so
-//! transactions are effectively no-ops that only carry the bookkeeping.
+//! has no MVCC of its own — COPY/compaction commit atomically via _tmp + rename,
+//! so transactions are effectively no-ops that only carry the bookkeeping.
 class AlignedTransaction : public Transaction {
 public:
 	AlignedTransaction(TransactionManager &manager, ClientContext &context);

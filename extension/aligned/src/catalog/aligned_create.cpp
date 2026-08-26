@@ -36,7 +36,7 @@ static void ValidateGroupName(const string &group_name) {
 }
 
 //! Parses a "group:col1,col2;group2:col3" mapping string (same syntax as
-//! aligned_upsert mapping). Returns an ordered map: group_name -> column list.
+//! aligned_create groups option). Returns an ordered map: group_name -> column list.
 //! The "index" group is always first if present.
 static void ParseGroupsOption(const string &groups_str, case_insensitive_map_t<vector<string>> &out) {
 	auto entries = StringUtil::Split(groups_str, ';');

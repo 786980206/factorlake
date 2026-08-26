@@ -9,11 +9,8 @@ namespace duckdb {
 constexpr idx_t ALIGNED_DEFAULT_RG_ROWS = 131072;
 
 //! Default soft target rows per Parquet part file (compile-time constant).
-//! When an upsert appends rows to an existing partition, the mutator prefers
-//! growing the partition's last existing part in-place while its row count is
-//! below this threshold; once a part reaches it, the next append creates a
-//! new part instead (the part is NOT hard-truncated — a single batch may
-//! overshoot by a small amount). The value is ~8 Row Groups (8 * 131072),
+//! COPY TO (FORMAT aligned) writes up to this many rows per part before
+//! rotating to a new part file. The value is ~8 Row Groups (8 * 131072),
 //! yielding ~256MB–1GB files for typical column widths.
 constexpr idx_t ALIGNED_DEFAULT_PART_ROWS = 1048576;
 
@@ -126,8 +123,8 @@ void BuildTablePlanSkipPartitionCheck(ClientContext &context, const string &root
 //! Resolves the data root: uses the `root` named parameter if non-null,
 //! otherwise falls back to the `aligned_data_root` setting. Throws
 //! BinderException if neither is available. Shared by aligned_scan,
-//! aligned_create, aligned_compact, aligned_drop, aligned_groups, and the
-//! mutator.
+//! aligned_create, aligned_compact, aligned_drop, aligned_groups, and
+//! aligned_meta.
 string ResolveDataRoot(ClientContext &context, const Value *root_param, const string &fn_name);
 
 //! Returns the index group (plan.groups[0]) of a table plan. The index group
@@ -138,8 +135,7 @@ const GroupPlan &IndexGroup(const TablePlan &plan);
 
 //! Computes the next part index for a partition key across ALL groups —
 //! the maximum partition_index among all groups' partitions with that key,
-//! plus 1. Shared by key_resolver (fast/slow append paths) and the mutator
-//! (fallback when append_to_last is rejected).
+//! plus 1. Used by aligned_create and compaction.
 idx_t NextPartIndexForPartition(const TablePlan &plan, const string &partition_key);
 
 } // namespace duckdb

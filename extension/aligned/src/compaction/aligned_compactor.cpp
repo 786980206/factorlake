@@ -427,7 +427,7 @@ void AlignedCompactFunction(ClientContext &context, TableFunctionInput &data, Da
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	// Acquire the table-level write lock (file-based mutual exclusion across
-	// concurrent mutator / compactor invocations). The lock and the staged
+	// concurrent COPY / compactor invocations). The lock and the staged
 	// transaction are held for both phases — no additional locking is needed
 	// inside the parallel workers.
 	TableWriteLock write_lock(fs, bind.plan.table_path);

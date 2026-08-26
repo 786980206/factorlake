@@ -36,15 +36,14 @@ void WriteNullParquet(ClientContext &context, FileSystem &fs, const string &path
 
 //! Opens a ParquetReader for `path`, pushes ALL column ids, collects RG
 //! stats, builds the all-RGs vector, and calls InitializeScan. Returns the
-//! reader and the initialized scan state. Shared by part_rewriter and
-//! aligned_compactor.
+//! reader and the initialized scan state. Used by aligned_compactor.
 unique_ptr<ParquetReader> OpenPartReaderAllColumns(ClientContext &context, const string &path,
                                                     ParquetReaderScanState &scan_state);
 
 //! Opens a ParquetReader for `path`, selects only the named columns (by
 //! case-insensitive name match), and calls InitializeScan. Returns the reader
 //! (with column_ids set) and the scan state. Throws IOException if a name is
-//! not found. Shared by the mutator's ReadSourceColumns and key_resolver.
+//! not found. Used by aligned_copy (MERGE) and aligned_compactor.
 unique_ptr<ParquetReader> OpenPartReaderNamedColumns(ClientContext &context, const string &path,
                                                       const vector<string> &col_names,
                                                       vector<LogicalType> &out_types,

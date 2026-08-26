@@ -277,8 +277,8 @@ static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
 	}
 
 	// Contract §2.1b: the 'index' group is mandatory. An empty table (no
-	// parts at all) returns an empty plan — the caller (mutator) handles
-	// the first-write case by creating groups from the mapping.
+	// parts at all) returns an empty plan — the caller (aligned_create / COPY)
+	// handles the first-write case by creating groups from the mapping.
 	idx_t index_gi = DConstants::INVALID_INDEX;
 	for (idx_t gi = 0; gi < group_list.size(); gi++) {
 		if (StringUtil::CIEquals(group_list[gi].name, "index")) {

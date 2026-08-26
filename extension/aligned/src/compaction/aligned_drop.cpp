@@ -104,7 +104,7 @@ void AlignedDropFunction(ClientContext &context, TableFunctionInput &data, DataC
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	// Acquire the table-level write lock for mutual exclusion with concurrent
-	// writers (aligned_upsert / aligned_delete / aligned_compact).
+	// writers (COPY TO / aligned_compact).
 	TableWriteLock write_lock(fs, bind.plan.table_path);
 
 	idx_t txid = NextTransactionId();
