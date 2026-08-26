@@ -968,7 +968,7 @@ static void NullFillGroupRange(DataChunk &output, idx_t output_offset, const Gro
 static void ScanGroupWindow(ClientContext &context, const AlignedTableBindData &bind, idx_t group_idx,
                             AlignedScanLocalState &lstate, idx_t window_start, idx_t count, DataChunk &output,
                             idx_t output_offset, const vector<idx_t> &projected_pos, const vector<PartInfo> &parts,
-                            const vector<AlignedGroupFilter> &group_filters) {
+                            const vector<AlignedGroupFilter> &group_filters, bool can_fast_copy) {
 	auto &group = bind.plan.groups[group_idx];
 	auto &g = lstate.groups[group_idx];
 
@@ -1228,11 +1228,50 @@ auto res = g.reader->Scan(context, *g.scan_state, *g.chunk);
 			idx_t src_offset = seg.flow_off + (copy_from - seg.win_start) - rg_off;
 			idx_t dst_offset = output_offset + placed + (copy_from - w_start);
 			for (idx_t i = 0; i < g.read_cols.size(); i++) {
+				auto &src_vec = g.chunk->data[i];
+				auto &dst_vec = output.data[g.out_positions[i]];
+				// Fast path: FLAT→FLAT full-vector memcpy for fixed-size
+				// numeric types. Only when can_fast_copy (non-scratch path,
+				// no filters/projection_ids) and the entire vector maps to
+				// output position 0 with no offset/shrink.
+				// VectorOperations::Copy uses a per-element loop with
+				// sel.get_index() indirection — memcpy is ~4× faster.
+				if (can_fast_copy &&
+				    src_vec.GetVectorType() == VectorType::FLAT_VECTOR &&
+				    dst_vec.GetVectorType() == VectorType::FLAT_VECTOR &&
+				    src_offset == 0 && copy_count == chunk_rows &&
+				    dst_offset == 0) {
+					auto &src_type = src_vec.GetType();
+					auto phys = src_type.InternalType();
+					idx_t type_size = GetTypeIdSize(phys);
+					// Exclude VARCHAR (string_t has pointer members into
+					// g.chunk's buffer that dangle after next Scan()).
+					// Exclude BOOL, nested types, and types > 8 bytes.
+					if (type_size > 0 && type_size <= 8 &&
+					    src_type.id() != LogicalTypeId::VARCHAR &&
+					    phys != PhysicalType::BOOL) {
+						auto *src_data = FlatVector::GetData(src_vec);
+						auto *dst_data = FlatVector::GetData(dst_vec);
+						if (src_data && dst_data) {
+							memcpy(dst_data, src_data, copy_count * type_size);
+							auto &src_mask = FlatVector::Validity(src_vec);
+							if (src_mask.IsMaskSet()) {
+								auto &dst_mask = FlatVector::Validity(dst_vec);
+								for (idx_t r = 0; r < copy_count; r++) {
+									if (!src_mask.RowIsValidUnsafe(r)) {
+										dst_mask.SetInvalidUnsafe(r);
+									}
+								}
+							}
+							continue;
+						}
+					}
+				}
 				// NOTE: the 5-arg VectorOperations::Copy signature is
 				// (source, target, source_count, source_offset, target_offset)
 				// where source_count is the EXCLUSIVE end index and the number
 				// of copied rows is source_count - source_offset.
-				VectorOperations::Copy(g.chunk->data[i], output.data[g.out_positions[i]], src_offset + copy_count,
+				VectorOperations::Copy(src_vec, dst_vec, src_offset + copy_count,
 				                       src_offset, dst_offset);
 			}
 			// Replicate to qualified-alias output positions.
@@ -1516,7 +1555,7 @@ void AlignedScanFunction(ClientContext &context, TableFunctionInput &data, DataC
 			}
 			const auto &parts = gstate.kept_parts[gi].empty() ? bind.plan.groups[gi].parts : gstate.kept_parts[gi];
 			ScanGroupWindow(context, bind, gi, lstate, chunk_start, chunk_rows, target, 0, pos_map, parts,
-			                gstate.group_filters[gi]);
+			                gstate.group_filters[gi], !use_scratch);
 		}
 
 		// Fill the virtual partition column (e.g. "year" = "2024") from the
