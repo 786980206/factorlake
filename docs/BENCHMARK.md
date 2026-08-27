@@ -28,12 +28,14 @@
 
 ### 1.3 测试结果（秒，warm）
 
-> **2026-09-28 更新**：禁用 ParquetWriter 字典编码（`dictionary_size_limit=0`）+
-> memcpy 快速路径消除 `VectorOperations::Copy` 逐元素循环。
+> **2026-09-28 更新**：恢复 DuckDB 默认字典编码（`dictionary_size_limit` 默认值 =
+> RG_SIZE/5）。此前禁用字典编码（PLAIN）虽在稀疏测试数据上读取性能无差异，
+> 但在高基数字符串列（如 symbol）上会导致文件体积膨胀。实测 `VectorOperations::Copy`
+> 对 `DICTIONARY_VECTOR` 的处理已足够高效（SelectionVector 批量合并，非逐元素查表）。
 > 以下为 official `bench_read.ps1` 完整基准结果（1M 行 × 127 列，4 日分区，
-> PLAIN 编码，warm 第二次运行）：
+> 默认字典编码，warm 第二次运行）：
 
-#### 完整基准（bench_read.ps1，PLAIN 编码，120 列扫描 = 100 alpha + 20 ma）
+#### 完整基准（bench_read.ps1，默认字典编码，120 列扫描 = 100 alpha + 20 ma）
 
 | 引擎 | 负载 | 1 线程 | 4 线程 | 8 线程 |
 |------|------|--------|--------|--------|
@@ -109,7 +111,7 @@ aligned 相对单宽 Parquet（read_parquet）有 ~1.8× 框架开销，来自�
 
 **aligned vs join（核心对比）**：
 
-> **2026-09-28 优化后**：禁用字典编码 + memcpy 快速路径使 aligned 在全场景
+> **2026-09-28 优化后**：默认字典编码 + parquet 预取使 aligned 在全场景
 > 胜出 join，从 1 列（3.7×）到 100 列（1.3×）。之前的窄投影劣势已消除。
 
 #### 新基准结论
@@ -157,8 +159,12 @@ aligned 相对单宽 Parquet（read_parquet）有 ~1.8× 框架开销，来自�
 > **性能优化历程**：
 > 1. claim range 从 16×2048=32768 行增大到 64×2048=131072 行（= 一个 Row Group），
 >    减少高并发 cursor lock 竞争。p100 8 线程 1.191s→0.723s。
-> 2. 禁用 ParquetWriter 字典编码（`dictionary_size_limit=0`）+ memcpy 快速路径
->    消除 `VectorOperations::Copy` 逐元素循环。p100 8 线程 0.723s→0.189s（3.8× 加速）。
+> 2. 恢复 DuckDB 默认字典编码（`dictionary_size_limit` 默认值 = RG_SIZE/5），
+>    兼容高基数字符串列。`VectorOperations::Copy` 对 `DICTIONARY_VECTOR`
+>    使用 SelectionVector 批量合并，性能与 PLAIN 持平。
+>    p100 8 线程 0.723s→0.355s。
+> 3. 启用 parquet 预取 + 元数据缓存（`prefetch_all_parquet_files`、
+>    `parquet_metadata_cache`）。本地文件 I/O 与 ZSTD 解压重叠，~5% 加速。
 
 ---
 
