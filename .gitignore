@@ -45,3 +45,6 @@ bench_test_pcd/
 bench_test_pcm/
 
 bench_copy_data/
+
+# Release build artifacts (23MB binary, rebuilt from source)
+release/

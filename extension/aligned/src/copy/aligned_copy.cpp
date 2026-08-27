@@ -1285,6 +1285,16 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 
 	bind_data->is_timestamp =
 	    bind_data->input_types[bind_data->partition_col_pos].id() == LogicalTypeId::TIMESTAMP;
+	// If the partition column is neither DATE nor TIMESTAMP (e.g. VARCHAR
+	// from polars/Arrow), we need to cast it to DATE for partition evaluation.
+	auto part_type_id = bind_data->input_types[bind_data->partition_col_pos].id();
+	bind_data->part_needs_cast = (part_type_id != LogicalTypeId::DATE &&
+	                              part_type_id != LogicalTypeId::TIMESTAMP);
+	if (bind_data->part_needs_cast) {
+		// Determine target type: if any existing part's schema has DATE, use DATE;
+		// otherwise default to DATE (most common case for daily/monthly partitions).
+		bind_data->is_timestamp = false; // VARCHAR → DATE, not TIMESTAMP
+	}
 
 	// Check if this group's output schema includes symbol and date columns.
 	// If not (non-index group), we need hidden sort-key columns appended to
@@ -1302,7 +1312,13 @@ static unique_ptr<FunctionData> AlignedCopyBind(ClientContext &context, CopyFunc
 		if (bind_data->hidden_symbol_input_col < bind_data->input_types.size() &&
 		    bind_data->hidden_date_input_col < bind_data->input_types.size()) {
 			bind_data->hidden_symbol_type = bind_data->input_types[bind_data->hidden_symbol_input_col];
-			bind_data->hidden_date_type = bind_data->input_types[bind_data->hidden_date_input_col];
+			// Hidden date type should always be DATE or TIMESTAMP (not VARCHAR),
+			// even when the input partition column needs casting.
+			if (bind_data->part_needs_cast) {
+				bind_data->hidden_date_type = LogicalType::DATE;
+			} else {
+				bind_data->hidden_date_type = bind_data->input_types[bind_data->hidden_date_input_col];
+			}
 		} else {
 			bind_data->needs_hidden_sort_keys = false;
 		}
@@ -1428,8 +1444,18 @@ static void AlignedCopySink(ExecutionContext &context, FunctionData &bind_data_p
 
 	const auto count = input.size();
 	auto &part_vec = input.data[bind_data.partition_col_pos];
+
+	// If the partition column type is not DATE/TIMESTAMP (e.g. VARCHAR),
+	// cast it to DATE so we can read the int32 values for partition evaluation.
+	Vector part_converted(LogicalType::DATE, count);
+	const Vector *part_vec_ptr = &part_vec;
+	if (bind_data.part_needs_cast) {
+		VectorOperations::Cast(context.client, part_vec, part_converted, count);
+		part_vec_ptr = &part_converted;
+	}
+
 	UnifiedVectorFormat part_fmt;
-	part_vec.ToUnifiedFormat(count, part_fmt);
+	const_cast<Vector &>(*part_vec_ptr).ToUnifiedFormat(count, part_fmt);
 
 	// Extract all date values into a contiguous array for fast scanning.
 	auto *raw_data = bind_data.is_timestamp

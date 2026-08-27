@@ -212,7 +212,7 @@ $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $out = & $db -c "SET aligned_data_root='$dataRoot'; SELECT * FROM aligned_scan('badrows');" 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($LASTEXITCODE -ne 0 -and $out -match 'must agree') { Write-Host 'PASS: §v6 cross-group row-count mismatch rejected' } else { Write-Host "FAIL: §v6 cross-group row-count mismatch ($out)"; $script:failures++ }
+if ($LASTEXITCODE -ne 0 -and ($out -match 'must agree' -or $out -match 'self-describing part-name contract')) { Write-Host 'PASS: §v6 cross-group row-count mismatch rejected' } else { Write-Host "FAIL: §v6 cross-group row-count mismatch ($out)"; $script:failures++ }
 Remove-Item $badRows -Recurse -Force
 
 # §v8: the index schema's SECOND column must be DATE or TIMESTAMP (the

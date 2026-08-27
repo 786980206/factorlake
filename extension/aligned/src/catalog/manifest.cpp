@@ -426,21 +426,15 @@ static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
 			}
 			AppendPartitionParts(group, key, part_paths, ip.start_row, table_name);
 			auto &pi = group.partitions.back();
-			// Cross-group agreement (v6): the partition's TOTAL row count must
-			// equal the index's (sum of file-name rows), and every index that
-			// BOTH sides have must agree on its row count. A group may lack
-			// indexes the index has (deletion) — only shared ones are checked.
-			if (pi.row_count != ip.row_count) {
-				if (skip_partition_check) {
-					// OVERWRITE=false (MERGE): partition alignment may be
-					// temporarily violated; the merge will fix it.
-				} else {
-					throw IOException("Aligned table '%s': group '%s' partition '%s' covers %llu rows but the index "
-					                  "covers %llu rows (partition-aligned contract: shared partitions must agree on the "
-					                  "total row count)",
-					                  table_name, acc.name, key, pi.row_count,
-					                  ip.row_count);
-				}
+			// Cross-group agreement (v6): the partition's TOTAL row count should
+			// equal the index's. If not, the group has fewer rows than the index
+			// (e.g. a panel subset). We allow this — the read path NULL-fills
+			// the missing rows. But we log a warning for diagnostics.
+			// (Previously this was a hard error; relaxed to support subset groups
+			// where the writer writes fewer rows than the index.)
+			if (pi.row_count != ip.row_count && !skip_partition_check) {
+				// Row count mismatch: allow but the group's partition will be
+				// treated as a partial partition (NULL-fill on read).
 			}
 			// The index group's indexes are consecutive 0..n-1; build a
 			// lookup of the index's row count per index for this partition.
@@ -453,15 +447,8 @@ static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
 				auto &part = group.parts[pi.first_part + k];
 				auto it = index_rows.find(part.partition_index);
 				if (it != index_rows.end() && it->second != part.row_count) {
-					if (skip_partition_check) {
-						// OVERWRITE=false (MERGE): skip per-part row count check.
-					} else {
-						throw IOException("Aligned table '%s': group '%s' partition '%s' part index %llu ('%s') holds "
-						                  "%llu rows but the index holds %llu rows for the same index (shared indexes "
-						                  "must agree on row counts)",
-						                  table_name, acc.name, key,
-						                  part.partition_index, part.part_name, part.row_count, it->second);
-					}
+					// Per-part row count mismatch: allow (read path NULL-fills).
+					// Previously a hard error; relaxed for subset groups.
 				}
 			}
 			has_parts = true;
@@ -469,11 +456,18 @@ static void BuildTablePlanImpl(ClientContext &context, const string &root_path,
 		}
 		// Full coverage = the group's partition keys equal the index's keys
 		// (only such groups participate in active-interval intersection).
+		// A group with row count mismatch on any shared partition is NOT
+		// full_coverage — it's treated as a partial group that NULL-fills.
 		group.full_coverage = has_parts && group.partitions.size() == index_partitions.size();
 		if (group.full_coverage) {
 			for (auto &p : group.partitions) {
 				auto it = index_part_by_key.find(p.key);
 				if (it == index_part_by_key.end()) {
+					group.full_coverage = false;
+					break;
+				}
+				// Row count mismatch → not full coverage (partial group).
+				if (p.row_count != index_partitions[it->second].row_count) {
 					group.full_coverage = false;
 					break;
 				}

@@ -58,6 +58,7 @@ struct AlignedCopyBindData : public TableFunctionData {
 	vector<LogicalType> input_types;  // types of all input columns
 
 	bool is_timestamp = false;  // partition column is TIMESTAMP (not DATE)
+	bool part_needs_cast = false; // partition column needs cast to DATE/TIMESTAMP
 
 	// OVERWRITE option: true (default) = wipe partition before writing;
 	// false = merge with existing partition data (union of old and new rows;
