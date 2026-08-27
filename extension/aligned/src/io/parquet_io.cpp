@@ -19,7 +19,7 @@ unique_ptr<ParquetWriter> CreateParquetWriter(ClientContext &context, FileSystem
 	return make_uniq<ParquetWriter>(
 	    context, fs, path, col_types, col_names,
 	    duckdb_parquet::CompressionCodec::ZSTD, ChildFieldIDs(), ShreddingType(),
-	    vector<pair<string, string>>(), nullptr, optional_idx(0),
+	    vector<pair<string, string>>(), nullptr, optional_idx(),
 	    0ULL /* string_dictionary_page_size_limit */, 1 /* enable_bloom_filters */,
 	    0.01, 1 /* ZSTD compression level (1 = fast) */, ParquetVersion::V1, GeoParquetVersion::V1);
 }
