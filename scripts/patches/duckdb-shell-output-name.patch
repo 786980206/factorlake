@@ -1,0 +1,18 @@
+diff --git a/tools/shell/CMakeLists.txt b/tools/shell/CMakeLists.txt
+index 0d26359..4a6dfbe 100644
+--- a/tools/shell/CMakeLists.txt
++++ b/tools/shell/CMakeLists.txt
+@@ -80,7 +80,12 @@ if(WIN32 AND NOT MINGW)
+   target_sources(shell PRIVATE rc/duckdb.rc)
+ endif()
+ 
+-set_target_properties(shell PROPERTIES OUTPUT_NAME duckdb)
++# Local FactorLake modification: allow overriding the shell binary name
++# (workaround for a zombie duckdb.exe holding a lock on the output file).
++if(NOT DEFINED DUCKDB_SHELL_OUTPUT_NAME)
++  set(DUCKDB_SHELL_OUTPUT_NAME duckdb)
++endif()
++set_target_properties(shell PROPERTIES OUTPUT_NAME ${DUCKDB_SHELL_OUTPUT_NAME})
+ set_target_properties(shell PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+                                        ${PROJECT_BINARY_DIR})
+ 

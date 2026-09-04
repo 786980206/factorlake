@@ -334,7 +334,11 @@ extension/aligned/src/
 ## 11. 环境与构建
 
 ### Windows（scoop + MSVC）
-- DuckDB v1.5.5 源码 vendored 在 `duckdb/`（gitignored）
+- DuckDB v1.5.5 是 git submodule（`duckdb/`，pin 上游 commit，无 fork）
+- 子模块带一个本地补丁（`tools/shell/CMakeLists.txt` 的 `DUCKDB_SHELL_OUTPUT_NAME`
+  override，用于产出 `duckdb_al3.exe`）。补丁不提交进子模块（远程是上游仓库），
+  固化在 `scripts/patches/duckdb-shell-output-name.patch`，`build.ps1` 幂等自动应用
+- 配置：`cmake -S duckdb -B duckdb\build -G Ninja -DDUCKDB_EXTENSION_CONFIGS=scripts/aligned_extension_config.cmake -DDUCKDB_SHELL_OUTPUT_NAME=duckdb_al3`
 - 构建整体：`.\scripts\build.ps1`（vcvars64 + ninja）
 - 构建插件：`.\scripts\build_extension.ps1 -Copy`（Release + `-DEXTENSION_STATIC_BUILD=1`）
 - 运行测试：`.\scripts\run_tests.ps1`
@@ -447,7 +451,9 @@ extension/aligned/src/
 - **改共享头文件（结构体布局）后必须强制全量重编**：ninja 增量会漏重编依赖该
   头的 obj → 新旧布局混链 → 隐蔽崩溃。
 - **`git stash` 会把子模块本地补丁也 stash 进子模块自己的 stash 队列**：主仓
-  stash list 看不到。避免在含子模块补丁的仓库用 `git stash`。
+  stash list 看不到。避免在含子模块补丁的仓库用 `git stash`。子模块补丁已固化
+  在 `scripts/patches/`（丢了对 diff 重打即可）；应用补丁后子模块显示 dirty 是
+  预期状态，`git -C duckdb checkout -- .` 可恢复干净，重跑 `build.ps1` 会重新应用。
 
 - **`ColumnDataCollection` 不能按值返回**：`ColumnDataCollection` 含
   `vector<ColumnDataCopyFunction>` 成员，`ColumnDataCopyFunction` 在头文件中仅

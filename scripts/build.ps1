@@ -13,8 +13,32 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $buildDir = Join-Path $repo 'duckdb\build'
 
+# The submodule patch enables DUCKDB_SHELL_OUTPUT_NAME (duckdb_al3.exe target);
+# ninja re-runs cmake when it sees the changed CMakeLists.txt.
+$patch = Join-Path $PSScriptRoot 'patches\duckdb-shell-output-name.patch'
+Push-Location (Join-Path $repo 'duckdb')
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'  # git stderr must not be terminating under PS 5.1
+try {
+    git apply --check $patch 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        git apply $patch
+        if ($LASTEXITCODE -ne 0) { throw "Failed to apply $patch" }
+        Write-Host "Applied submodule patch: duckdb-shell-output-name.patch"
+    } else {
+        git apply --check --reverse $patch 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "$patch no longer applies to the duckdb submodule (upstream changed?). Regenerate: git -C duckdb diff > $patch"
+        }
+        Write-Host "Submodule patch already applied"
+    }
+} finally {
+    $ErrorActionPreference = $prevEap
+    Pop-Location
+}
+
 if (-not (Test-Path (Join-Path $buildDir 'build.ninja'))) {
-    throw "Build directory not configured: $buildDir`nRun cmake configuration first (see AGENTS.md §11)."
+    throw "Build directory not configured: $buildDir`nRun: cmake -S duckdb -B duckdb\build -G Ninja -DDUCKDB_EXTENSION_CONFIGS=$(Join-Path $repo 'scripts\aligned_extension_config.cmake') -DDUCKDB_SHELL_OUTPUT_NAME=duckdb_al3`n(DuckDB defaults to -DCMAKE_BUILD_TYPE=Debug.)`nThen create $buildDir\build_al3.bat: call vcvars64.bat, then ninja."
 }
 
 if ($Clean) {
