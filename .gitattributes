@@ -1,0 +1,2 @@
+# Keep patch files LF so `git apply` never hits CRLF mismatches
+*.patch text eol=lf
